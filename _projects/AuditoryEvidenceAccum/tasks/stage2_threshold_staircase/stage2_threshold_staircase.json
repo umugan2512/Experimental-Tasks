@@ -1,0 +1,11 @@
+{
+    "__CREATED-ON__": "2026-08-11 00:00:00.000000",
+    "__DEF-TEXT__": "This file contains information about a PyBpod protocol.",
+    "__DEF-URL__": "http://pybpod.readthedocs.org",
+    "__SOFTWARE__": "PyBpod GUI API v1.8.2",
+    "__UPDATED-ON__": "2026-08-11 00:00:00.000000",
+    "__UUID4__": "c7a4b3f2-9d5e-4a0b-c3f7-2b8d0e4a6f93",
+    "commands": [],
+    "name": "stage2_threshold_staircase",
+    "trigger-softcodes": false
+}

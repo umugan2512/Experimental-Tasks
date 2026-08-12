@@ -1,0 +1,11 @@
+{
+    "__CREATED-ON__": "2026-08-11 15:44:42.205820",
+    "__DEF-TEXT__": "This file contains information about a PyBpod protocol.",
+    "__DEF-URL__": "http://pybpod.readthedocs.org",
+    "__SOFTWARE__": "PyBpod GUI API v1.8.2",
+    "__UPDATED-ON__": "2026-08-11 15:44:42.205820",
+    "__UUID4__": "9fe1c972-aacc-43e4-a9a1-e5490c1fe713",
+    "commands": [],
+    "name": "_wheel_shaping_shared",
+    "trigger-softcodes": false
+}
