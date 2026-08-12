@@ -1,0 +1,9 @@
+_projects/docs_local/
+_projects/AuditoryEvidenceAccum/experiments/
+_projects/AuditoryEvidenceAccum/subjects/
+_projects/AuditoryEvidenceAccum/boards/
+_projects/AuditoryEvidenceAccum/users/
+_projects/AuditoryEvidenceAccum/*.json
+_projects/**/session_startup_checklist.xlsx
+_projects/Tests/experiments/
+**/__pycache__/
