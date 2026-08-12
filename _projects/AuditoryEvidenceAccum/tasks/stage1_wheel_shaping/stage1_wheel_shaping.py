@@ -54,12 +54,26 @@ sys.path.insert(0, os.path.join(_TASK_DIR, '..', '_wheel_shaping_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 import staircase
 import session_state
+import session_struct_export
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 from dot_display import DotDisplay
 
 from pybpodapi.protocol import Bpod, StateMachine
+
+
+def _export_session_struct(csv_path):
+    """ Every VAR_* constant this run used, harvested automatically -- stays complete as new
+    parameters get added later, no hand-maintained list to fall out of sync. Wrapped in try/except
+    so an export hiccup (e.g. a scipy/disk issue) never blocks session teardown -- the animal's run
+    is already fully logged in the CSV regardless of whether this convenience export succeeds. """
+    task_params = {k: v for k, v in globals().items() if k.startswith('VAR_')}
+    try:
+        mat_path, json_path = session_struct_export.export_session_struct(csv_path, task_params)
+        print("Session struct exported: {0} / {1}".format(mat_path, json_path), flush=True)
+    except Exception as err:
+        print("WARNING: session struct export failed: {0}".format(err), flush=True)
 
 # --- who this session is for -----------------------------------------------------------------------
 
@@ -288,7 +302,10 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             print("Bpod Kill received -- ending session.", flush=True)
             dot.close()
             rotary.close()
+            csv_path = my_bpod.session._path   # grab before close() -- close() deletes the
+                                                # Session object that holds it
             my_bpod.close()
+            _export_session_struct(csv_path)
             sys.exit(0)
 
         if not decision_result.get('ran', False):
@@ -374,7 +391,10 @@ print("Threshold now {0:.2f}deg ({1:.0%} of final){2}".format(
 
 dot.close()
 rotary.close()
+csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
+                                    # that holds it
 my_bpod.close()
+_export_session_struct(csv_path)
 
 print("Close the plot window to exit.", flush=True)
 plt.ioff()
