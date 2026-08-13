@@ -12,6 +12,7 @@ doesn't need its own copy.
 """
 import ast
 import csv
+import datetime
 import math
 
 # --- per-protocol state/event meaning -- extend as new protocols (Stage 3+) are built ---------------
@@ -105,9 +106,12 @@ def parse_subject_name(raw):
 # --- per-trial classification ------------------------------------------------------------------
 
 def classify_trial(trial, config):
-    """ Returns (outcome, side, reward_duration_s). outcome in {'rewarded', 'withheld',
+    """ Returns (outcome, side, reward_duration_s, consumed). outcome in {'rewarded', 'withheld',
     'no_movement', 'unknown'}; side in {'L', 'R', None}; reward_duration_s is that trial's own
-    logged Reward-state duration if rewarded, else None. """
+    logged Reward-state duration if rewarded, else None. consumed is True/False for a rewarded
+    trial (whether a Port1In lick was detected at/after that trial's own reward-delivery start
+    time -- no dedicated Consumption-window state exists in Stage 1/2, Port1In is a raw event
+    regardless of which state is active), None for a non-rewarded trial. """
     states = trial['states']
     events = trial['events']
 
@@ -144,7 +148,14 @@ def classify_trial(trial, config):
             side = 'R'
 
     reward_duration = states[rewarded_name][2] if rewarded_name else None
-    return outcome, side, reward_duration
+
+    consumed = None
+    if rewarded_name:
+        reward_start = states[rewarded_name][0]
+        lick_times = events.get('Port1In', [])
+        consumed = any(t >= reward_start for t in lick_times) if not _isnan(reward_start) else False
+
+    return outcome, side, reward_duration, consumed
 
 
 def _val_float(vals_dicts, key):
@@ -181,6 +192,56 @@ def find_val_forward(trials, session_vals, key):
         if value is not None:
             return value
     return _val_float([session_vals], key)
+
+
+def find_val_str_backward(trials, session_vals, key):
+    """ Same backward search as find_val_backward, but returns the raw string (no float parsing)
+    -- for a VAL whose value is genuinely text, e.g. SESSION_END_REASON. """
+    for trial in reversed(trials):
+        if key in trial['vals']:
+            return trial['vals'][key]
+    return session_vals.get(key)
+
+
+def sum_val(trials, key):
+    """ Sums a per-trial numeric VAL across every trial in the given (already real_trials()
+    -filtered) list -- e.g. QUIESCENCE_BREAKS -> total quiescence-hold breaks for the session.
+    Trials missing the VAL contribute 0, not None -- a session where nothing was ever registered
+    for this key sums to a plain 0, matching every other count in this module. """
+    total = 0
+    for trial in trials:
+        value = _val_float([trial['vals']], key)
+        if value is not None:
+            total += value
+    return total
+
+
+def parse_datetime(s):
+    """ Bpod's own INFO-row timestamps (SESSION-STARTED, SESSION-ENDED) are Python
+    datetime.now()'s default str() format -- microseconds are present unless they happen to be
+    exactly zero, in which case str() omits them entirely, so both forms need trying. """
+    if not s:
+        return None
+    for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def session_end_datetime(info, started_dt, duration_s):
+    """ Absolute session-end time: prefers the native SESSION-ENDED INFO row (written by
+    Bpod.close() -- present for every cleanly-terminated session, i.e. completed, Stopped, or
+    Killed). Falls back to started_dt + duration_s (the crash case -- nothing wrote a clean end
+    record, so this is only an estimate based on the last logged event time). Returns None if
+    neither is available (no started_dt and no SESSION-ENDED). """
+    ended = parse_datetime(info.get('SESSION-ENDED'))
+    if ended is not None:
+        return ended
+    if started_dt is not None and duration_s is not None:
+        return started_dt + datetime.timedelta(seconds=duration_s)
+    return None
 
 
 def real_trials(trials):

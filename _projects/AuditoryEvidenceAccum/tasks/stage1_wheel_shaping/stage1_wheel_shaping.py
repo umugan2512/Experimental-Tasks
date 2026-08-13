@@ -109,6 +109,11 @@ VAR_TRIAL_COUNT_ADVANCE = 200       # doc: ">200 completed trials/session on two
                                      # sessions"
 
 VAR_REWARD_DURATION = 0.1
+VAR_REWARD_UL = 4.0                 # uncalibrated placeholder -- no valve uL calibration exists
+                                     # anywhere in this codebase yet; update once real calibration
+                                     # data ties valve-open time to delivered volume (same
+                                     # "uncalibrated placeholder" convention as VAR_DEG_TO_PX_GAIN
+                                     # elsewhere)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1    # J1 (training_protocol.md SS1.5) -- runs at its FINAL value
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes (doc: "the LED->dot and
@@ -159,6 +164,7 @@ rotary.enable_evt_transmission()
 neg_event, pos_event = event_names[0], event_names[1]
 
 my_bpod.register_value('THRESHOLD_DEG', cur_threshold_deg)
+my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -208,6 +214,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         rotary.enable_evt_transmission()
 
         runner.register('TRIAL_START', trial_start_t)
+        runner.register('QUIESCENCE_BREAKS', n_breaks)
         dot.clear()
         dot.pump()
 
@@ -359,6 +366,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         sys.stdout.flush()
         raise
 else:
+    runner.register('SESSION_END_REASON', 'completed')
     print("Done: reached VAR_MAX_TRIALS ({0})".format(VAR_MAX_TRIALS), flush=True)
 
 # --- session-end bookkeeping: advancement gate + gain decay + threshold growth ----------------------

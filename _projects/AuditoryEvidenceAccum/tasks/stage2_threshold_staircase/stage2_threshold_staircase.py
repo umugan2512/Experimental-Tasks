@@ -97,6 +97,11 @@ VAR_THRESHOLD_FINAL_DEG = 35        # matches Stage 1 / this project's establish
 VAR_TRIAL_COUNT_ADVANCE = 200
 
 VAR_REWARD_DURATION = 0.1
+VAR_REWARD_UL = 4.0                 # uncalibrated placeholder -- no valve uL calibration exists
+                                     # anywhere in this codebase yet; update once real calibration
+                                     # data ties valve-open time to delivered volume (same
+                                     # "uncalibrated placeholder" convention as VAR_DEG_TO_PX_GAIN
+                                     # elsewhere)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1    # J1/J2 unchanged from Stage 1 -- never change during training
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2
@@ -147,6 +152,8 @@ print("Connected to Bpod on {0}".format(my_bpod.serial_port), flush=True)
 
 rotary, rotary_bpod_module = rotary_setup.connect_rotary(my_bpod, usb_port=VAR_ROTARY_USB_PORT)
 reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(rotary_bpod_module)
+
+my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -206,6 +213,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         neg_event, pos_event = event_names[0], event_names[1]
 
         runner.register('TRIAL_START', trial_start_t)
+        runner.register('QUIESCENCE_BREAKS', n_breaks)
         runner.register('THRESHOLD_DEG', cur_threshold_deg)
         dot.clear()
         dot.pump()
@@ -380,6 +388,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         sys.stdout.flush()
         raise
 else:
+    runner.register('SESSION_END_REASON', 'completed')
     print("Done: reached VAR_MAX_TRIALS ({0})".format(VAR_MAX_TRIALS), flush=True)
 
 # --- session-end bookkeeping: staircase/ITI/spout persistence + advancement gates -------------------

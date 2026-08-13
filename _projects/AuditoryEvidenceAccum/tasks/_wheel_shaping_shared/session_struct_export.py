@@ -74,3 +74,42 @@ def export_session_struct(csv_path, task_params):
                                                         # fine by json's own allow_nan=True default
 
     return mat_path, json_path
+
+
+def _load_member(csv_path):
+    """ Prefers that session's own already-exported <csv>_struct.json (has task_params -- only
+    ever captured live from the running task's own globals(), not recoverable by re-parsing the
+    CSV). Falls back to parsing the raw CSV directly if no struct was ever exported for it (the
+    crash case) or the JSON is unreadable for any reason. """
+    json_path = os.path.splitext(csv_path)[0] + '_struct.json'
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            return {'info': data.get('info', {}), 'task_params': data.get('task_params', {}),
+                    'trials': data.get('trials', [])}
+        except (ValueError, OSError):
+            pass   # fall through to the raw-CSV fallback below
+    info, _session_vals, trials = session_csv_parser.parse_session_csv(csv_path)
+    return {'info': info, 'task_params': None, 'trials': trials}
+
+
+def merge_session_structs(member_csv_paths, out_base):
+    """ Combines multiple raw sessions (a Stop/Kill/crash-interrupted bout and its restart(s), per
+    build_training_log.py's grouping) into one struct: 'trials' is every member's trials
+    concatenated in chronological order (the "just give me one continuous trial list" view);
+    'members' keeps each sub-session's own info/task_params traceable rather than silently
+    collapsing them (they may differ slightly between a Stop and its restart). Writes
+    <out_base>_combined_struct.mat/.json. Returns (mat_path, json_path). """
+    members = [_load_member(p) for p in member_csv_paths]
+    all_trials = [trial for member in members for trial in member['trials']]
+    struct = {'members': members, 'trials': all_trials}
+
+    mat_path = out_base + '_combined_struct.mat'
+    json_path = out_base + '_combined_struct.json'
+
+    scipy.io.savemat(mat_path, _matlab_safe(struct), long_field_names=True)
+    with open(json_path, 'w') as f:
+        json.dump(struct, f, indent=2, default=str)
+
+    return mat_path, json_path

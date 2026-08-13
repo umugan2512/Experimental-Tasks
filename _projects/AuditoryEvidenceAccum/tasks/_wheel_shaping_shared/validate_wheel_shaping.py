@@ -8,17 +8,26 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   3. DirectionRatioTracker: rolling window, band detection, withhold logic
   4. StageState: save/load round-tripping, defaults on first run, merge-over-defaults
   5. stage2_simple_gates_met(): the three simple Stage 2 advancement gates
+  6. Session merging: classify_trial()'s consumed-reward classification, group_sessions()'s
+     merge-eligible-ending/same-protocol/gap-threshold rule, combine_group()'s field combination,
+     and the stage-ordering helpers
 
 Run with the pybpod-environment interpreter:
     /c/Users/2P-Behav/.conda/envs/pybpod-environment/python.exe validate_wheel_shaping.py
 """
+import datetime
 import os
 import shutil
+import sys
 import tempfile
 
 import staircase
 import session_state
+import session_csv_parser
 from direction_tracker import DirectionRatioTracker
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'records'))
+import build_training_log   # noqa: E402 -- same-project import (_wheel_shaping_shared/ -> records/)
 
 # ==================================================================================================
 # Section 1: ThresholdStaircase
@@ -236,9 +245,159 @@ section5_pass = all_met and trial_count_fails is False and iti_fails is False an
 print("Section 5 result: {0}".format("PASS" if section5_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
+# Section 6: Session merging -- classify_trial() consumed, group_sessions(), combine_group(),
+# stage-ordering helpers
+# ==================================================================================================
 
 print()
 print("=" * 100)
-overall_pass = section1_pass and section2_pass and section3_pass and section4_pass and section5_pass
+print("Section 6: Session merging")
+print("=" * 100)
+
+
+def _trial(states, events, vals=None):
+    return {'states': states, 'events': events, 'vals': vals or {}}
+
+
+config1 = session_csv_parser.PROTOCOL_CONFIG['stage1_wheel_shaping']
+
+consumed_trial = _trial({'Reward': (1.0, 1.1, 0.1)}, {'Port1In': [1.05]})
+outcome, _side, _dur, consumed = session_csv_parser.classify_trial(consumed_trial, config1)
+consumed_true = outcome == 'rewarded' and consumed is True
+print("  lick AFTER reward delivery -> consumed=True: {0}".format(consumed_true))
+
+not_consumed_trial = _trial({'Reward': (1.0, 1.1, 0.1)}, {'Port1In': [0.5]})
+_o, _s, _d, consumed2 = session_csv_parser.classify_trial(not_consumed_trial, config1)
+consumed_false = consumed2 is False
+print("  lick only BEFORE reward delivery -> consumed=False: {0}".format(consumed_false))
+
+no_lick_trial = _trial({'Reward': (1.0, 1.1, 0.1)}, {})
+_o, _s, _d, consumed3 = session_csv_parser.classify_trial(no_lick_trial, config1)
+consumed_no_lick = consumed3 is False
+print("  no lick at all -> consumed=False: {0}".format(consumed_no_lick))
+
+not_rewarded_trial = _trial({'NoMovement': (1.0, 1.1, 0.1)}, {'Port1In': [1.05]})
+_o, _s, _d, consumed4 = session_csv_parser.classify_trial(not_rewarded_trial, config1)
+consumed_none_when_not_rewarded = consumed4 is None
+print("  non-rewarded trial -> consumed=None: {0}".format(consumed_none_when_not_rewarded))
+
+section6a_pass = (consumed_true and consumed_false and consumed_no_lick and
+                   consumed_none_when_not_rewarded)
+
+
+def _fake_session(started, protocol, session_end_reason, trial_count=10, duration_s=10.0,
+                   reward_ul=4.0, consumed_volume_ul=8.0, csv_path=None):
+    started_dt = datetime.datetime.strptime(started, '%Y-%m-%d %H:%M:%S')
+    ended_dt = started_dt + datetime.timedelta(seconds=duration_s)
+    return {
+        'session_started': started, 'started_dt': started_dt, 'ended_dt': ended_dt,
+        'session_end_reason': session_end_reason, 'subject': 'FixtureMouse', 'date': started[:10],
+        'protocol': protocol, 'trial_count': trial_count, 'session_duration_s': duration_s,
+        'reward_count': 2, 'consumed_reward_count': 2, 'withheld_count': 0,
+        'no_movement_count': 0, 'l_count': 3, 'r_count': 4, 'lick_count': 5, 'aborts': 1,
+        'reward_ul': reward_ul, 'consumed_volume_ul': consumed_volume_ul,
+        'threshold_start_deg': 7.0, 'threshold_end_deg': 7.0, 'threshold_final_deg': 35.0,
+        'iti_end_s': 0.5, 'gain_mult_end': 2.0, 'direction_ratio_end': None,
+        'simple_gates_met': None,
+        'session_csv_path': csv_path or (started.replace(' ', '_').replace(':', '') + '.csv'),
+        'session_struct_path': None,
+    }
+
+
+# (a) two same-protocol sessions 5 minutes apart, first NOT completed -> merge
+sA1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', None, duration_s=300)
+sA2 = _fake_session('2026-01-01 10:05:00', 'stage1_wheel_shaping', None, duration_s=300)
+groups_a = build_training_log.group_sessions('FixtureMouse', [sA1, sA2])
+merge_when_not_completed = len(groups_a) == 1 and len(groups_a[0]) == 2
+print("  (a) 5min gap, first NOT completed -> merges into 1 group: {0}".format(
+    merge_when_not_completed))
+
+# (b) same gap, but first session completed fully -> must NOT merge
+sB1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', 'completed', duration_s=300)
+sB2 = _fake_session('2026-01-01 10:05:00', 'stage1_wheel_shaping', None, duration_s=300)
+groups_b = build_training_log.group_sessions('FixtureMouse', [sB1, sB2])
+no_merge_when_completed = len(groups_b) == 2
+print("  (b) 5min gap, first completed fully -> stays 2 separate groups: {0}".format(
+    no_merge_when_completed))
+
+# (c) 90 minutes apart, first not completed -> gap too large, must NOT merge
+sC1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', None, duration_s=300)
+sC2 = _fake_session('2026-01-01 11:35:00', 'stage1_wheel_shaping', None, duration_s=300)
+groups_c = build_training_log.group_sessions('FixtureMouse', [sC1, sC2])
+no_merge_when_gap_too_large = len(groups_c) == 2
+print("  (c) 90min gap, first not completed -> gap too large, stays 2 separate groups: {0}".format(
+    no_merge_when_gap_too_large))
+
+# different protocol, otherwise mergeable -> must NOT merge
+sD1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', None, duration_s=300)
+sD2 = _fake_session('2026-01-01 10:05:00', 'stage2_threshold_staircase', None, duration_s=300)
+groups_d = build_training_log.group_sessions('FixtureMouse', [sD1, sD2])
+no_merge_across_protocols = len(groups_d) == 2
+print("  different protocol, 5min gap, first not completed -> stays 2 separate groups: {0}".format(
+    no_merge_across_protocols))
+
+# 'test' subject never merges, regardless of ending/gap
+groups_test = build_training_log.group_sessions('test', [sA1, sA2])
+test_subject_never_merges = len(groups_test) == 2
+print("  'test' subject, otherwise-mergeable pair -> never merges: {0}".format(
+    test_subject_never_merges))
+
+section6b_pass = (merge_when_not_completed and no_merge_when_completed and
+                   no_merge_when_gap_too_large and no_merge_across_protocols and
+                   test_subject_never_merges)
+
+# combine_group() field combination on the (a) merge
+combined = build_training_log.combine_group(groups_a[0])
+combined_trials = combined['trial_count'] == sA1['trial_count'] + sA2['trial_count']
+combined_duration = abs(combined['session_duration_s'] - (sA1['session_duration_s'] +
+                                                            sA2['session_duration_s'])) < 1e-9
+combined_volume = abs(combined['consumed_volume_ul'] - (sA1['consumed_volume_ul'] +
+                                                          sA2['consumed_volume_ul'])) < 1e-9
+combined_num_sessions = combined['num_sessions'] == 2
+combined_key = combined['session_started'] == '{0}; {1}'.format(sA1['session_started'],
+                                                                  sA2['session_started'])
+print("  combine_group(): trial_count summed: {0}".format(combined_trials))
+print("  combine_group(): session_duration_s summed (NOT wall-clock span, no gap double-counted): "
+      "{0}".format(combined_duration))
+print("  combine_group(): consumed_volume_ul summed: {0}".format(combined_volume))
+print("  combine_group(): num_sessions=2: {0}".format(combined_num_sessions))
+print("  combine_group(): session_started is '; '-joined member keys: {0}".format(combined_key))
+
+# a singleton group's Duration must be UNCHANGED from that one session's own value (regression
+# check -- combine_group() must not silently switch to a wall-clock-span calculation that would
+# include Bpod connection/setup overhead for the common unmerged case)
+singleton = build_training_log.combine_group([sA1])
+singleton_duration_unchanged = abs(singleton['session_duration_s'] -
+                                    sA1['session_duration_s']) < 1e-9
+print("  combine_group() on a singleton group: Duration unchanged from that session's own value: "
+      "{0}".format(singleton_duration_unchanged))
+
+section6c_pass = (combined_trials and combined_duration and combined_volume and
+                   combined_num_sessions and combined_key and singleton_duration_unchanged)
+
+# stage-ordering helpers
+stage_order = sorted(['stage2_threshold_staircase', 'stage1_wheel_shaping', 'stage10_future'],
+                      key=build_training_log._stage_sort_key)
+stage_order_correct = stage_order == ['stage1_wheel_shaping', 'stage2_threshold_staircase',
+                                       'stage10_future']
+stage_labels_correct = (build_training_log._stage_label('stage2_threshold_staircase') == 'Stage 2'
+                         and build_training_log._stage_label('some_other_protocol') ==
+                         'some_other_protocol')
+print("  stage ordering is numeric (1, 2, 10), not alphabetical (1, 10, 2): {0}".format(
+    stage_order_correct))
+print("  stage labels: 'Stage N' for numbered protocols, passthrough otherwise: {0}".format(
+    stage_labels_correct))
+
+section6d_pass = stage_order_correct and stage_labels_correct
+
+section6_pass = section6a_pass and section6b_pass and section6c_pass and section6d_pass
+print("Section 6 result: {0}".format("PASS" if section6_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
+                 section5_pass and section6_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
