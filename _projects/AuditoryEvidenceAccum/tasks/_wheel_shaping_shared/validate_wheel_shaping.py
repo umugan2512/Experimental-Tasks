@@ -340,7 +340,7 @@ def _fake_session(started, protocol, session_end_reason, trial_count=10, duratio
 # (a) two same-protocol sessions 5 minutes apart, first NOT completed -> merge
 sA1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', None, duration_s=300)
 sA2 = _fake_session('2026-01-01 10:05:00', 'stage1_wheel_shaping', None, duration_s=300)
-groups_a = build_training_log.group_sessions('FixtureMouse', [sA1, sA2])
+groups_a = build_training_log.group_sessions([sA1, sA2])
 merge_when_not_completed = len(groups_a) == 1 and len(groups_a[0]) == 2
 print("  (a) 5min gap, first NOT completed -> merges into 1 group: {0}".format(
     merge_when_not_completed))
@@ -348,7 +348,7 @@ print("  (a) 5min gap, first NOT completed -> merges into 1 group: {0}".format(
 # (b) same gap, but first session completed fully -> must NOT merge
 sB1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', 'completed', duration_s=300)
 sB2 = _fake_session('2026-01-01 10:05:00', 'stage1_wheel_shaping', None, duration_s=300)
-groups_b = build_training_log.group_sessions('FixtureMouse', [sB1, sB2])
+groups_b = build_training_log.group_sessions([sB1, sB2])
 no_merge_when_completed = len(groups_b) == 2
 print("  (b) 5min gap, first completed fully -> stays 2 separate groups: {0}".format(
     no_merge_when_completed))
@@ -356,7 +356,7 @@ print("  (b) 5min gap, first completed fully -> stays 2 separate groups: {0}".fo
 # (c) 90 minutes apart, first not completed -> gap too large, must NOT merge
 sC1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', None, duration_s=300)
 sC2 = _fake_session('2026-01-01 11:35:00', 'stage1_wheel_shaping', None, duration_s=300)
-groups_c = build_training_log.group_sessions('FixtureMouse', [sC1, sC2])
+groups_c = build_training_log.group_sessions([sC1, sC2])
 no_merge_when_gap_too_large = len(groups_c) == 2
 print("  (c) 90min gap, first not completed -> gap too large, stays 2 separate groups: {0}".format(
     no_merge_when_gap_too_large))
@@ -364,20 +364,16 @@ print("  (c) 90min gap, first not completed -> gap too large, stays 2 separate g
 # different protocol, otherwise mergeable -> must NOT merge
 sD1 = _fake_session('2026-01-01 10:00:00', 'stage1_wheel_shaping', None, duration_s=300)
 sD2 = _fake_session('2026-01-01 10:05:00', 'stage2_threshold_staircase', None, duration_s=300)
-groups_d = build_training_log.group_sessions('FixtureMouse', [sD1, sD2])
+groups_d = build_training_log.group_sessions([sD1, sD2])
 no_merge_across_protocols = len(groups_d) == 2
 print("  different protocol, 5min gap, first not completed -> stays 2 separate groups: {0}".format(
     no_merge_across_protocols))
 
-# 'test' subject never merges, regardless of ending/gap
-groups_test = build_training_log.group_sessions('test', [sA1, sA2])
-test_subject_never_merges = len(groups_test) == 2
-print("  'test' subject, otherwise-mergeable pair -> never merges: {0}".format(
-    test_subject_never_merges))
-
+# merging applies uniformly regardless of subject name -- confirmed via _fake_session's own
+# 'FixtureMouse' subject above; there's no more per-subject exclusion to special-case (removed
+# per explicit instruction: bench-test sessions merge exactly like a real animal's would now).
 section6b_pass = (merge_when_not_completed and no_merge_when_completed and
-                   no_merge_when_gap_too_large and no_merge_across_protocols and
-                   test_subject_never_merges)
+                   no_merge_when_gap_too_large and no_merge_across_protocols)
 
 # combine_group() field combination on the (a) merge
 combined = build_training_log.combine_group(groups_a[0])

@@ -9,8 +9,7 @@ hand-editable DOB/Sex/Strain/Baseline-weight header block.
 **Session merging**: a session that got Stopped, Killed, or crashed partway through and was
 restarted within an hour (same protocol) is combined into ONE row + one combined data-output file
 -- see `group_sessions()`. A session that reached its own natural end (`VAR_MAX_TRIALS`) is never
-merged with what follows. The `test` bench-testing subject is never merged, regardless of ending --
-kept exactly as one row per raw session, same as every other subject was before this feature.
+merged with what follows. Applies to every subject uniformly, including bench-test ones.
 
 **Update-in-place, not rebuild-from-scratch** -- this file is meant to be shared across multiple
 behavior-box computers via git (each box sees only its own local session data for its own
@@ -64,11 +63,6 @@ _SIMPLE_GATES_PROTOCOLS = ('stage2_threshold_staircase',)   # which protocols ha
 
 _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed' session's own end
                        # are combined into one row/struct with it (same protocol only)
-_TEST_SUBJECT = 'test'   # excluded from merging by default (see _MERGE_TEST_SUBJECT below) -- the
-                          # bench-test subject normally stays exactly one row per raw session
-_MERGE_TEST_SUBJECT = False   # flip to True locally to verify merging against real bench-test
-                               # data without waiting for a real animal session -- never commit
-                               # this as True, it only exists for this kind of spot-check
 
 
 def summarize_session(path):
@@ -200,17 +194,14 @@ def scan_all_sessions():
 
 # --- session merging (restart-combining) ---------------------------------------------------------
 
-def group_sessions(subject, sessions):
-    """ Returns a list of groups (each a chronological list of >=1 session summaries).
-    `subject == _TEST_SUBJECT` never merges (unless `_MERGE_TEST_SUBJECT` is on) -- each session is
-    its own singleton group, matching every subject's behavior before this feature existed.
-    Otherwise a session whose `session_end_reason` is 'completed' (reached VAR_MAX_TRIALS
-    naturally) always ends a group -- it's never combined with whatever runs next. Any other
-    ending (Stop, Kill, or a crash -- `session_end_reason` absent) is eligible to merge with the
-    next same-protocol session if it starts within `_MERGE_GAP` seconds of this one's own end. """
-    if subject == _TEST_SUBJECT and not _MERGE_TEST_SUBJECT:
-        return [[s] for s in sessions]
-
+def group_sessions(sessions):
+    """ Returns a list of groups (each a chronological list of >=1 session summaries). A session
+    whose `session_end_reason` is 'completed' (reached VAR_MAX_TRIALS naturally) always ends a
+    group -- it's never combined with whatever runs next. Any other ending (Stop, Kill, or a
+    crash -- `session_end_reason` absent) is eligible to merge with the next same-protocol session
+    if it starts within `_MERGE_GAP` seconds of this one's own end. Applies to every subject
+    uniformly, including bench-test ones -- merging reflects how the sessions actually happened,
+    regardless of which GUI subject they were run under. """
     groups = []
     for session in sessions:
         if groups:
@@ -483,7 +474,7 @@ def _rewrite_subject_sheet(wb, subject, sessions):
     old_col_map = _scan_existing_column_labels(ws, table_start_row)
     existing = _read_existing_manual_cells(ws, table_start_row, old_col_map)
 
-    groups = group_sessions(subject, sessions)
+    groups = group_sessions(sessions)
 
     row_dicts = []
     new_count = updated_count = 0
@@ -540,6 +531,12 @@ def _rewrite_subject_sheet(wb, subject, sessions):
             _write_row(ws, row_num, col_map, row)
             row_num += 1
 
+    # ws.column_dimensions is keyed by LETTER and persists independently of cell content/row
+    # deletes -- if 'session_started' sat at a different letter in an earlier schema iteration,
+    # that letter's hidden=True flag lingers forever unless explicitly cleared here. Reset every
+    # column's hidden flag before re-hiding only the one that's actually 'session_started' now.
+    for dim in ws.column_dimensions.values():
+        dim.hidden = False
     for col_idx in col_map.values():
         ws.column_dimensions[get_column_letter(col_idx)].width = 14
     ws.column_dimensions[get_column_letter(col_map['session_started'])].hidden = True
