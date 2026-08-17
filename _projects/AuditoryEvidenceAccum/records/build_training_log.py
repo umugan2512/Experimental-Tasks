@@ -252,7 +252,10 @@ def combine_group(group):
         'protocol': first['protocol'],
         'date': first['date'],
         'time_of_day': first['time_of_day'],
-        'num_sessions': len(group),
+        # blank (not 1) for an ordinary, un-merged row -- "how many sessions were combined" only
+        # means something once an actual merge happened; a bare "1" there would read as if
+        # something got combined when nothing did.
+        'num_sessions': len(group) if len(group) > 1 else None,
         'trial_count': sum(s['trial_count'] for s in group),
         'session_duration_s': duration_s,
         'reward_ul': last['reward_ul'],
