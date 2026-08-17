@@ -55,11 +55,13 @@ sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 import staircase
 import session_state
 import session_struct_export
+import session_csv_parser
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 from dot_display import DotDisplay
 
+from confapp import conf as settings
 from pybpodapi.protocol import Bpod, StateMachine
 
 
@@ -77,8 +79,14 @@ def _export_session_struct(csv_path):
 
 # --- who this session is for -----------------------------------------------------------------------
 
-VAR_SUBJECT_ID = 'REPLACE_ME'   # edit before every session -- see session_state.py's module
-                                 # docstring for why this is an explicit constant, not auto-derived
+_raw_subjects = getattr(settings, 'PYBPOD_SUBJECTS', None)
+if not _raw_subjects:
+    raise RuntimeError(
+        "No subject selected in the GUI for this session (PYBPOD_SUBJECTS is empty) -- select a "
+        "subject before running this task.")
+VAR_SUBJECT_ID = session_csv_parser.parse_subject_name(_raw_subjects[0])   # derived from the GUI's
+                                 # own selected subject -- same settings-resolution mechanism
+                                 # pybpodapi itself uses for SUBJECT-NAME, not a hand-edited constant
 VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
 # --- stage parameters (training_protocol.md Part 4, Stage 1's table) --------------------------------
@@ -127,7 +135,8 @@ VAR_DOT_DIAMETER_PX = 60            # UNCONFIRMED against training_protocol.md S
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9         # SS1.3: place the threshold at ~90% of edge azimuth
-VAR_GAIN_INITIAL_MULT = 2.0         # doc: "~2x final" -- decays via staircase.decay_gain()
+VAR_GAIN_INITIAL_MULT = 3.0         # decays via staircase.decay_gain() (-0.1x/qualifying session,
+                                     # floor 2.0x -- see staircase.py)
 VAR_RENDER_HZ = 30
 
 VAR_ROTARY_USB_PORT = None

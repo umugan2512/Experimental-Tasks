@@ -102,12 +102,20 @@ print("  ITI after 10th session (expect ceiling 1.5s): {0:.2f} -- {1}".format(
 print("  ITI never exceeds the 1.5s ceiling on further growth: {0}".format(
     iti_stays_at_ceiling))
 
-gain = 2.0
-for _ in range(50):
-    gain = staircase.decay_gain(gain)
-gain_floor_check = abs(gain - staircase.GAIN_FLOOR_MULT) < 1e-6
-print("  gain decays to its floor ({0:.1f}x) after many qualifying sessions: {1:.4f} -- {2}".format(
-    staircase.GAIN_FLOOR_MULT, gain, gain_floor_check))
+gain_after_9 = 3.0
+for _ in range(9):
+    gain_after_9 = staircase.decay_gain(gain_after_9)
+gain_before_floor = abs(gain_after_9 - 2.1) < 1e-9
+gain_after_10 = staircase.decay_gain(gain_after_9)
+gain_at_floor = abs(gain_after_10 - staircase.GAIN_FLOOR_MULT) < 1e-9
+gain_past_floor = staircase.decay_gain(gain_after_10)
+gain_stays_at_floor = abs(gain_past_floor - staircase.GAIN_FLOOR_MULT) < 1e-9
+print("  Gain after 9 sessions from 3.0x (expect 2.1x): {0:.2f} -- {1}".format(
+    gain_after_9, gain_before_floor))
+print("  Gain after 10th session (expect floor {0:.1f}x): {1:.2f} -- {2}".format(
+    staircase.GAIN_FLOOR_MULT, gain_after_10, gain_at_floor))
+print("  Gain never decays below the {0:.1f}x floor on further sessions: {1}".format(
+    staircase.GAIN_FLOOR_MULT, gain_stays_at_floor))
 
 # Stage 1's threshold growth -- session-level steps (NOT ThresholdStaircase's within-session,
 # per-trial mechanism), same shape as ITI growth above.
@@ -127,8 +135,8 @@ print("  Stage 1 threshold never exceeds the 0.20 ceiling on further growth: {0}
     threshold_stays_at_ceiling))
 
 section2_pass = (iti_before_ceiling and iti_at_ceiling and iti_stays_at_ceiling and
-                  gain_floor_check and threshold_before_ceiling and threshold_at_ceiling and
-                  threshold_stays_at_ceiling)
+                  gain_before_floor and gain_at_floor and gain_stays_at_floor and
+                  threshold_before_ceiling and threshold_at_ceiling and threshold_stays_at_ceiling)
 print("Section 2 result: {0}".format("PASS" if section2_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -167,8 +175,32 @@ for _ in range(50):
 window_check = len(dt3._sides) == 40   # rolling window caps at 40, doesn't grow unbounded
 print("  rolling window caps at 40 entries after 50 records: {0}".format(window_check))
 
-section3_pass = neutral_start and over_used_right and withhold_right and balanced_in_band and \
-    window_check
+# Regression check: before the window is full, even an extreme (all-one-side) ratio must NOT
+# trigger withholding -- confirmed on hardware that OUTCOME=Withheld fired as early as trial 2
+# before this gate existed (right_fraction() over 1-2 trials is pure noise, not a real bias).
+dt4 = DirectionRatioTracker()
+dt4.record('L')
+one_trial_not_full = not dt4.has_full_window()
+one_trial_in_band = dt4.in_band() and not dt4.should_withhold('L') and not dt4.should_withhold('R')
+print("  1 trial recorded: has_full_window()=False: {0}".format(one_trial_not_full))
+print("  1 trial, all-'L' (extreme ratio): in_band=True, no withholding on either side "
+      "(not enough data yet to trust it): {0}".format(one_trial_in_band))
+
+dt5 = DirectionRatioTracker()
+for _ in range(39):
+    dt5.record('L')
+still_not_full_at_39 = not dt5.has_full_window()
+still_no_withhold_at_39 = dt5.in_band() and not dt5.should_withhold('L')
+print("  39/40 trials, all-'L': still has_full_window()=False, still no withholding: {0}".format(
+    still_not_full_at_39 and still_no_withhold_at_39))
+dt5.record('L')
+full_at_40_withholds = dt5.has_full_window() and dt5.should_withhold('L')
+print("  40th trial completes the window: has_full_window()=True, NOW withholds 'L': {0}".format(
+    full_at_40_withholds))
+
+section3_pass = (neutral_start and over_used_right and withhold_right and balanced_in_band and
+                  window_check and one_trial_not_full and one_trial_in_band and
+                  still_not_full_at_39 and still_no_withhold_at_39 and full_at_40_withholds)
 print("Section 3 result: {0}".format("PASS" if section3_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -292,6 +324,7 @@ def _fake_session(started, protocol, session_end_reason, trial_count=10, duratio
     return {
         'session_started': started, 'started_dt': started_dt, 'ended_dt': ended_dt,
         'session_end_reason': session_end_reason, 'subject': 'FixtureMouse', 'date': started[:10],
+        'time_of_day': started_dt.strftime('%H:%M'),
         'protocol': protocol, 'trial_count': trial_count, 'session_duration_s': duration_s,
         'reward_count': 2, 'consumed_reward_count': 2, 'withheld_count': 0,
         'no_movement_count': 0, 'l_count': 3, 'r_count': 4, 'lick_count': 5, 'aborts': 1,

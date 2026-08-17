@@ -57,12 +57,14 @@ sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 import staircase
 import session_state
 import session_struct_export
+import session_csv_parser
 from direction_tracker import DirectionRatioTracker
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 from dot_display import DotDisplay
 
+from confapp import conf as settings
 from pybpodapi.protocol import Bpod, StateMachine
 
 
@@ -80,9 +82,14 @@ def _export_session_struct(csv_path):
 
 # --- who this session is for -----------------------------------------------------------------------
 
-VAR_SUBJECT_ID = 'REPLACE_ME'   # edit before every session -- must match the ID used for this
-                                 # animal's Stage 1 sessions, so the staircase continues from where
-                                 # Stage 1 left off rather than starting a fresh state file
+_raw_subjects = getattr(settings, 'PYBPOD_SUBJECTS', None)
+if not _raw_subjects:
+    raise RuntimeError(
+        "No subject selected in the GUI for this session (PYBPOD_SUBJECTS is empty) -- select a "
+        "subject before running this task.")
+VAR_SUBJECT_ID = session_csv_parser.parse_subject_name(_raw_subjects[0])   # derived from the GUI's
+                                 # own selected subject -- matches whatever Stage 1 used for this
+                                 # same animal automatically, no manual ID to keep in sync by hand
 VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
 # --- stage parameters (training_protocol.md Part 4, Stage 2) -----------------------------------------

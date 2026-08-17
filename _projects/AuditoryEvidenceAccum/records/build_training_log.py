@@ -134,6 +134,7 @@ def summarize_session(path):
 
     started_dt = session_csv_parser.parse_datetime(session_started)
     ended_dt = session_csv_parser.session_end_datetime(info, started_dt, session_duration_s)
+    time_of_day = started_dt.strftime('%H:%M') if started_dt is not None else ''
 
     consumed_volume_ul = (reward_ul * consumed_reward_count) if reward_ul is not None else None
 
@@ -147,6 +148,7 @@ def summarize_session(path):
         'session_end_reason': session_end_reason,
         'subject': subject,
         'date': date,
+        'time_of_day': time_of_day,
         'protocol': protocol_name,
         'trial_count': len(trials),
         'session_duration_s': session_duration_s,
@@ -246,6 +248,7 @@ def combine_group(group):
         'session_started': '; '.join(s['session_started'] for s in group),
         'protocol': first['protocol'],
         'date': first['date'],
+        'time_of_day': first['time_of_day'],
         'num_sessions': len(group),
         'trial_count': sum(s['trial_count'] for s in group),
         'session_duration_s': duration_s,
@@ -287,13 +290,15 @@ def _stage_label(protocol_name):
 
 # --- workbook update-in-place --------------------------------------------------------------------
 
-# ('internal key', 'column header label'). Order only matters for brand-new sheets/columns --
-# existing sheets are matched by label text (see _get_column_map), so adding a new entry here
-# later just appends a new column to every sheet on its next update, no migration needed.
+# ('internal key', 'column header label'). Order matches the real training_log.xlsx's own current
+# column layout exactly (not just an arbitrary internal choice) -- only matters for a brand-new
+# sheet, since an existing sheet is matched by label text (see _get_column_map) and never
+# reordered; adding a new entry here later just appends a new column on that sheet's next update,
+# no migration needed.
 COLUMNS = [
-    ('protocol', 'Protocol / Stage'),
     ('date', 'Date'),
-    ('num_sessions', 'Num. Sessions'),
+    ('time_of_day', 'Time (HH:MM)'),
+    ('protocol', 'Protocol / Stage'),
     ('weight_g', 'Weight (g)'),                    # MANUAL -- never written for an existing row
     ('weight_pct', 'Weight %'),                    # formula, refreshed every run
     ('trial_count', 'Trials'),
@@ -313,10 +318,11 @@ COLUMNS = [
     ('gain_mult_end', 'Gain mult (Stage 1)'),
     ('direction_ratio_end', 'Direction ratio (Stage 2)'),
     ('simple_gates_met', 'Simple gates met (Stage 2)'),
+    ('num_sessions', 'Num. Sessions'),
+    ('notes', 'Notes'),                       # MANUAL -- never written for an existing row
     ('session_started', 'Session started'),   # hidden key -- `; `-joined member timestamps
     ('session_csv_path', 'Session data (local path)'),
     ('session_struct_path', 'Session struct (local path)'),
-    ('notes', 'Notes'),                       # MANUAL -- never written for an existing row
 ]
 _MANUAL_COLUMNS = {'weight_g', 'notes'}
 
@@ -327,7 +333,20 @@ _BASELINE_WEIGHT_COL_LETTER = 'B'
 _HEADER_FONT = Font(bold=True)
 _TITLE_FONT = Font(bold=True, size=12)
 _SECTION_FONT = Font(bold=True, size=11)
-_SECTION_FILL = PatternFill('solid', fgColor='DDEBF7')
+
+# One distinct fill per stage number (1-indexed into this list, wrapping if there are ever more
+# stages than colors) -- blue/green/yellow/orange/purple, all light enough for black text to stay
+# readable. Anything that doesn't match the stageN_ naming convention falls back to plain gray.
+_STAGE_FILL_COLORS = ['DDEBF7', 'E2F0D9', 'FFF2CC', 'FCE4D6', 'E4DFEC']
+_DEFAULT_FILL_COLOR = 'F2F2F2'
+
+
+def _stage_fill_color(protocol_name):
+    match = re.match(r'stage(\d+)', protocol_name)
+    if not match:
+        return _DEFAULT_FILL_COLOR
+    stage_num = int(match.group(1))
+    return _STAGE_FILL_COLORS[(stage_num - 1) % len(_STAGE_FILL_COLORS)]
 
 
 def _sheet_name_for(subject):
@@ -445,10 +464,11 @@ def _write_row(ws, row, col_map, row_data):
     pct_cell.number_format = '0.0%'
 
 
-def _write_section_header(ws, row, title, num_cols):
+def _write_section_header(ws, row, title, num_cols, fill_color):
     ws.cell(row=row, column=1, value=title).font = _SECTION_FONT
+    fill = PatternFill('solid', fgColor=fill_color)
     for col in range(1, num_cols + 1):
-        ws.cell(row=row, column=col).fill = _SECTION_FILL
+        ws.cell(row=row, column=col).fill = fill
 
 
 def _rewrite_subject_sheet(wb, subject, sessions):
@@ -497,9 +517,12 @@ def _rewrite_subject_sheet(wb, subject, sessions):
         ws.delete_rows(table_start_row + 1, ws.max_row - table_start_row)
 
     row_num = table_start_row + 1
-    num_cols = len(col_map)
+    num_cols = ws.max_column   # the sheet's actual physical width, not len(col_map) -- immune to
+                                # any orphaned/legacy columns (not tracked by col_map) undercounting
+                                # the fill range
     for protocol in ordered_protocols:
-        _write_section_header(ws, row_num, _stage_label(protocol), num_cols)
+        _write_section_header(ws, row_num, _stage_label(protocol), num_cols,
+                               _stage_fill_color(protocol))
         row_num += 1
         for row in buckets[protocol]:
             _write_row(ws, row_num, col_map, row)

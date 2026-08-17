@@ -28,9 +28,13 @@ THRESHOLD_GROWTH_CEILING_FRACTION = 0.20   # Stage 2's own starting point
 
 # The doc states Stage 1's wheel gain drops "after a session >200 trials" but doesn't give an
 # exact rate (unlike ITI's explicit "0.1s per session") -- flagged/tunable, picked to match the
-# same fixed-per-qualifying-session-step convention as ITI growth.
-GAIN_DECAY_PER_SESSION = 0.90     # multiplicative, per qualifying (>200 trial) session
-GAIN_FLOOR_MULT = 1.0             # never decay below the final (1x) gain
+# same fixed-per-qualifying-session-step convention as ITI growth. Fixed additive step (not
+# multiplicative), same shape as grow_iti()/grow_stage1_threshold() -- confirmed on hardware that
+# an early multiplicative version decayed too fast/too far (floor 1.0x made early-session
+# movements barely discernible); the floor is now 2.0x, never below "clearly visually easy."
+GAIN_DECAY_STEP_PER_SESSION = 0.1   # per qualifying (>200 trial) session
+GAIN_FLOOR_MULT = 2.0               # never decay below 2x -- floor picked so movements stay
+                                     # clearly discernible even late in Stage 1
 
 
 class ThresholdStaircase(object):
@@ -83,10 +87,9 @@ def grow_stage1_threshold(prev_fraction):
 
 
 def decay_gain(prev_gain_mult):
-    """ Multiplicative decay toward GAIN_FLOOR_MULT per qualifying (>200 trial) session, per
-    Stage 1's "gain ~2x final, dropping after a session >200 trials". Call once per qualifying
-    session (not per trial). """
-    return max(GAIN_FLOOR_MULT, prev_gain_mult * GAIN_DECAY_PER_SESSION)
+    """ -GAIN_DECAY_STEP_PER_SESSION per qualifying (>200 trial) session, floor at GAIN_FLOOR_MULT
+    -- call once per qualifying session (not per trial), same call-site shape as grow_iti(). """
+    return max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION)
 
 
 def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_count_gate=200):

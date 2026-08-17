@@ -40,7 +40,19 @@ class DirectionRatioTracker(object):
             return 0.5
         return sum(1 for s in self._sides if s == 'R') / len(self._sides)
 
+    def has_full_window(self):
+        """ False for the first `window` trials of a session -- right_fraction() over a handful of
+        trials is pure noise (a single early trial landing on one side already swings it to 0.0/1.0),
+        the same class of bug already fixed elsewhere in this codebase for
+        trial_scheduler.should_stop_session()'s rate checks (see CLAUDE.md). Confirmed on hardware:
+        OUTCOME=Withheld fired as early as trial 2 before this gate existed. """
+        return len(self._sides) >= self._sides.maxlen
+
     def in_band(self):
+        """ Always True (no withholding) until has_full_window() -- not enough data yet to trust
+        the ratio. """
+        if not self.has_full_window():
+            return True
         lo, hi = self._band
         return lo <= self.right_fraction() <= hi
 
