@@ -4,20 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-This is the **pybpod** super-repo: a thin umbrella project that pulls together ~17 independent git
-submodules (each its own PyPI package, with its own `setup.py`, tests, and GitHub repo) into one
-installable application. PyBpod itself is a GUI application (built on PyForms/Qt) for controlling
-Bpod behavioral-experiment hardware from Sanworks, maintained by the Champalimaud Foundation.
+This is **`Experimental-Tasks`**, the combined repo this lab actually works out of day to day:
+PyBpod itself (a GUI application, built on PyForms/Qt, for controlling Bpod behavioral-experiment
+hardware from Sanworks, maintained by the Champalimaud Foundation) as a git submodule, plus this
+lab's own `_projects/` — real task code, training scripts, and the shared `training_log.xlsx` —
+committed alongside it so the whole stack transfers cleanly across every behavior-box computer with
+one `git clone` + `git submodule update --init --recursive`.
 
-The top-level repo contains almost no application code of its own — just glue: `utils/install.py`,
-`utils/deploy-pypi.py`, `user_settings.py`, and the submodule pointers in `.gitmodules` /
-`base/repositories.yml`.
+- `pybpod/` — the PyBpod application itself, as a git submodule pointed at **this lab's own fork**
+  (`https://github.com/umugan2512/pybpod.git`, branch `save-local-changes`), not the official
+  upstream (`github.com/pybpod/pybpod`, no push access there). See "Forked submodules" below for
+  why, and for the same pattern applied one level deeper for the rotary encoder plugin.
+- `_projects/` — this lab's real task code and training data (see "Local project data" below).
+  Moved in as a real, mostly-committed part of *this* repo — no longer a separate, ungit'd sibling
+  directory the way it was in the original single-machine `pybpod` checkout this was migrated from.
+- `CLAUDE.md` (this file) — lives at this repo's own top level, not inside the `pybpod/` submodule,
+  even though most of its historical content (the sections below down through "Architecture notes")
+  was originally written for `pybpod` on its own. It now documents the whole combined repo.
 
 ### Submodules are not checked out by default
 
-`base/`, `libraries/`, and `plugins/` are git submodules. If they appear as **empty directories**,
-they have not been initialized — this is the normal state right after a plain `git clone`. Before
-expecting to find real source code under those paths, run:
+`pybpod/` itself, and everything under `pybpod/base/`, `pybpod/libraries/`, `pybpod/plugins/`, are
+git submodules (nested — `pybpod` is `Experimental-Tasks`'s own submodule, and it in turn has ~17 of
+its own). If any of these appear as **empty directories**, they have not been initialized — the
+normal state right after a plain `git clone`. Before expecting to find real source code under those
+paths, run:
 
 ```bash
 git submodule update --init --recursive
@@ -25,96 +36,172 @@ git submodule update --init --recursive
 
 Do not assume a submodule is "missing" or "broken" just because its folder is empty — check
 submodule init status first (`git submodule status`, entries prefixed with `-` are uninitialized).
+Confirmed the hard way: forgetting this step after the initial `Experimental-Tasks` migration left
+every plugin folder (including the rotary encoder module, whose own local fixes this lab depends on
+for hardware to work at all) completely empty, causing a real `AttributeError:
+'RotaryEncoderModule' has no attribute 'discover'` crash mid-session.
+
+## Forked submodules (pybpod itself, and the rotary encoder plugin)
+
+Two submodules in this tree carry **real local changes this lab depends on** that don't exist
+upstream, so both are pinned to a fork (not the official repo) on a branch literally named
+`save-local-changes`:
+
+- `pybpod` itself → `github.com/umugan2512/pybpod.git` — carries this repo's own `CLAUDE.md` (now
+  superseded by the top-level copy, kept for history), `utils/install.py`'s local edit, and the
+  from-scratch `pybpod-gui-plugin-hifi` package.
+- `pybpod/plugins/pybpod-gui-plugin-rotaryencoder` → its own separate fork,
+  `github.com/umugan2512/pybpod-gui-plugin-rotaryencoder.git` — carries `RotaryEncoderModule.discover()`
+  (handshake-probes serial ports since a module's own USB connection is never reported over the
+  Bpod relay — see "Hardware module notes" below), `BOOT_DELAY_S`/`HANDSHAKE_RETRIES`, retry-verified
+  `set_zero_position()`/`set_thresholds()`, and `wheel_position_plot.py` (the "Wheel Position"
+  live-plot GUI panel). **This whole plugin's local changes were originally uncommitted, vendored
+  edits sitting directly in the submodule's working tree** — easy to lose entirely on any repo
+  restructuring that doesn't specifically account for it (confirmed: got missed once already during
+  the `Experimental-Tasks` migration, since a plain `git status` on the *parent* repo only shows a
+  submodule as generically "dirty," not what's actually different inside it). **Before assuming any
+  vendored/forked submodule's local state is "just pre-existing, unrelated" during a future
+  restructuring, `cd` into it and run `git status`/`git diff` directly** — a submodule flagged dirty
+  in the parent's own `git status` may be carrying real, load-bearing, never-upstreamed work.
+
+Each fork's own remotes: `origin` = the fork (push access), `upstream` = the official repo (`git
+fetch upstream` to pull in future official releases without losing the local branch). Each fork's
+own `.gitmodules` entry in its *parent* repo (`Experimental-Tasks/pybpod/.gitmodules` for the
+rotaryencoder fork) pins both the fork URL and the `save-local-changes` branch explicitly, so a
+fresh `git submodule update --init --recursive` anywhere in the chain reliably resolves to the
+fork with the local changes, not a stock upstream clone missing them.
+
+**Editable installs must be re-pointed after any of this** — `utils/install.py`'s `pip install -e`
+step links Python's site-packages to whatever directory it was run against; cloning/updating a
+submodule alone does *not* automatically repoint an *already-installed* editable package. Confirmed
+directly: after the migration, `pybpod_rotaryencoder_module.__file__` still resolved to the OLD,
+pre-migration `pybpod` checkout on disk until `pip install -e` was re-run from inside the NEW
+`Experimental-Tasks/pybpod/...` location for every package in `utils/install.py`'s
+`SUBMODULES_FOLDERS` list.
 
 ## Repository layout
 
-- `base/` — the three core packages that make up PyBpod itself:
-  - `pybpod` (this repo's own package, defined by `base/pybpod/setup.py`) — the top-level PyPI
-    package and `start-pybpod` console-script entry point (`pybpodgui_plugin.__main__:start`).
+- `pybpod/base/` — the three core packages that make up PyBpod itself:
+  - `pybpod` (`pybpod/base/pybpod/setup.py`) — the top-level PyPI package and `start-pybpod`
+    console-script entry point (`pybpodgui_plugin.__main__:start`).
   - `pybpod-api` — low-level Python API / driver for talking to the Bpod device over serial.
   - `pybpod-gui-api` — GUI-facing API layer between `pybpod-api` and the GUI plugin.
   - `pybpod-gui-plugin` — the main PyForms-based GUI application (Setups, Subjects, Boards, running
     protocols).
-- `libraries/` — shared/forked dependencies vendored as submodules rather than plain pip deps:
-  `pyforms-gui`, `pyforms-generic-editor`, `logging-bootstrap`, `safe-collaborative-architecture`.
-- `plugins/` — optional GUI plugins that extend `pybpod-gui-plugin` via the generic-editor plugin
-  system (each is independently versioned and pip-installable): session history, timeline,
-  trial-timeline, stmdiagram, emulator, waveplayer, soundcard, rotaryencoder, alyx, and a terminal
-  plugin (`pge-plugin-terminal`).
-- `docs/` — Sphinx documentation source, published to Read the Docs
-  (https://pybpod.readthedocs.io/).
-- `utils/` — dev/release tooling (see Commands below).
+- `pybpod/libraries/` — shared/forked dependencies vendored as submodules rather than plain pip
+  deps: `pyforms-gui`, `pyforms-generic-editor`, `logging-bootstrap`, `safe-collaborative-architecture`.
+- `pybpod/plugins/` — optional GUI plugins that extend `pybpod-gui-plugin` via the generic-editor
+  plugin system (each is independently versioned and pip-installable): session history, timeline,
+  trial-timeline, stmdiagram, emulator, waveplayer, soundcard, **rotaryencoder** (forked, see
+  above), **hifi** (from-scratch driver for the Sanworks HiFi HD audio module, lives in the
+  `pybpod` fork directly, no separate upstream), alyx, and a terminal plugin (`pge-plugin-terminal`).
+- `pybpod/docs/` — Sphinx documentation source, published to Read the Docs
+  (https://pybpod.readthedocs.io/) — describes upstream PyBpod, not this lab's own task code below.
+- `pybpod/utils/` — dev/release tooling (see Commands below).
+- `_projects/` — this lab's own task code and training data, see below.
 
-Because every submodule is its own package with its own version pin, cross-cutting changes (e.g. a
-new feature touching both `pybpod-api` and `pybpod-gui-plugin`) require editing multiple submodules
-and bumping their versions independently — check `CHANGELOG.rst` for the shared-versioning history
-(PyBpod's own version has been kept in sync with `pybpod-api`, `pybpod-gui-api`, and
-`pybpod-gui-plugin` since v1.8.0).
+Because every `pybpod/` submodule is its own package with its own version pin, cross-cutting changes
+(e.g. a new feature touching both `pybpod-api` and `pybpod-gui-plugin`) require editing multiple
+submodules and bumping their versions independently — check `pybpod/CHANGELOG.rst` for the
+shared-versioning history (PyBpod's own version has been kept in sync with `pybpod-api`,
+`pybpod-gui-api`, and `pybpod-gui-plugin` since v1.8.0).
 
 ## Local project data (`_projects/`)
 
-Actual PyBpod projects (real experiment data, not code) for this machine live outside the repo, as a
-sibling directory: `C:\Users\2P-Behav\Documents\_projects\`. Each subfolder is one PyBpod GUI project
-— e.g. `_projects/AuditoryEvidenceAccum/` — containing a `<ProjectName>.json` descriptor plus
-`boards/`, `experiments/`, `subjects/`, `tasks/`, and `users/` folders that the GUI reads/writes when
-a project is open. This directory is not part of the `pybpod` git repo and should not be assumed to
-exist on other machines/checkouts; treat it as runtime data, not source, when reasoning about the
-codebase.
+`_projects/` is a **real, mostly-committed subfolder of this repo** (not an external sibling
+directory the way it was before the `Experimental-Tasks` migration). Each subfolder is one PyBpod
+GUI project — e.g. `_projects/AuditoryEvidenceAccum/` — containing a `<ProjectName>.json` descriptor
+plus `boards/`, `experiments/`, `subjects/`, `tasks/`, and `users/` folders that the GUI reads/writes
+when a project is open.
+
+**Only actual code (and one specific data file) gets committed here — everything else is
+gitignored, deliberately and strictly**, per this repo's own `.gitignore`:
+- `tasks/` (the real task scripts) — committed, this is source code.
+- `_projects/*/records/training_log.xlsx` — committed, the **one explicit exception** to
+  "no non-code files." See "Multi-box training-log sync" below for why this one file is special.
+- `boards/`, `subjects/`, `users/`, `experiments/` (real session data, hardware/COM-port config) —
+  gitignored. Board/subject configs are box-specific (different COM ports per machine); session
+  data is exactly what `training_log.xlsx` summarizes, no need to duplicate the raw CSVs in git.
+- `docs_local/` (design docs like `training_protocol.md`, bench-test docs like
+  `HARDWARE_TEST_EXAMPLES.md`) — gitignored. These exist locally on this machine but are
+  deliberately not shared via git; treat them as this machine's own reference material, not
+  something every box needs a copy of.
+- Any generated, non-`training_log.xlsx` artifact (`session_startup_checklist.xlsx`/`.md`, `.png`
+  validation plots, `*_struct.mat`/`.json` session exports) — gitignored, regenerable/local-only by
+  design.
+
+Don't assume something is missing from a fresh clone just because it's not in git — `docs_local/`,
+real session data, and machine-specific board/subject config all need to exist locally on each box
+independently (the GUI creates/writes most of it automatically; design docs need a manual copy).
 
 ## Commands
 
-Development environment (Python 3.6, conda-based):
+Development environment (Python 3.6, conda-based), from this repo's own top level:
 
 ```bash
 conda create -n pybpod-environment python=3.6
 activate pybpod-environment   # Windows; use `conda activate` on macOS/Linux
-git submodule update --init --recursive
-python utils/install.py       # pip install -e each submodule, then generate user_settings.py
-start-pybpod                  # run the application
+git submodule update --init --recursive   # pulls in pybpod/ AND its own ~17 nested submodules
+cd pybpod && python utils/install.py      # pip install -e each submodule, then generate user_settings.py
+cd ..
+start-pybpod                              # run the application
 ```
 
-Confirmed working on this machine's `pybpod-environment` conda env (Python 3.6.13) after
-`git submodule update --init --recursive` + `python utils/install.py`: `start-pybpod` launches the
-Qt GUI and stays resident in its event loop. A one-line `WARNING ... Plugins path was not defined by
-user` on startup is expected/benign, not a failure.
+Confirmed working on this machine's `pybpod-environment` conda env (Python 3.6.13):`start-pybpod`
+launches the Qt GUI and stays resident in its event loop. A one-line `WARNING ... Plugins path was
+not defined by user` on startup is expected/benign, not a failure.
 
-`utils/install.py` does two things:
+`pybpod/utils/install.py` does two things, run from *inside* `pybpod/`:
 1. `pip install -e` every folder listed in `SUBMODULES_FOLDERS` (all of `base/`, `libraries/`,
-   `plugins/`) so the whole stack is editable in-place.
-2. Writes `user_settings.py` (if it doesn't already exist) with `GENERIC_EDITOR_PLUGINS_LIST` set to
-   the default plugin set (`pybpodgui_plugin`, `pybpodgui_plugin_timeline`,
-   `pybpodgui_plugin_session_history`). Delete/edit `user_settings.py` to change which plugins load.
+   `plugins/`, resolved relative to `pybpod/`) so the whole stack is editable in-place. **Re-run
+   this (or at least the `pip install -e` loop) any time a submodule gets re-cloned/updated** — an
+   existing editable install does not automatically follow a submodule to a new location; see
+   "Forked submodules" above.
+2. Writes `user_settings.py` (if it doesn't already exist, inside `pybpod/`) with
+   `GENERIC_EDITOR_PLUGINS_LIST` set to the default plugin set (`pybpodgui_plugin`,
+   `pybpodgui_plugin_timeline`, `pybpodgui_plugin_session_history`). **This file is gitignored
+   (machine-specific) and does NOT travel with the repo** — a fresh box needs its own copy,
+   customized with whatever plugins that box actually needs (e.g. `pybpod_rotaryencoder_module`,
+   `pybpodgui_plugin_trial_timeline`, and `PYBPOD_API_MODULES = ['pybpod_hifi_module',
+   'pybpod_rotaryencoder_module']` for the modules this lab's tasks actually use) — copying it from
+   another already-set-up box is the fastest way to get a new one going. Confirmed as a real
+   failure mode: a box with only the *default* `user_settings.py` silently loses the "Wheel
+   Position" live-plot feature (and any other non-default plugin) with no error, since the GUI just
+   never loads a plugin package that isn't in `GENERIC_EDITOR_PLUGINS_LIST`.
 
-There are OS-specific conda environment files under `utils/` (`environment-windows-10.yml`,
+There are OS-specific conda environment files under `pybpod/utils/` (`environment-windows-10.yml`,
 `environment-ubuntu-17.10.yml`, `environment-macOSx.yml`) with pinned native deps (Qt, PyQt, HDF5,
 etc.) — use the one matching the dev machine's OS instead of a fresh `conda create` if native builds
 are an issue.
 
-There is no build/lint/test tooling at the top-level repo (no top-level `pytest.ini`, `tox.ini`, or
-CI test workflow — `.github/` only has issue templates). Tests, if any, live inside individual
-submodules once checked out; run them from within that submodule's own directory using whatever
-framework it defines.
+There is no build/lint/test tooling at the top level of either `Experimental-Tasks` or `pybpod`
+itself (no top-level `pytest.ini`, `tox.ini`, or CI test workflow). `_projects/`'s own offline test
+suite is `_projects/AuditoryEvidenceAccum/tasks/_wheel_shaping_shared/validate_wheel_shaping.py` —
+run it after any change to `staircase.py`/`direction_tracker.py`/`session_csv_parser.py`/
+`build_training_log.py`'s merging logic (see "Wheel-shaping training stages" below); it needs no
+hardware.
 
 ### Versioning / release
 
-- `base/pybpod/.bumpversion.cfg` drives version bumps for the top-level `pybpod` package via
-  `bump2version`/`bumpversion`, run from `base/pybpod/`. It keeps `setup.py`,
+- `pybpod/base/pybpod/.bumpversion.cfg` drives version bumps for the top-level `pybpod` package via
+  `bump2version`/`bumpversion`, run from `pybpod/base/pybpod/`. It keeps `setup.py`,
   `../../docs/source/conf.py`, and `../../README.md` in sync.
-- `utils/deploy-pypi.py` walks `libraries/`, `base/`, and `plugins/`, compares each submodule's local
-  `setup.py --version` against the latest release on PyPI, and runs `sdist bdist_wheel` +
-  `twine upload` for any that are ahead. This is a real publish action — do not run it without the
-  user's explicit intent to release.
+- `pybpod/utils/deploy-pypi.py` walks `libraries/`, `base/`, and `plugins/`, compares each
+  submodule's local `setup.py --version` against the latest release on PyPI, and runs `sdist
+  bdist_wheel` + `twine upload` for any that are ahead. This is a real publish action — do not run
+  it without the user's explicit intent to release.
 
 ## Hardware module notes
 
 Custom Bpod hardware modules (e.g. `pybpod-gui-plugin-soundcard`, `pybpod-gui-plugin-hifi`,
-`pybpod-gui-plugin-rotaryencoder`) follow a consistent two-file pattern: `module_api.py` (direct
-USB connection to the module for hardware-facing calls) + `module.py` (a `BpodModule` subclass —
-the state-machine-relay side that self-announces to Bpod, e.g. `HiFi1`, `RotaryEncoder1`).
-`plugins/pybpod-gui-plugin-hifi/` (package `pybpod_hifi_module`) is a from-scratch driver added
-this way for the Sanworks HiFi HD audio module (no prior Python support anywhere); it's currently
-a local uncommitted package, not yet its own git submodule/remote like the other `plugins/`
-entries — a deliberate open decision, not an oversight.
+`pybpod-gui-plugin-rotaryencoder`, all under `pybpod/plugins/`) follow a consistent two-file
+pattern: `module_api.py` (direct USB connection to the module for hardware-facing calls) +
+`module.py` (a `BpodModule` subclass — the state-machine-relay side that self-announces to Bpod,
+e.g. `HiFi1`, `RotaryEncoder1`). `pybpod/plugins/pybpod-gui-plugin-hifi/` (package
+`pybpod_hifi_module`) is a from-scratch driver added this way for the Sanworks HiFi HD audio module
+(no prior Python support anywhere); it lives directly in this lab's own `pybpod` fork, not a
+separate upstream submodule like the other `plugins/` entries — a deliberate open decision, not an
+oversight.
 
 Durable facts/gotchas about this module layer and Bpod hardware in general:
 
@@ -152,8 +239,8 @@ Durable facts/gotchas about this module layer and Bpod hardware in general:
   `rotary_bpod_module.load_message([RotaryEncoder.COM_SETZEROPOS, RotaryEncoder.COM_ENABLE_ALLTHRESHOLDS])`
   instead of `rotary_bpod_module.create_resetpositions_trigger()`.
 - The rotary encoder board resets when a new serial connection opens and needs ~2s before it
-  reliably responds to a handshake (`pybpod-gui-plugin-rotaryencoder/module_api.py`'s
-  `BOOT_DELAY_S`/`HANDSHAKE_RETRIES`).
+  reliably responds to a handshake (`pybpod/plugins/pybpod-gui-plugin-rotaryencoder/
+  pybpod_rotaryencoder_module/module_api.py`'s `BOOT_DELAY_S`/`HANDSHAKE_RETRIES`).
 - Rotary encoder firmware disables a threshold the instant it fires, and crossing any *one*
   threshold disarms the *whole* configured set (not just that one) until
   `enable_all_thresholds()` is called again — see `module.py`'s
@@ -191,8 +278,9 @@ Durable facts/gotchas about this module layer and Bpod hardware in general:
   hang.
 - Redrawing/requerying a UI element off a growing `session.data` table on every timer tick is
   O(session-length) per tick and will make long sessions unresponsive (see
-  `pybpod-gui-plugin-rotaryencoder`'s `wheel_position_plot.py`, added as a "Wheel Position"
-  right-click option on session tree nodes, mirroring `pybpodgui_plugin_trial_timeline`'s
+  `pybpod-gui-plugin-rotaryencoder`'s `wheel_position_plot.py` — now lives in that plugin's own
+  fork, see "Forked submodules" above — added as a "Wheel Position" right-click option on session
+  tree nodes, mirroring `pybpodgui_plugin_trial_timeline`'s
   session-treenode files). Slice only new rows (`iloc[rows_read:]`) instead of re-querying
   everything, and use persistent, updatable plot artists instead of clear-and-replot every tick —
   same "only touch what changed" principle on both the data and rendering side.
@@ -200,8 +288,9 @@ Durable facts/gotchas about this module layer and Bpod hardware in general:
 ## Poisson-clicks / wheel-turn evidence-accumulation task
 
 Building toward a wheel-turn analog of the Brunton-style Poisson-clicks 2AFC task — see
-`_projects/mouse_auditory_accumulation_paradigm.md` for the original design and its `## 13.
-Implementation amendments` section for how the built version deliberately diverges from it
+`_projects/docs_local/design_docs/mouse_auditory_accumulation_paradigm.md` (gitignored, see "Local
+project data" above) for the original design and its `## 13. Implementation amendments` section for
+how the built version deliberately diverges from it
 (wheel-turn choice + single valve, not lick spouts on retractable arms).
 
 **Two code locations, split by how reusable each piece is:**
@@ -380,9 +469,10 @@ Durable facts/gotchas from building this:
 
 ## Wheel-shaping training stages (Stage 1/2, `AuditoryEvidenceAccum`)
 
-`training_protocol.md` (in `_projects/`, alongside `mouse_auditory_accumulation_paradigm.md`) is the
-full staged training curriculum (Part 4: Stage 1 through Stage 8) for the wheel-turn/dot variant of
-the evidence-accumulation task. Stage 1 ("Wheel unlocked, spout close, small movements rewarded")
+`training_protocol.md` (in `_projects/docs_local/design_docs/`, alongside
+`mouse_auditory_accumulation_paradigm.md` — gitignored, local-machine-only, see "Local project
+data" above) is the full staged training curriculum (Part 4: Stage 1 through Stage 8) for the
+wheel-turn/dot variant of the evidence-accumulation task. Stage 1 ("Wheel unlocked, spout close, small movements rewarded")
 and Stage 2 ("Threshold staircase, ITI growth, spout retraction") are built in
 `_projects/AuditoryEvidenceAccum/tasks/` — the **real** project, not `Tests/`. `Tests/` stays what it
 always was (bench-test/dry-run scripts, `full_protocol_lookback_test.py` etc.) and is untouched by
@@ -401,14 +491,35 @@ anywhere in the curriculum).
   the two-consecutive-qualifying-sessions advancement check) persists via a self-persisting JSON
   file** (`session_state.py`'s `StageState`) at
   `AuditoryEvidenceAccum/subjects/<VAR_SUBJECT_ID>/wheel_shaping_state.json` — read/written
-  automatically by the task script itself, no manual data entry between sessions.
-  `VAR_SUBJECT_ID` is an explicit constant at the top of each stage script (edit it before every
-  session) — no task anywhere in this codebase auto-derives "which subject is this session for"
-  from PyBpod's own session/experiment machinery, so this is the deliberate, lower-risk choice over
-  guessing at that association. **Stage 1 and Stage 2 share one continuous state file per subject**
-  (same filename, same path derivation) — Stage 2's own new keys (`threshold_fraction` etc.) default
-  to Stage 1's known ending values the first time it runs for a given subject, rather than each
-  stage starting its own separate record.
+  automatically by the task script itself, no manual data entry between sessions. **`VAR_SUBJECT_ID`
+  is derived automatically from the GUI's own selected subject**, not hand-edited — both stage
+  scripts do `from confapp import conf as settings; ...
+  session_csv_parser.parse_subject_name(settings.PYBPOD_SUBJECTS[0])` (confirmed this resolves
+  correctly: `pybpodapi/__init__.py` itself does `import user_settings; conf += user_settings` at
+  import time, picking up the session-local `user_settings.py` `board_com.py` generates per run —
+  same settings-resolution mechanism already documented below for `PYBPOD_API_MODULES`; a script
+  reading `settings.PYBPOD_SUBJECTS` only needs to import `pybpodapi` *before* reading it, which
+  both scripts already do via `from pybpodapi.protocol import Bpod, StateMachine`). Raises loudly
+  (`RuntimeError`) if `PYBPOD_SUBJECTS` is empty rather than silently falling back to a placeholder
+  — a prior hardcoded `VAR_SUBJECT_ID = 'REPLACE_ME'` constant was confirmed, on real hardware, to
+  have never been updated across many real sessions, silently pooling all of one animal's real
+  staircase progress under a shared placeholder identity instead of its own. **This is a
+  DIFFERENT identity from the GUI's own project-level "subject" used for `SUBJECT-NAME`/session
+  merging** (see `build_training_log.py` below) — both now derive from the same underlying GUI
+  selection, but conceptually serve different consumers (persisted staircase state vs. the training
+  log), so don't assume changing one automatically explains behavior tied to the other. **Stage 1
+  and Stage 2 share one continuous state file per subject** (same filename, same path derivation) —
+  Stage 2's own new keys (`threshold_fraction` etc.) default to Stage 1's known ending values the
+  first time it runs for a given subject, rather than each stage starting its own separate record.
+- **Stage 1's wheel gain (`VAR_GAIN_INITIAL_MULT`) decays by a FIXED step per qualifying session
+  (`staircase.GAIN_DECAY_STEP_PER_SESSION = 0.1`), floored at `staircase.GAIN_FLOOR_MULT = 2.0`** —
+  same `grow_iti()`-shaped mechanism as ITI/Stage-1-threshold growth, not the multiplicative decay
+  (`x0.90`/session toward a `1.0x` floor) an earlier version used. Confirmed on hardware the
+  multiplicative version's `1.0x` floor made movements barely discernible late in Stage 1; `3.0x` ->
+  `2.0x` over ~10 qualifying sessions was chosen instead. `decay_gain()` in `staircase.py` is the
+  one function to change if this rate/floor needs retuning again — same call site
+  (`state.set('gain_mult', staircase.decay_gain(cur_gain_mult))`), only the internal math differs
+  from `grow_iti()`'s (subtracting instead of adding).
 - `training_protocol.md`'s Stage 2 advancement criterion is primarily a **statistical** test
   (bimodal movement distribution + rewarded-turn velocity clearly separated from drift) that the doc
   describes conceptually but doesn't fully specify an algorithm for. Deliberately deferred (per
@@ -428,6 +539,25 @@ anywhere in the curriculum).
   the reward-or-withhold branching directly into its `state_change_conditions` up front — no second
   Bpod round-trip needed. Worth checking which situation actually applies before reaching for the
   two-machine pattern by default.
+- **`DirectionRatioTracker.right_fraction()` needs a `has_full_window()` gate before its ratio is
+  trusted for withholding decisions** — same class of bug as the `should_stop_session()` rate-check
+  gotcha already documented above, just not originally applied here too. Confirmed directly in a
+  real Stage 2 session log: `DIRECTION_RATIO=0.0` was already registered after trial 1 (a single
+  `'L'` trial pushes the raw ratio to an extreme with zero real signal behind it), and
+  `OUTCOME=Withheld` fired as early as trial 2. `in_band()` now returns `True` unconditionally until
+  `len(self._sides) >= self._sides.maxlen` (the full ~40-trial window) — `right_fraction()` itself
+  stays unchanged (still reports the real rolling value for logging/display regardless of window
+  fullness), only the withhold-triggering `in_band()`/`over_used_side()`/`should_withhold()` chain
+  is gated.
+- **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
+  `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
+  ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching
+  `rotary_setup.set_and_enable_thresholds(rotary, [-cur_threshold_deg, cur_threshold_deg])`'s own
+  symmetric convention), so the threshold lines never appeared. Fixed by also recognizing
+  `THRESHOLD_DEG` and drawing both `±value` lines from it (LEFT/RIGHT handling kept, in case a
+  future task genuinely has asymmetric thresholds). This lives in the rotaryencoder fork (see
+  "Forked submodules" above) — any fix here needs the same commit-to-both-checkouts-then-push
+  discipline, not just an edit to the working copy.
 - **Stage 1's movement threshold grows ACROSS sessions (one fixed step per qualifying session), NOT
   Stage 2's within-session, per-trial `ThresholdStaircase`** — per explicit correction: Stage 1 isn't
   tracking moment-to-moment performance the way Stage 2 is, so `staircase.grow_stage1_threshold()`
@@ -459,29 +589,128 @@ anywhere in the curriculum).
   only `WHEEL_POS`/`TRIAL_START`, none of the outcome-time registrations). Don't assume the *last*
   trial in a parsed session is a genuine one; search backward for the last trial that actually has
   `STATE` data instead (`build_training_log.py`'s `_find_val_backward()`).
-- **`AuditoryEvidenceAccum/records/`** holds the lab's record-keeping: `training_log.xlsx`
-  (auto-generated by `build_training_log.py`, one sheet per animal — **never hand-edit this file**,
-  it's fully regenerated from scratch every run; edit `animals_metadata.json` (DOB/sex/strain/
-  baseline weight, one entry per animal) or `session_manual_entries.csv` (per-session hand-recorded
-  weight, transcribed from the paper startup checklist) instead, then re-run the script) and
-  `session_startup_checklist.xlsx` (a static, printable form template generated once by
-  `build_startup_checklist.py` — animal ID, protocol run, equipment on/off checklist, pre-session
-  checks, outcome summary; purely physical record-keeping, never auto-populated, since none of it has
-  a digital source).
+- **`AuditoryEvidenceAccum/records/`** holds the lab's record-keeping — see "Multi-box training-log
+  sync" below for the full design (`build_training_log.py`, session merging, struct export, the
+  `.bat` launchers) — plus `session_startup_checklist.xlsx`/`.md` (a static, printable form template
+  generated once by `build_startup_checklist.py`, both formats from one shared `CHECKLIST_SECTIONS`
+  data structure — animal ID, protocol run, equipment on/off checklist, pre-session checks, outcome
+  summary; purely physical record-keeping, never auto-populated, since none of it has a digital
+  source).
+
+## Multi-box training-log sync (`AuditoryEvidenceAccum/records/build_training_log.py`)
+
+`training_log.xlsx` is the **one non-code file this repo commits** (see "Local project data"
+above) — one workbook, one sheet per animal, shared across every behavior box via plain `git
+pull`/`push`, each box only ever able to see its own local session CSVs. This drove several
+non-obvious design choices:
+
+- **Update-in-place, not rebuild-from-scratch.** Rebuilding fresh every run (an earlier design)
+  would silently wipe every OTHER box's sheet it can't see locally the moment two boxes' xlsx
+  copies diverged even slightly. `build_workbook()` instead loads the existing file if present and
+  touches ONLY the sheet(s) for subjects it found sessions for locally — every other sheet is left
+  byte-for-byte untouched. There are no more separate `animals_metadata.json`/
+  `session_manual_entries.csv` files (an earlier design) — DOB/Sex/Strain/Baseline weight
+  (hand-typed once, in each sheet's own header block) and per-session `Weight (g)`/`Notes`
+  (hand-typed per row) are now fields directly in the xlsx itself, since that's the one file
+  already committed and synced; the script never overwrites a cell that's already been hand-filled.
+- **Column layout is fully canonicalized (header row included) on every run**, not just
+  append-only. An earlier design only ever *appended* new columns to whatever historical order a
+  sheet already had, self-migrating the schema but never actually fixing a column's *position* once
+  set — confirmed as a real, user-visible problem: `Weight (g)`/`Weight %` stayed stuck in their
+  original positions across several schema revisions despite `COLUMNS`'s own list order changing
+  each time. `_rewrite_subject_sheet()` now fully clears the table (`ws.delete_rows()`, header row
+  included) and rewrites every column fresh from `COLUMNS`' own fixed order every run — a column
+  reorder in code now actually reorders the real sheet, not just future ones. Old, now-orphaned
+  labels (e.g. a since-removed `Protocol / Stage` column — redundant once rows are grouped into
+  per-stage sections with their own header row, so it was dropped entirely) simply don't get
+  recreated; nothing of value is lost since retired columns were already fully superseded.
+- **`ws.column_dimensions` (width/hidden) is keyed by LETTER and survives `delete_rows()`/schema
+  changes** — a real gotcha, confirmed directly: the hidden `Session started` key column used to sit
+  at a different letter in an earlier schema iteration, and that letter's `hidden=True` flag
+  lingered forever after the column moved elsewhere, making an unrelated *visible* column (`Num.
+  Sessions`) appear hidden too. Every column's `hidden` flag is now explicitly reset to `False`
+  before re-hiding only whichever letter `Session started` currently resolves to, every run — don't
+  assume a fresh `_canonical_col_map()` write alone clears stale column-level (as opposed to
+  cell-level) formatting.
+- **Session merging (restart-combining)**: a session that got Stopped, Killed, or crashed partway
+  through and was restarted within an hour (`_MERGE_GAP = 3600.0`s, same protocol only) is combined
+  into ONE row — see `group_sessions()`/`combine_group()`. A session that reached its own natural
+  end (`VAR_MAX_TRIALS`, registered as `SESSION_END_REASON='completed'` in the task script's own
+  `for...else` branch — nothing is registered on the Stop/Kill/crash paths, so *absence* uniformly
+  covers all three) always ends a group, never merging with what follows. Applies to every subject
+  uniformly, including bench-test ones — an earlier design specifically excluded the `test` GUI
+  subject from merging, which was reverted per explicit instruction once it became a recurring
+  point of confusion ("why didn't these two sessions merge" turned out, twice, to be "they were run
+  under the `test` GUI subject" before the exclusion was removed).
+  - A session's own end time comes from the native `SESSION-ENDED` INFO row (`Bpod.close()` writes
+    it) via `session_csv_parser.session_end_datetime()`; falls back to `started + event-span
+    duration` when absent (the crash case — nothing wrote a clean end record).
+  - Combining a group sums per-trial tallies (trial count, L/R turns, licks, aborts, consumed
+    reward volume) and each member's own event-span `session_duration_s` (**not** the wall-clock
+    gap between them — confirmed as a real bug and fixed: naively using `last.ended_dt -
+    first.started_dt` inflated a plain, unmerged singleton session's own Duration from ~8s to
+    ~116s by including Bpod connection/handshake overhead between `SESSION-STARTED` and the first
+    real trial). `threshold_start_deg` comes from the first member, everything else "as of end of
+    session" (`threshold_end_deg`, `gain_mult_end`, `direction_ratio_end`, `reward_ul`) from the
+    last — same semantics a single session's own `_end` fields always had, just now "end of bout."
+  - `Num. Sessions` is blank for an ordinary un-merged row (not `1`) — a bare `1` there read as if
+    something had been combined when nothing had; it only shows a count once a real merge happened.
+  - The hidden `Session started` column stores ALL member session-start timestamps, `; `-joined —
+    this is the actual matching key across runs (exact match, or a strict-subset match when a
+    restart later absorbs a session that used to stand alone into a bigger group), which is why
+    hand-typed `Weight (g)`/`Notes` values correctly carry forward across a merge appearing later.
+    **Splitting an already-merged group back apart (e.g. temporarily testing/reverting a merge
+    behavior) is the one case this carry-forward doesn't handle** — the old row's superset key
+    doesn't subset-match either resulting singleton, so hand-typed values on that row get orphaned
+    and need restoring by hand. Confirmed hit twice while iterating on the merge-exclusion
+    behavior above; not expected to come up in normal forward-only usage (real restarts only ever
+    grow a group, never shrink one).
+- **`session_struct_export.py`** (`_wheel_shaping_shared/`) writes a `.mat` (`scipy.io.savemat`,
+  MATLAB-openable, `trials` comes out as a 1xN cell array of structs — the same shape as Bpod's own
+  native `SessionData.RawEvents.Trial`) and `.json` (Python-readable) snapshot of a session,
+  wired into both stage scripts at every termination path (normal finish, Stop, Kill) — enough to
+  reconstruct exactly what a task was configured to do (`task_params`, harvested automatically via
+  `{k: v for k, v in globals().items() if k.startswith('VAR_')}`, not a hand-maintained list) plus
+  everything that happened. **The session's own CSV path must be captured BEFORE calling
+  `my_bpod.close()`, not after** — confirmed directly in `bpod_base.py`: `close()` does `del
+  self._session`, so `my_bpod.session._path` raises/is gone once `close()` has run. Local-only,
+  never committed (see "Local project data" above). `merge_session_structs()` combines multiple
+  raw sessions' own already-exported structs (preferring each member's own `.json`, which has
+  `task_params` — not recoverable by re-parsing the raw CSV alone, since `VAR_*` values are never
+  written into the CSV itself) into one `<first_session>_combined_struct.mat`/`.json`, called from
+  `build_training_log.py`'s grouping step for any merged group.
+- **One native Bpod INFO row's own "key" is a full descriptive sentence** ("This is a PYBPOD file.
+  Find more info at ..."), not a short identifier like every other INFO key — confirmed present in
+  every real session CSV's preamble, not a parsing bug. Broke `scipy.io.savemat` (`ValueError:
+  Field names are restricted to 63 characters`) the first time struct export tried to use it
+  directly as a MATLAB struct field name; `session_struct_export._sanitize_key()` strips
+  non-identifier characters and truncates to 63 chars for exactly this reason — worth remembering
+  for any future consumer that turns raw INFO-row keys into identifiers of any kind.
+- **Batch launchers** in `records/`, for anyone who'd rather double-click than use a terminal:
+  `Update Training Log.bat` (local refresh only, no git action), `Sync Training Log.bat` (`git
+  pull` -> refresh -> commit+push `training_log.xlsx`, but only if it actually changed — a failed
+  `pull` from a real conflict, which *will* happen eventually since `.xlsx` is a binary format git
+  can't auto-merge, stops the script immediately with a clear message rather than risking a silent
+  overwrite), and `Print Startup Checklist.bat` (regenerates the blank template). All three `cd
+  /d "%~dp0"` first and try a hardcoded known-good Python path before falling back to `conda
+  activate pybpod-environment`, so they work whether or not that exact interpreter path exists on
+  a given box.
 
 ## Architecture notes
 
-- The GUI plugin system (`pybpod-gui-plugin` + everything in `plugins/`) is built on the
-  `pyforms-generic-editor` framework (in `libraries/`), which loads plugins by Python package name
-  from `GENERIC_EDITOR_PLUGINS_LIST` in `user_settings.py`. Adding a new plugin submodule to the repo
-  is not enough by itself — it must also be added to that list (and installed) to actually load.
-  `SETTINGS_PRIORITY` in `user_settings.py` controls settings-file precedence when multiple
-  `user_settings.py` files are discoverable (see `logging-bootstrap`/`pyforms` settings resolution).
+- The GUI plugin system (`pybpod-gui-plugin` + everything in `pybpod/plugins/`) is built on the
+  `pyforms-generic-editor` framework (in `pybpod/libraries/`), which loads plugins by Python package
+  name from `GENERIC_EDITOR_PLUGINS_LIST` in `pybpod/user_settings.py`. Adding a new plugin
+  submodule to the repo is not enough by itself — it must also be added to that list (and
+  installed) to actually load. `SETTINGS_PRIORITY` in `user_settings.py` controls settings-file
+  precedence when multiple `user_settings.py` files are discoverable (see
+  `logging-bootstrap`/`pyforms` settings resolution).
 - `pybpod-api` talks to the physical Bpod device over serial; `pybpod-gui-api` and
   `pybpod-gui-plugin` are the layers that expose that over the desktop GUI (built on `pyforms-gui`,
   a Qt-based forms framework). Hardware-facing changes typically belong in `pybpod-api`; UI/workflow
-  changes belong in `pybpod-gui-plugin` or the relevant plugin under `plugins/`.
-- Because packages are versioned and pinned against each other (see `base/pybpod/setup.py`'s
-  `install_requires`), a change in one submodule generally isn't picked up by a pip-installed
-  (non-editable) instance of another until versions are bumped and republished — this only doesn't
-  matter in the `-e` editable-install dev setup produced by `utils/install.py`.
+  changes belong in `pybpod-gui-plugin` or the relevant plugin under `pybpod/plugins/`.
+- Because packages are versioned and pinned against each other (see
+  `pybpod/base/pybpod/setup.py`'s `install_requires`), a change in one submodule generally isn't
+  picked up by a pip-installed (non-editable) instance of another until versions are bumped and
+  republished — this only doesn't matter in the `-e` editable-install dev setup produced by
+  `pybpod/utils/install.py`.
