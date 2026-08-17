@@ -64,8 +64,11 @@ _SIMPLE_GATES_PROTOCOLS = ('stage2_threshold_staircase',)   # which protocols ha
 
 _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed' session's own end
                        # are combined into one row/struct with it (same protocol only)
-_TEST_SUBJECT = 'test'   # never merged, regardless of how its sessions ended -- the bench-test
-                          # subject stays exactly one row per raw session
+_TEST_SUBJECT = 'test'   # excluded from merging by default (see _MERGE_TEST_SUBJECT below) -- the
+                          # bench-test subject normally stays exactly one row per raw session
+_MERGE_TEST_SUBJECT = False   # flip to True locally to verify merging against real bench-test
+                               # data without waiting for a real animal session -- never commit
+                               # this as True, it only exists for this kind of spot-check
 
 
 def summarize_session(path):
@@ -199,13 +202,13 @@ def scan_all_sessions():
 
 def group_sessions(subject, sessions):
     """ Returns a list of groups (each a chronological list of >=1 session summaries).
-    `subject == _TEST_SUBJECT` never merges -- each session is its own singleton group, matching
-    every subject's behavior before this feature existed. Otherwise a session whose
-    `session_end_reason` is 'completed' (reached VAR_MAX_TRIALS naturally) always ends a group --
-    it's never combined with whatever runs next. Any other ending (Stop, Kill, or a crash --
-    `session_end_reason` absent) is eligible to merge with the next same-protocol session if it
-    starts within `_MERGE_GAP` seconds of this one's own end. """
-    if subject == _TEST_SUBJECT:
+    `subject == _TEST_SUBJECT` never merges (unless `_MERGE_TEST_SUBJECT` is on) -- each session is
+    its own singleton group, matching every subject's behavior before this feature existed.
+    Otherwise a session whose `session_end_reason` is 'completed' (reached VAR_MAX_TRIALS
+    naturally) always ends a group -- it's never combined with whatever runs next. Any other
+    ending (Stop, Kill, or a crash -- `session_end_reason` absent) is eligible to merge with the
+    next same-protocol session if it starts within `_MERGE_GAP` seconds of this one's own end. """
+    if subject == _TEST_SUBJECT and not _MERGE_TEST_SUBJECT:
         return [[s] for s in sessions]
 
     groups = []
@@ -290,15 +293,14 @@ def _stage_label(protocol_name):
 
 # --- workbook update-in-place --------------------------------------------------------------------
 
-# ('internal key', 'column header label'). Order matches the real training_log.xlsx's own current
-# column layout exactly (not just an arbitrary internal choice) -- only matters for a brand-new
-# sheet, since an existing sheet is matched by label text (see _get_column_map) and never
-# reordered; adding a new entry here later just appends a new column on that sheet's next update,
-# no migration needed.
+# ('internal key', 'column header label'). This is the CANONICAL order -- every run rewrites the
+# entire table (header row included) to match it exactly, so a reorder here actually takes effect
+# on an existing sheet too, not just a brand-new one. No 'protocol' column: which stage a row
+# belongs to is already unambiguous from the section header it sits under (see
+# _write_section_header()), so a per-row repeat of the same text would just be redundant.
 COLUMNS = [
     ('date', 'Date'),
     ('time_of_day', 'Time (HH:MM)'),
-    ('protocol', 'Protocol / Stage'),
     ('weight_g', 'Weight (g)'),                    # MANUAL -- never written for an existing row
     ('weight_pct', 'Weight %'),                    # formula, refreshed every run
     ('trial_count', 'Trials'),
@@ -370,28 +372,26 @@ def _get_or_create_subject_sheet(wb, subject):
     return ws, table_start_row
 
 
-def _get_column_map(ws, table_start_row):
-    """ Scans the existing header row for known column labels; any COLUMNS entry not already
-    present gets appended as a new column at the end. This is what lets the schema grow without
-    disturbing an existing sheet's already-populated columns at all. """
+def _canonical_col_map():
+    """ Fixed column positions matching COLUMNS' own order, 1-indexed. Used for ALL writing --
+    the table gets fully rewritten in this order every run (see _rewrite_subject_sheet()). """
+    return {key: idx for idx, (key, _label) in enumerate(COLUMNS, start=1)}
+
+
+def _scan_existing_column_labels(ws, table_start_row):
+    """ Returns {key: col_idx} for whatever COLUMNS-known labels are CURRENTLY in the header row,
+    at whatever position they happen to be -- used ONLY to locate old data (hand-typed manual
+    cells, the hidden session-key column) before the table gets cleared and rewritten in canonical
+    order. Any label not in COLUMNS (an old, now-retired column, e.g. a since-removed 'Protocol /
+    Stage' or legacy 'Rewards' column from an earlier schema) is simply not reported -- its data
+    doesn't survive the rewrite, which is intentional: those columns were already fully
+    superseded, nothing of value is lost. """
     label_to_key = {label: key for key, label in COLUMNS}
     col_map = {}
-    max_used_col = 0
     for col_idx in range(1, ws.max_column + 1):
         value = ws.cell(row=table_start_row, column=col_idx).value
-        if value:
-            max_used_col = col_idx
         if value in label_to_key:
             col_map[label_to_key[value]] = col_idx
-
-    next_col = max_used_col + 1
-    for key, label in COLUMNS:
-        if key not in col_map:
-            cell = ws.cell(row=table_start_row, column=next_col, value=label)
-            cell.font = _HEADER_FONT
-            cell.alignment = Alignment(wrap_text=True, vertical='bottom')
-            col_map[key] = next_col
-            next_col += 1
     return col_map
 
 
@@ -477,8 +477,8 @@ def _rewrite_subject_sheet(wb, subject, sessions):
     merging + per-stage sectioning are both in play. Every OTHER subject's sheet in the workbook
     is never touched. """
     ws, table_start_row = _get_or_create_subject_sheet(wb, subject)
-    col_map = _get_column_map(ws, table_start_row)
-    existing = _read_existing_manual_cells(ws, table_start_row, col_map)
+    old_col_map = _scan_existing_column_labels(ws, table_start_row)
+    existing = _read_existing_manual_cells(ws, table_start_row, old_col_map)
 
     groups = group_sessions(subject, sessions)
 
@@ -513,13 +513,22 @@ def _rewrite_subject_sheet(wb, subject, sessions):
         rows.sort(key=lambda r: r['date'])
     ordered_protocols = sorted(buckets.keys(), key=_stage_sort_key)
 
-    if ws.max_row > table_start_row:
-        ws.delete_rows(table_start_row + 1, ws.max_row - table_start_row)
+    # Clear the ENTIRE table -- header row included, not just the data rows below it -- and
+    # rewrite it fresh in canonical order. This is what actually lets a schema/column-order change
+    # (like dropping 'Protocol / Stage' and moving Weight (g)/Weight % to C/D) take effect on an
+    # existing sheet, not just a brand-new one; the old scan-and-append design preserved whatever
+    # historical order a sheet already had forever, which is exactly what was wrong.
+    if ws.max_row >= table_start_row:
+        ws.delete_rows(table_start_row, ws.max_row - table_start_row + 1)
+
+    col_map = _canonical_col_map()
+    for key, label in COLUMNS:
+        cell = ws.cell(row=table_start_row, column=col_map[key], value=label)
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(wrap_text=True, vertical='bottom')
 
     row_num = table_start_row + 1
-    num_cols = ws.max_column   # the sheet's actual physical width, not len(col_map) -- immune to
-                                # any orphaned/legacy columns (not tracked by col_map) undercounting
-                                # the fill range
+    num_cols = len(COLUMNS)
     for protocol in ordered_protocols:
         _write_section_header(ws, row_num, _stage_label(protocol), num_cols,
                                _stage_fill_color(protocol))
