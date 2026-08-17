@@ -13,5 +13,4 @@ if exist "%PY_EXE%" (
 )
 
 echo.
-echo Done -- press any key to close this window.
-pause >nul
+echo Done.
