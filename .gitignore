@@ -3,7 +3,6 @@ _projects/AuditoryEvidenceAccum/experiments/
 _projects/AuditoryEvidenceAccum/subjects/
 _projects/AuditoryEvidenceAccum/boards/
 _projects/AuditoryEvidenceAccum/users/
-_projects/AuditoryEvidenceAccum/*.json
 _projects/AuditoryEvidenceAccum/records/animals_metadata.json
 _projects/AuditoryEvidenceAccum/records/session_manual_entries.csv
 _projects/**/session_startup_checklist.xlsx
@@ -12,6 +11,5 @@ _projects/Tests/experiments/
 _projects/Tests/subjects/
 _projects/Tests/boards/
 _projects/Tests/users/
-_projects/Tests/*.json
 _projects/Tests/tasks/**/*.png
 **/__pycache__/
