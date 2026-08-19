@@ -39,6 +39,24 @@ pattern.
 Run this like any other PyBpod task, via the GUI's Run button -- requires the Bpod board and
 rotary encoder module physically connected via USB, and a second monitor connected for the dot
 display (falls back to screen 0 with a printed warning if only one screen is detected).
+
+**Forked from dot_wheel_test.py (kept byte-identical/untouched -- still its own valid, separately-
+tested bench test), not a parametrized variant of it, per current instruction.** The only
+difference from dot_wheel_test.py: this script uses `_shared/dot_display.py`'s new
+`MiddleScreenDotDisplay` instead of `DotDisplay`. Reason: this rig's three physical dot-stimulus
+monitors do NOT show up as three separate Qt screens -- a direct, read-only `QApplication().
+screens()` query on this machine found only 2 screens total, `DISPLAY1` (a separate 1920x1080
+monitor) and `DISPLAY2` at 6144x1536 (6144 / 3 = 2048px, a standard panel width -- almost certainly
+the three physical rig panels bonded by the GPU into one combined Qt screen, not three independent
+ones). Because of that, `DotDisplay` alone draws the dot relative to the FULL 6144px-wide combined
+window, so its full range of motion visibly crosses from the middle physical monitor onto the two
+outer ones as the wheel turns -- `MiddleScreenDotDisplay` fixes this by always painting the two
+outer thirds of that same combined window solid black and confining the dot's rendering AND its
+full range of motion (via `get_screen_width_px()` returning only the active column's width, which
+this script's existing VAR_DOT_EDGE_FRACTION-based gain calibration already uses) to one
+VAR_ACTIVE_MONITOR_INDEX-th of VAR_N_PHYSICAL_MONITORS_IN_SPAN equal-width columns. The equal-
+thirds split (2048px each) should be visually double-checked against the real monitor bezels the
+first time this runs on hardware.
 """
 import os
 import random
@@ -51,7 +69,7 @@ _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
-from dot_display import DotDisplay
+from dot_display import MiddleScreenDotDisplay
 
 from pybpodapi.protocol import Bpod, StateMachine
 
@@ -70,7 +88,12 @@ VAR_REQUIRE_NO_LICK = False        # no lick sensor assumed relevant to this ben
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, same convention as every other script
 
-VAR_DOT_SCREEN_INDEX = 1          # second monitor; falls back to 0 with a warning if not found
+VAR_DOT_SCREEN_INDEX = 1          # the combined 3-panel Qt screen; falls back to 0 with a warning
+                                   # if not found -- see module docstring for why this is one
+                                   # combined screen, not the middle monitor directly.
+VAR_N_PHYSICAL_MONITORS_IN_SPAN = 3   # confirmed via screens(): DISPLAY2 is 6144px wide, 6144/3 =
+                                       # 2048px per physical panel -- see module docstring.
+VAR_ACTIVE_MONITOR_INDEX = 1          # 0=left, 1=middle, 2=right -- middle panel only.
 VAR_DOT_DIAMETER_PX = 60          # UNCONFIRMED against training_protocol.md SS1.2's 3-4 visual-deg
                                    # spec -- this is a guessed pixel value, not derived from it.
                                    # Converting visual degrees -> px needs the monitor's physical
@@ -122,14 +145,19 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = MiddleScreenDotDisplay(screen_index=VAR_DOT_SCREEN_INDEX,
+                              n_segments=VAR_N_PHYSICAL_MONITORS_IN_SPAN,
+                              active_segment_index=VAR_ACTIVE_MONITOR_INDEX,
+                              diameter_px=VAR_DOT_DIAMETER_PX,
+                              background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
 # Geometry-aware gain: hitting VAR_RIGHT_THRESHOLD_DEG on the wheel should move the dot to
 # VAR_DOT_EDGE_FRACTION of the actual screen's half-width, not a fixed guessed px/wheel-deg
-# constant -- see VAR_DOT_EDGE_FRACTION's own comment above.
+# constant -- see VAR_DOT_EDGE_FRACTION's own comment above. get_screen_width_px() returns just the
+# active monitor's column width (not the full 3-panel-wide window), so this keeps the dot's full
+# range of motion confined to that one physical monitor automatically.
 screen_width_px = dot.get_screen_width_px()
 # rotary_setup.screen_direction_gain() applies this rotary's confirmed wheel->screen sign
 # correction -- see that function's own docstring/WHEEL_TO_SCREEN_SIGN comment in rotary_setup.py.
@@ -138,8 +166,8 @@ screen_width_px = dot.get_screen_width_px()
 dot_gain = rotary_setup.screen_direction_gain(
     (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / VAR_RIGHT_THRESHOLD_DEG)
 dot.set_deg_to_px_gain(dot_gain)
-print("Dot gain calibrated to {0:.2f} px/wheel-deg (screen width {1}px, edge fraction {2})".format(
-    dot_gain, screen_width_px, VAR_DOT_EDGE_FRACTION), flush=True)
+print("Dot gain calibrated to {0:.2f} px/wheel-deg (active screen width {1}px, edge fraction "
+      "{2})".format(dot_gain, screen_width_px, VAR_DOT_EDGE_FRACTION), flush=True)
 
 render_interval = 1.0 / VAR_RENDER_HZ
 

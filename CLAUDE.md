@@ -18,6 +18,10 @@ one `git clone` + `git submodule update --init --recursive`.
 - `_projects/` — this lab's real task code and training data (see "Local project data" below).
   Moved in as a real, mostly-committed part of *this* repo — no longer a separate, ungit'd sibling
   directory the way it was in the original single-machine `pybpod` checkout this was migrated from.
+- `Calibration/` — hardware calibration tooling shared across every project (currently: liquid
+  reward valve calibration; see "Liquid reward (valve) calibration" below) — a sibling of
+  `_projects/`, not nested inside any single `_projects/<ProjectName>/`, since a rig's own physical
+  calibration isn't specific to one experiment. The first top-level folder of this kind in the repo.
 - `CLAUDE.md` (this file) — lives at this repo's own top level, not inside the `pybpod/` submodule,
   even though most of its historical content (the sections below down through "Architecture notes")
   was originally written for `pybpod` on its own. It now documents the whole combined repo.
@@ -156,7 +160,16 @@ not defined by user` on startup is expected/benign, not a failure.
    `plugins/`, resolved relative to `pybpod/`) so the whole stack is editable in-place. **Re-run
    this (or at least the `pip install -e` loop) any time a submodule gets re-cloned/updated** — an
    existing editable install does not automatically follow a submodule to a new location; see
-   "Forked submodules" above.
+   "Forked submodules" above. `base/pybpod` itself — the package whose `setup.py` actually defines
+   the `start-pybpod` console-script entry point — is deliberately listed **last** in
+   `SUBMODULES_FOLDERS`, after every other package it depends on (it pins exact versions of
+   `pyforms-gui`, `pybpod-api`/`pybpod-gui-api`/`pybpod-gui-plugin`, and every `plugins/` package):
+   installing it earlier would make `pip` try to satisfy those pins from PyPI instead of the local
+   editable installs, since they wouldn't exist yet at that point in the loop. Confirmed as a real
+   gap during a from-scratch machine setup: `base/pybpod` was missing from this list entirely for a
+   time, so `python utils/install.py` alone left `start-pybpod` unregistered (`pip show pybpod` /
+   `where start-pybpod` both came up empty) even though every other submodule installed cleanly —
+   needed a separate `pip install -e base/pybpod` run last to fix it.
 2. Writes `user_settings.py` (if it doesn't already exist, inside `pybpod/`) with
    `GENERIC_EDITOR_PLUGINS_LIST` set to the default plugin set (`pybpodgui_plugin`,
    `pybpodgui_plugin_timeline`, `pybpodgui_plugin_session_history`). **This file is gitignored
@@ -167,7 +180,27 @@ not defined by user` on startup is expected/benign, not a failure.
    another already-set-up box is the fastest way to get a new one going. Confirmed as a real
    failure mode: a box with only the *default* `user_settings.py` silently loses the "Wheel
    Position" live-plot feature (and any other non-default plugin) with no error, since the GUI just
-   never loads a plugin package that isn't in `GENERIC_EDITOR_PLUGINS_LIST`.
+   never loads a plugin package that isn't in `GENERIC_EDITOR_PLUGINS_LIST`. **A second, related
+   failure mode, confirmed directly**: `start-pybpod` resolves `user_settings.py` off
+   `sys.path.insert(0, os.getcwd())` — i.e. off whatever directory it happens to be launched
+   *from*, not a fixed repo-relative path. `pybpodgui_plugin/__main__.py`'s own fallback, on
+   `ModuleNotFoundError`, silently creates (if one doesn't already exist) `~/user_settings.py`
+   (the OS user's home directory) with only `GENERIC_EDITOR_PLUGINS_LIST = ['pybpodgui_plugin']` —
+   no rotaryencoder, no timeline, no session-history, no trial-timeline — and uses it with **no
+   error or warning of any kind**. Confirmed as a real, already-hit failure mode on this machine:
+   launching `start-pybpod` from a PowerShell `cd`'d somewhere other than `pybpod/` silently picked
+   up a genuinely ancient (dated 2020, unrelated prior use of this machine) minimal home
+   `user_settings.py`, which manifested as every session's right-click context menu showing *only*
+   "Remove" — none of the timeline/session-history/rotaryencoder/trial-timeline menu items, since
+   none of those plugins were in that stale file's list at all (traced all the way down through
+   `pyforms_generic_editor`'s plugin-mixin composition mechanism before finding the real cause was
+   this cwd-dependent fallback, not a code bug — the composed `Session` class is provably correct
+   when the right `user_settings.py` is actually in use). Fixed by overwriting the stale home file
+   to match `pybpod/user_settings.py` exactly, so it now works correctly as a fallback regardless of
+   launch directory — but the underlying cwd-dependency itself is unchanged, so **always `cd` into
+   `pybpod/` before running `start-pybpod`** rather than relying on this fallback catching every
+   case; a *different* home directory (a different Windows user account, a different machine) would
+   still hit the same silent-wrong-plugin-list trap unless its own `~/user_settings.py` is checked.
 
 There are OS-specific conda environment files under `pybpod/utils/` (`environment-windows-10.yml`,
 `environment-ubuntu-17.10.yml`, `environment-macOSx.yml`) with pinned native deps (Qt, PyQt, HDF5,
@@ -466,6 +499,39 @@ Durable facts/gotchas from building this:
   for that whole stretch, with the live debiasing values still being computed/logged for display
   even though they weren't driving the (locked) side decision at the time. Don't reintroduce a
   side lock without re-checking this reasoning.
+- **A rig with multiple physical monitors for the dot stimulus may still only expose ONE combined
+  Qt screen, not one per physical panel.** Confirmed on this rig via a direct, read-only
+  `QApplication().screens()` query: three physical dot-stimulus monitors reported as a single
+  6144x1536 `QScreen` (`DISPLAY2`; 6144 / 3 = 2048px, a standard panel width — almost certainly the
+  GPU bonding the three outputs into one combined surface), alongside one separate, genuinely
+  distinct 1920x1080 `DISPLAY1`. `DotDisplay` (unmodified) draws relative to that whole combined
+  window's own center/width, so its full range of motion visibly crosses from the intended middle
+  physical monitor onto the two outer ones as the wheel turns — there is no separate `QScreen` for
+  those outer panels to black out independently. `_shared/dot_display.py`'s new, purely additive
+  `MiddleScreenDotDisplay` (+ its own `_MiddleOnlyDotWidget`) fixes this correctly for that
+  situation: it still spans the one combined window, but always paints every column except one
+  `active_segment_index`-th of `n_segments` equal columns solid black, and confines the dot's
+  rendering AND its full range of motion (via `get_screen_width_px()` returning just that active
+  column's width) to that one column — a drop-in replacement for `DotDisplay` (identical public
+  method surface), used by `dot_wheel_midscreen_test.py` and, behind a `VAR_USE_MIDDLE_SCREEN_ONLY`
+  flag, `hifi_singleside_dot_test.py`. Before assuming "N physical monitors = N `QScreen`s" on any
+  rig, check `screens()` directly rather than trusting the monitor count alone.
+- **This rig's rotary encoder's raw positive-position direction is the physical direction that
+  visually moves a wheel-coupled display element toward screen-LEFT, not screen-right** — confirmed
+  directly on hardware (a user turning the wheel observed the dot moving opposite to the expected
+  direction). This does NOT affect which physical direction crosses
+  `VAR_LEFT_THRESHOLD_DEG`/`VAR_RIGHT_THRESHOLD_DEG` or which event (`left_event`/`right_event`)
+  fires — those are driven directly by the rotary's own raw position sign via native firmware
+  thresholds, entirely independent of anything rendered on screen. Centralized as
+  `rotary_setup.WHEEL_TO_SCREEN_SIGN` (currently `-1`) and `rotary_setup.screen_direction_gain
+  (magnitude)` — every wheel-coupled display script (`dot_wheel_test.py`,
+  `dot_wheel_midscreen_test.py`, `hifi_singleside_dot_test.py`) calls
+  `rotary_setup.screen_direction_gain(...)` around its own gain calculation instead of hardcoding a
+  sign flip locally, so a future rewiring/remounting only needs one constant changed, not every
+  display-coupling script individually. **Not yet ported to the Gabor-based scripts**
+  (`gabor_wheel_test.py` and its hifi-combined variants) — no complaint has been raised there, and
+  they haven't been checked; don't assume they share (or don't share) this same sign issue without
+  checking directly.
 
 ## Wheel-shaping training stages (Stage 1/2, `AuditoryEvidenceAccum`)
 
@@ -695,6 +761,56 @@ non-obvious design choices:
   /d "%~dp0"` first and try a hardcoded known-good Python path before falling back to `conda
   activate pybpod-environment`, so they work whether or not that exact interpreter path exists on
   a given box.
+
+## Liquid reward (valve) calibration (`Calibration/`)
+
+Water reward volume was never calibrated anywhere in this codebase until this section's own work —
+`VAR_REWARD_UL` in the wheel-shaping stage scripts was a purely cosmetic placeholder (only ever
+`register_value()`'d for logging, never fed into `VAR_REWARD_DURATION`, which is what actually
+drives the valve, hardcoded to `0.1`s in every task script that fires one). `Calibration/` ports the
+same underlying approach Sanworks' original MATLAB Bpod software uses
+(`Bpod_Gen2/Functions/Calibration/Liquid Reward/LegacyBpodLiquidCalibration.m`/
+`LegacyGetValveTimes.m` — the current MATLAB `master` has moved to a newer OOP wrapper around the
+same idea; `pybpod-api` itself has no calibration functionality of its own at all, confirmed by
+reading its source tree, so this is this lab's own from-scratch port, not something reused from the
+Python Bpod stack):
+
+- **Data collection**: fire a valve N times (100-500) at a given duration, weigh the *total*
+  dispensed liquid in grams, convert to a per-pulse volume assuming water density 1 g/mL
+  (`volume_uL = mass_g * 1000 / N`), append `(duration_ms, volume_uL)` to that valve's table.
+  Repeat at a few different durations — needs ≥3 points before fitting (same minimum MATLAB's own
+  `LegacyGetValveTimes.m` enforces).
+- **Fit**: per-valve 2nd-order polynomial fit as `duration_ms = f(volume_uL)` (`numpy.polyfit(
+  volumes, durations_ms, 2)`) — **not** the reverse, and not piecewise interpolation between raw
+  points, matching MATLAB's own direction/order exactly.
+- **Lookup**: `LiquidCalibration.get_valve_time_s(volume_ul, valve_id=1)` evaluates that polynomial
+  and returns the open duration directly in **seconds**, ready to assign straight to a `state_timer`
+  — the Python equivalent of `GetValveTimes(volume_uL, valveID)`. Raises `ValueError` rather than
+  ever silently returning a guessed duration if that valve hasn't been fit yet.
+- `Calibration/liquid_calibration.py` — the importable data/fit/lookup module (`LiquidCalibration`
+  class), JSON-persisted (not MATLAB's `.mat` — git-diffable, same precedent as
+  `wheel_shaping_state.json` elsewhere in this repo) at `Calibration/liquid_calibration.json`.
+  **That JSON file is gitignored, not committed** — a valve's physical calibration (tubing, wear,
+  reservoir height) is specific to *this* rig's own hardware, same reasoning already applied to
+  `boards/`/`subjects/` configs being machine-specific and gitignored elsewhere in this repo. The
+  `.py` files themselves ARE committed, as shared tooling.
+- `Calibration/calibrate_liquid.py` — the interactive data-collection front end: a standalone PyQt5
+  GUI (valve dropdown, editable duration/pulse-count/mass fields, a live points table, fit button,
+  and a volume→duration lookup preview) — the Python/PyQt5 equivalent of MATLAB's own
+  `BpodLiquidCalibration('Calibrate')` GUI, not a command-line prompt sequence. PyQt5 needed no new
+  dependency (already pulled in by `pyforms-gui`). Deliberately **not** a PyBpod GUI task/plugin —
+  calibration is a bench maintenance procedure, not project/session-tracked experiment data, so it
+  connects to the Bpod board directly (`Bpod()`, same convention every task script uses) and skips
+  all PyBpod project/task scaffolding. Firing the requested pulses (each pulse a real one-state Bpod
+  `StateMachine`, hardware-timed — not a Python `time.sleep()` loop, same "prefer native Bpod timing"
+  principle used throughout this codebase) runs on a background `QThread` so the UI stays responsive;
+  the pulse-related buttons are disabled for the run's duration so only one thread ever touches the
+  Bpod connection at a time (per the "background thread can never safely share a live Bpod
+  connection with another thread" hazard documented under "Hardware module notes" below).
+- **Not yet done, deliberately scoped out for now**: no existing task script has been wired to call
+  `get_valve_time_s()` in place of its own hardcoded `VAR_REWARD_DURATION` — that's a ~12-file,
+  two-project change, intentionally left as a separate follow-up once real measured calibration data
+  exists to validate against, rather than bundled into building the tool itself.
 
 ## Architecture notes
 

@@ -145,3 +145,128 @@ class DotDisplay(object):
         """ Processes pending Qt events/repaints -- call repeatedly from an external polling loop
         instead of app.exec_() (which would block the calling thread). """
         self._app.processEvents()
+
+
+class _MiddleOnlyDotWidget(QWidget):
+    """
+    Same rendering idea as _DotWidget, but for a rig where several physical monitors are bonded by
+    the GPU into a single Qt/Windows screen -- confirmed on this rig via a direct screens() query:
+    three physical panels report as ONE wide QScreen (6144x1536, i.e. three 2048px-wide panels),
+    not three separate QScreen entries, so there is no separate screen to point a second window at
+    for the other two panels. Instead, this widget still spans the whole combined window, but only
+    ever draws (background + dot) inside one active_segment_index-th of n_segments equal-width
+    columns; everything outside that column is always painted solid black.
+    """
+    def __init__(self, diameter_px, background_gray, dot_gray, n_segments, active_segment_index):
+        super(_MiddleOnlyDotWidget, self).__init__()
+        self._diameter_px = diameter_px
+        self._background_gray = background_gray
+        self._dot_gray = dot_gray
+        self._n_segments = n_segments
+        self._active_segment_index = active_segment_index
+        self._x_offset_px = 0
+        self._visible_dot = False
+
+    def set_x_offset(self, x_offset_px):
+        self._x_offset_px = x_offset_px
+        self.update()
+
+    def set_dot_visible(self, visible):
+        self._visible_dot = visible
+        self.update()
+
+    def _active_rect(self):
+        """ (x0, width) in widget-local px of the active_segment_index-th of n_segments equal
+        columns -- the last column absorbs any leftover px from integer division. """
+        seg_w = self.width() // self._n_segments
+        x0 = seg_w * self._active_segment_index
+        if self._active_segment_index == self._n_segments - 1:
+            return x0, self.width() - x0
+        return x0, seg_w
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0))   # whole spanned window black by default
+        x0, w = self._active_rect()
+        bg = self._background_gray
+        painter.fillRect(x0, 0, w, self.height(), QColor(bg, bg, bg))
+        if self._visible_dot:
+            cx = x0 + w // 2 + int(round(self._x_offset_px))
+            cy = self.height() // 2
+            r = self._diameter_px // 2
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(self._dot_gray, self._dot_gray, self._dot_gray))
+            painter.drawEllipse(cx - r, cy - r, self._diameter_px, self._diameter_px)
+
+
+class MiddleScreenDotDisplay(object):
+    """
+    Purely additive alternative to DotDisplay -- does not read, call, or modify DotDisplay/
+    _DotWidget in any way. For a rig where n_segments physical monitors are bonded into a single
+    Qt screen_index (see _MiddleOnlyDotWidget's own docstring for how that was confirmed on this
+    rig), this keeps the dot's rendering AND its full range of motion confined to one
+    active_segment_index-th column of that combined window, with the rest of the window always
+    solid black -- so the two other physical monitors sharing that same combined screen appear
+    blank even though they're not separate windows.
+
+    Same constructor shape and exact same public method surface as DotDisplay (show()/close()/
+    get_screen_width_px()/set_deg_to_px_gain()/clear()/set_position_deg()/pump()) -- a drop-in
+    replacement for DotDisplay in a task script. get_screen_width_px() here deliberately returns
+    the ACTIVE COLUMN's width, not the full spanned window's width, so a caller's existing
+    geometry-aware gain calibration (e.g. dot_wheel_test.py's own VAR_DOT_EDGE_FRACTION-based gain)
+    automatically keeps the dot's full range of motion within one physical monitor with no other
+    code changes needed.
+    """
+
+    def __init__(self, screen_index=1, n_segments=3, active_segment_index=1, diameter_px=60,
+                 background_gray=128, dot_gray=0, deg_to_px_gain=4.0):
+        self._deg_to_px_gain = deg_to_px_gain
+
+        self._app = QApplication.instance()
+        if self._app is None:
+            self._app = QApplication(sys.argv)
+
+        screens = self._app.screens()
+        if screen_index >= len(screens):
+            print("WARNING: MiddleScreenDotDisplay requested screen index {0} but only {1} "
+                  "screen(s) detected -- falling back to screen 0.".format(
+                      screen_index, len(screens)), flush=True)
+            screen_index = 0
+        screen_geometry = screens[screen_index].geometry()
+
+        self._widget = _MiddleOnlyDotWidget(diameter_px, background_gray, dot_gray,
+                                             n_segments, active_segment_index)
+        self._widget.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self._widget.setGeometry(screen_geometry)
+
+    def show(self):
+        self._widget.show()
+
+    def close(self):
+        self._widget.close()
+
+    def get_screen_width_px(self):
+        """ The ACTIVE COLUMN's width in px (not the full spanned window's width) -- see class
+        docstring for why. """
+        _x0, w = self._widget._active_rect()
+        return w
+
+    def set_deg_to_px_gain(self, deg_to_px_gain):
+        self._deg_to_px_gain = deg_to_px_gain
+
+    def clear(self):
+        """ Blank/neutral active column (rest of the window stays black regardless) -- call
+        between trials, before a decision period starts. """
+        self._widget.set_dot_visible(False)
+
+    def set_position_deg(self, wheel_position_deg):
+        """ Repositions the (already-visible) dot from the current wheel position, using
+        deg_to_px_gain to convert wheel degrees to a pixel offset from the active column's own
+        center. """
+        self._widget.set_dot_visible(True)
+        self._widget.set_x_offset(wheel_position_deg * self._deg_to_px_gain)
+
+    def pump(self):
+        """ Processes pending Qt events/repaints -- call repeatedly from an external polling loop
+        instead of app.exec_() (which would block the calling thread). """
+        self._app.processEvents()

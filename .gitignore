@@ -12,4 +12,5 @@ _projects/Tests/subjects/
 _projects/Tests/boards/
 _projects/Tests/users/
 _projects/Tests/tasks/**/*.png
+Calibration/liquid_calibration.json
 **/__pycache__/

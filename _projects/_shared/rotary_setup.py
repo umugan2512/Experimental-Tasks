@@ -64,3 +64,32 @@ def set_and_enable_thresholds(rotary, thresholds_deg):
     rotary.set_thresholds(thresholds_deg)
     rotary.enable_all_thresholds()
     return ['RotaryEncoder1_{0}'.format(i + 1) for i in range(len(thresholds_deg))]
+
+
+# Confirmed on hardware (2026-08-19): this rotary encoder's raw positive-position direction is the
+# physical direction that visually moves a wheel-coupled display element (e.g. dot_display.py's
+# dot) toward screen-LEFT, not screen-right -- opposite of what a naive, unsigned gain formula
+# would produce. This does NOT affect which physical direction crosses VAR_LEFT/RIGHT_THRESHOLD_DEG
+# or which event (left_event/right_event) fires -- those are driven directly by the rotary's own
+# raw position sign via native firmware thresholds, entirely independent of on-screen rendering.
+# Centralized here, as a single constant, rather than each display-coupling task script hardcoding
+# its own sign flip on its own gain calculation -- if this rotary is ever rewired/remounted such
+# that its direction convention changes, only this one constant needs to change, not every
+# protocol file that couples the wheel to a screen position.
+WHEEL_TO_SCREEN_SIGN = -1
+
+
+def screen_direction_gain(magnitude):
+    """
+    Applies WHEEL_TO_SCREEN_SIGN to a gain/scale magnitude used to convert a wheel position (deg)
+    into an on-screen direction (e.g. a dot's x-offset, in px per wheel-degree) -- so "turn the
+    wheel toward the physically-right side" consistently means "positive screen-x direction"
+    everywhere this rotary is coupled to a display, without each task script needing its own sign
+    flip. See WHEEL_TO_SCREEN_SIGN's own comment for what was confirmed and why this exists.
+
+    :param float magnitude: the UNSIGNED gain magnitude (e.g. px per wheel-degree) a script would
+        naively compute from screen geometry/thresholds alone, with no knowledge of this rotary's
+        own wiring convention.
+    :return: the same magnitude, signed correctly for this rotary encoder's confirmed direction.
+    """
+    return WHEEL_TO_SCREEN_SIGN * magnitude
