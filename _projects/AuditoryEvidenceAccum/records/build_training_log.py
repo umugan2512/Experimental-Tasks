@@ -297,6 +297,10 @@ COLUMNS = [
     ('time_of_day', 'Time (HH:MM)'),
     ('weight_g', 'Weight (g)'),                    # MANUAL -- never written for an existing row
     ('weight_pct', 'Weight %'),                    # formula, refreshed every run
+    ('weight_after_task_g', 'Weight after task (g)'),   # MANUAL, same treatment as weight_g
+    ('weight_after_task_pct', 'Weight after task %'),   # formula, same treatment as weight_pct --
+                                                         # references weight_after_task_g instead
+    ('hand_watered', 'Water given by hand after task'), # MANUAL, TRUE/FALSE
     ('trial_count', 'Trials'),
     ('session_duration_s', 'Duration (s)'),
     ('reward_ul', 'Reward Amount (uL)'),            # auto, from the REWARD_UL VAL
@@ -320,7 +324,7 @@ COLUMNS = [
     ('session_csv_path', 'Session data (local path)'),
     ('session_struct_path', 'Session struct (local path)'),
 ]
-_MANUAL_COLUMNS = {'weight_g', 'notes'}
+_MANUAL_COLUMNS = {'weight_g', 'notes', 'weight_after_task_g', 'hand_watered'}
 
 _HEADER_FIELD_LABELS = ['DOB', 'Sex', 'Strain', 'Baseline weight (g)']
 _BASELINE_WEIGHT_ROW = 2 + _HEADER_FIELD_LABELS.index('Baseline weight (g)')   # = 5
@@ -400,6 +404,8 @@ def _read_existing_manual_cells(ws, table_start_row, col_map):
         return existing
     weight_col = col_map.get('weight_g')
     notes_col = col_map.get('notes')
+    weight_after_col = col_map.get('weight_after_task_g')
+    hand_watered_col = col_map.get('hand_watered')
     for row in range(table_start_row + 1, ws.max_row + 1):
         key_val = ws.cell(row=row, column=key_col).value
         if not key_val:
@@ -410,6 +416,10 @@ def _read_existing_manual_cells(ws, table_start_row, col_map):
         existing[member_keys] = {
             'weight_g': ws.cell(row=row, column=weight_col).value if weight_col else None,
             'notes': ws.cell(row=row, column=notes_col).value if notes_col else None,
+            'weight_after_task_g': (ws.cell(row=row, column=weight_after_col).value
+                                     if weight_after_col else None),
+            'hand_watered': (ws.cell(row=row, column=hand_watered_col).value
+                              if hand_watered_col else None),
         }
     return existing
 
@@ -426,7 +436,8 @@ def _carry_forward_manual_cells(member_key_set, existing):
     for old_keys, old_manual in existing.items():
         if old_keys < member_key_set:   # strict subset
             return old_manual, True
-    return {'weight_g': None, 'notes': None}, False
+    return {'weight_g': None, 'notes': None, 'weight_after_task_g': None,
+            'hand_watered': None}, False
 
 
 def _write_row(ws, row, col_map, row_data):
@@ -438,7 +449,7 @@ def _write_row(ws, row, col_map, row_data):
         row_data['threshold_pct_final'] = None
 
     for key, _ in COLUMNS:
-        if key in _MANUAL_COLUMNS or key == 'weight_pct':
+        if key in _MANUAL_COLUMNS or key in ('weight_pct', 'weight_after_task_pct'):
             continue   # manual columns: written from whatever was carried forward, below.
         col_idx = col_map[key]
         value = row_data.get(key)
@@ -449,13 +460,16 @@ def _write_row(ws, row, col_map, row_data):
     for key in _MANUAL_COLUMNS:
         ws.cell(row=row, column=col_map[key], value=row_data.get(key))
 
-    # weight_pct is a formula (not a hand-typed value), safe to refresh every run regardless of
-    # whether the row is new or existing -- it only ever reads weight_g/baseline, never writes them.
-    weight_col_letter = get_column_letter(col_map['weight_g'])
-    pct_cell = ws.cell(row=row, column=col_map['weight_pct'])
-    pct_cell.value = '=IFERROR({0}{1}/${2}${3},"")'.format(
-        weight_col_letter, row, _BASELINE_WEIGHT_COL_LETTER, _BASELINE_WEIGHT_ROW)
-    pct_cell.number_format = '0.0%'
+    # weight_pct/weight_after_task_pct are formulas (not hand-typed values), safe to refresh every
+    # run regardless of whether the row is new or existing -- they only ever READ weight_g/
+    # weight_after_task_g + baseline, never write them.
+    for weight_key, pct_key in (('weight_g', 'weight_pct'),
+                                 ('weight_after_task_g', 'weight_after_task_pct')):
+        weight_col_letter = get_column_letter(col_map[weight_key])
+        pct_cell = ws.cell(row=row, column=col_map[pct_key])
+        pct_cell.value = '=IFERROR({0}{1}/${2}${3},"")'.format(
+            weight_col_letter, row, _BASELINE_WEIGHT_COL_LETTER, _BASELINE_WEIGHT_ROW)
+        pct_cell.number_format = '0.0%'
 
 
 def _write_section_header(ws, row, title, num_cols, fill_color):
@@ -484,6 +498,8 @@ def _rewrite_subject_sheet(wb, subject, sessions):
         manual, matched = _carry_forward_manual_cells(member_key_set, existing)
         row['weight_g'] = manual.get('weight_g')
         row['notes'] = manual.get('notes')
+        row['weight_after_task_g'] = manual.get('weight_after_task_g')
+        row['hand_watered'] = manual.get('hand_watered')
         if matched:
             updated_count += 1
         else:

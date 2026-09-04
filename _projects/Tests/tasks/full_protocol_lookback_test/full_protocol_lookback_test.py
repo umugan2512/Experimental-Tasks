@@ -62,6 +62,19 @@ encoder module, HiFi module, and a second monitor (for the dot display; falls ba
 with a printed warning if only one is detected) all connected first. See
 HARDWARE_TEST_EXAMPLES.md in this folder for staged example sessions (including edge cases) to
 actually exercise all three mechanisms on the rig.
+
+**Camera recording, added in this pass**: `_shared/camera_recorder.py`'s `CameraRecorder` records
+the whole session on its own background thread (fire-and-forget, time-synced to this script's own
+`log_python_t0`, same clock every VAL registration already uses) regardless of anything below. The
+live preview is deliberately **snippet-only, never continuous** -- `camera.show_snippet(...)` is
+called at exactly two moments per trial (decision-period start, and right after the choice
+resolves) rather than repainting on every render-loop iteration. This script already runs a
+`WHEEL_POS` poll thread plus a `decision_thread` and has a documented real interpreter-crash
+history from GIL/native-toolkit pressure between competing threads (see CLAUDE.md) -- a third
+background thread was unavoidable for recording itself, but confining the (comparatively
+expensive) per-frame preview conversion+repaint to two ~1s windows instead of the whole ~5s
+decision period was a confirmed, worthwhile reduction in that same risk, not just a cosmetic
+choice.
 """
 import os
 import random
@@ -91,7 +104,8 @@ from live_plots_lookback import LookbackBenchPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 import hifi_setup
-from dot_display import DotDisplay
+from dot_display import DotDisplay, MiddleScreenDotDisplay
+from camera_recorder import CameraRecorder
 
 from pybpodapi.protocol import Bpod, StateMachine
 
@@ -115,7 +129,20 @@ VAR_STILL_POLL_HZ = 50
 VAR_POLL_HZ = 10
 VAR_ROTARY_USB_PORT = None
 
-VAR_DOT_SCREEN_INDEX = 1             # second monitor; falls back to 0 with a warning if not found
+VAR_USE_MIDDLE_SCREEN_ONLY = True   # False = DotDisplay (full/spanned screen). True =
+                                     # MiddleScreenDotDisplay (confine the dot to one column of a
+                                     # multi-monitor-spanned Qt screen -- see dot_display.py and
+                                     # dot_wheel_midscreen_test.py's own docstrings for why this
+                                     # rig needs it).
+VAR_DOT_SCREEN_INDEX = 1             # second monitor (or the combined spanned screen when
+                                     # VAR_USE_MIDDLE_SCREEN_ONLY is True); falls back to 0 with a
+                                     # warning if not found.
+VAR_N_PHYSICAL_MONITORS_IN_SPAN = 3  # only used when VAR_USE_MIDDLE_SCREEN_ONLY is True -- see
+                                     # dot_wheel_midscreen_test.py (confirmed via screens(): the
+                                     # combined Qt screen on this rig is 6144px wide, 6144/3 =
+                                     # 2048px per physical panel).
+VAR_ACTIVE_MONITOR_INDEX = 1         # only used when VAR_USE_MIDDLE_SCREEN_ONLY is True -- 0=left,
+                                     # 1=middle, 2=right.
 VAR_DOT_DIAMETER_PX = 60             # UNCONFIRMED against training_protocol.md SS1.2's 3-4 visual-
                                      # deg spec -- guessed pixel value, not derived from it (needs
                                      # monitor size + viewing distance -- see dot_display.py's
@@ -132,6 +159,21 @@ VAR_RENDER_HZ = 30                   # lowered from 60 -- halves main-thread Qt-
                                      # (see CLAUDE.md's PyEval_RestoreThread crash note). A
                                      # probabilistic mitigation, not a guaranteed fix -- 30Hz dot
                                      # repositioning is still visually smooth.
+
+VAR_CAMERA_INDEX = None                      # None = auto-discover, see
+                                              # camera_recorder.discover_camera()
+VAR_CAMERA_OUTPUT_PATH = 'session_video.avi' # relative to cwd -- lands in the real session
+                                              # folder when run for real via the GUI's Run button.
+VAR_CAMERA_FPS = 30.0
+VAR_CAMERA_PREVIEW = True             # preview shown only in short snippets (see
+                                       # camera.show_snippet() calls below), never continuously --
+                                       # this script already runs a WHEEL_POS poll thread + a
+                                       # decision_thread and has a documented GIL-pressure crash
+                                       # history (see CLAUDE.md); a continuous preview repaint on
+                                       # every render-loop iteration would add to that risk, while
+                                       # snippets confirmed as a meaningful lag reduction instead.
+VAR_CAMERA_SNIPPET_S = 1.0            # snippet duration for both "decision period start" and
+                                       # "after choice" preview windows below.
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1      # J1 (training_protocol.md SS1.5) -- narrower than the earlier
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2      # Gabor tests' 0.05-0.35s, an intentional difference
@@ -170,17 +212,36 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+if VAR_USE_MIDDLE_SCREEN_ONLY:
+    dot = MiddleScreenDotDisplay(screen_index=VAR_DOT_SCREEN_INDEX,
+                                  n_segments=VAR_N_PHYSICAL_MONITORS_IN_SPAN,
+                                  active_segment_index=VAR_ACTIVE_MONITOR_INDEX,
+                                  diameter_px=VAR_DOT_DIAMETER_PX,
+                                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+else:
+    dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
+                      background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
+
+camera = CameraRecorder(log_python_t0, camera_index=VAR_CAMERA_INDEX,
+                         output_path=VAR_CAMERA_OUTPUT_PATH, fps=VAR_CAMERA_FPS,
+                         preview=VAR_CAMERA_PREVIEW)
+camera.start()
+
+my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
+my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
+my_bpod.register_value('CAMERA_FPS', camera.fps)
 
 # Geometry-aware gain: hitting VAR_RIGHT_THRESHOLD_DEG on the wheel should move the dot to
 # VAR_DOT_EDGE_FRACTION of the actual screen's half-width, not a fixed guessed px/wheel-deg
 # constant -- same fix applied to dot_wheel_test.py after the earlier placeholder (4.0) turned out
-# to barely move the dot at all.
+# to barely move the dot at all. rotary_setup.screen_direction_gain() applies this rotary's
+# confirmed wheel->screen sign correction (see rotary_setup.py) -- same centralized fix as every
+# other dot-coupled script, instead of a per-script sign flip.
 screen_width_px = dot.get_screen_width_px()
-dot_gain = (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / VAR_RIGHT_THRESHOLD_DEG
+dot_gain = rotary_setup.screen_direction_gain(
+    (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / VAR_RIGHT_THRESHOLD_DEG)
 dot.set_deg_to_px_gain(dot_gain)
 print("Dot gain calibrated to {0:.2f} px/wheel-deg (screen width {1}px, edge fraction {2})".format(
     dot_gain, screen_width_px, VAR_DOT_EDGE_FRACTION), flush=True)
@@ -241,6 +302,7 @@ while trial < VAR_MAX_TRIALS:
         runner.register('TRIAL_START', trial_start_t)
         dot.clear()
         dot.pump()
+        camera.pump()
 
         # e_right/e_left/p_right_target/recent_right_frac directly drive the side draw EVERY trial,
         # remedial_easy included -- the side is never locked; only DIFFICULTY_LEVEL is restricted
@@ -356,6 +418,10 @@ while trial < VAR_MAX_TRIALS:
         send_epoch = time.time()
         send_t = send_epoch - log_python_t0
 
+        # "First second after task start" -- one of the two brief preview windows requested (see
+        # VAR_CAMERA_PREVIEW's own comment for why this is snippet-only, not continuous).
+        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
+
         sma = StateMachine(my_bpod)
 
         sma.add_state(
@@ -458,6 +524,7 @@ while trial < VAR_MAX_TRIALS:
                 dot.clear()
 
             dot.pump()
+            camera.pump()
             time.sleep(render_interval)
 
         decision_thread.join(timeout=3.0)
@@ -468,8 +535,14 @@ while trial < VAR_MAX_TRIALS:
         dot.clear()
         dot.pump()
 
+        # "After choice" -- the second brief preview window; outcome is now known (decision_done
+        # is set), so this shows what the animal/rig looked like right as the choice resolved.
+        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
+        camera.pump()
+
         if decision_result.get('killed'):
             print("Bpod Kill received -- ending session.", flush=True)
+            camera.close()
             dot.close()
             hifi.close()
             rotary.close()
@@ -557,6 +630,7 @@ else:
     print("Done: reached VAR_MAX_TRIALS ({0}) without the circuit-breaker firing".format(
         VAR_MAX_TRIALS), flush=True)
 
+camera.close()
 dot.close()
 hifi.close()
 rotary.close()

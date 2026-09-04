@@ -524,14 +524,50 @@ Durable facts/gotchas from building this:
   fires — those are driven directly by the rotary's own raw position sign via native firmware
   thresholds, entirely independent of anything rendered on screen. Centralized as
   `rotary_setup.WHEEL_TO_SCREEN_SIGN` (currently `-1`) and `rotary_setup.screen_direction_gain
-  (magnitude)` — every wheel-coupled display script (`dot_wheel_test.py`,
-  `dot_wheel_midscreen_test.py`, `hifi_singleside_dot_test.py`) calls
-  `rotary_setup.screen_direction_gain(...)` around its own gain calculation instead of hardcoding a
-  sign flip locally, so a future rewiring/remounting only needs one constant changed, not every
-  display-coupling script individually. **Not yet ported to the Gabor-based scripts**
+  (magnitude)` — every wheel-coupled dot-display script (`dot_wheel_test.py`,
+  `dot_wheel_midscreen_test.py`, `hifi_singleside_dot_test.py`, `full_protocol_lookback_test.py`)
+  calls `rotary_setup.screen_direction_gain(...)` around its own gain calculation instead of
+  hardcoding a sign flip locally, so a future rewiring/remounting only needs one constant changed,
+  not every display-coupling script individually. **Not yet ported to the Gabor-based scripts**
   (`gabor_wheel_test.py` and its hifi-combined variants) — no complaint has been raised there, and
   they haven't been checked; don't assume they share (or don't share) this same sign issue without
   checking directly.
+- **`full_protocol_lookback_test.py` has the same `VAR_USE_MIDDLE_SCREEN_ONLY` flag as
+  `hifi_singleside_dot_test.py`** (full/spanned `DotDisplay` vs. `MiddleScreenDotDisplay`) — it was
+  already `DotDisplay`-based (a prior pass had already swapped it in from `GaborDisplay`) by the
+  time the sign-fix/screen-flag work happened, so both fixes just needed applying there too, no new
+  display logic.
+- **Camera recording (`_shared/camera_recorder.py`, `CameraRecorder`/`discover_camera()`)**: a USB
+  camera recorded alongside a Bpod session, time-synced to the exact same `log_python_t0`-relative
+  clock every other VAL registration in this codebase already uses (per-frame, not an assumed fixed
+  fps — no live camera can guarantee an exact delivered rate, so a companion
+  `<output>_timestamps.csv` records each frame's real `time.time() - log_python_t0` instead).
+  Recording runs on its own background thread, fully decoupled from any caller's render-loop
+  cadence — "nothing has to be done with the video during the task" was the explicit requirement,
+  so it's fire-and-forget by design. Mirrors `rotary_setup.py`/`hifi_setup.py`'s house style and
+  `bpod_trial_helpers.py`'s `TrialRunner` threading idiom exactly (one lock scoped to just the
+  hardware access, a fresh `Event()` per `start()`, daemon thread, bounded `join()`, broad
+  `except Exception: break`). Live preview reuses `QApplication.instance()` (same single-Qt-toolkit
+  convention as `dot_display.py`/`gabor_display.py`) rather than `cv2`'s own `imshow()`/HighGUI
+  window, specifically to avoid the same native-toolkit-conflict crash class already documented
+  below (`TkAgg` + PyQt5). **Confirmed on hardware: the capture loop needs an explicit rate limit**
+  — the first real run had no throttle at all (an oversight relative to `TrialRunner`'s own poll
+  loop, which does sleep between iterations) and caused a real, noticeable system-wide lag, since
+  `cv2.VideoCapture.read()` doesn't reliably block on every camera/backend combination; fixed with
+  a "measure elapsed, sleep the remainder" throttle to `~fps`.
+- **Two preview modes**: `.show()` for continuous repaint (used by the standalone
+  `_projects/Tests/tasks/camera_test/camera_test.py` bench task — simple script, no competing
+  background threads, continuous preview is fine there), and `.show_snippet(duration_s)` for a
+  brief windowed preview that auto-hides after the deadline (used by
+  `full_protocol_lookback_test.py`, which already runs a `WHEEL_POS` poll thread + a
+  `decision_thread` and has the documented `PyEval_RestoreThread` GIL-pressure crash history below
+  — a continuous preview repaint there would add to that same risk). `full_protocol_lookback_test.py`
+  calls `show_snippet()` at exactly two moments per trial (decision-period start, right after the
+  choice resolves) rather than every render-loop iteration — confirmed as a real, worthwhile
+  further lag reduction on top of the capture-loop throttle, not just a cosmetic choice, since the
+  per-frame `cv2.cvtColor`/`QImage`/`QPixmap` conversion+repaint is the dominant remaining
+  main-thread cost once the background thread itself is rate-limited. The full video recording is
+  completely unaffected by which preview mode (or neither) is active.
 
 ## Wheel-shaping training stages (Stage 1/2, `AuditoryEvidenceAccum`)
 
@@ -676,9 +712,22 @@ non-obvious design choices:
   touches ONLY the sheet(s) for subjects it found sessions for locally — every other sheet is left
   byte-for-byte untouched. There are no more separate `animals_metadata.json`/
   `session_manual_entries.csv` files (an earlier design) — DOB/Sex/Strain/Baseline weight
-  (hand-typed once, in each sheet's own header block) and per-session `Weight (g)`/`Notes`
-  (hand-typed per row) are now fields directly in the xlsx itself, since that's the one file
-  already committed and synced; the script never overwrites a cell that's already been hand-filled.
+  (hand-typed once, in each sheet's own header block) and per-session `Weight (g)`/`Weight after
+  task (g)`/`Notes`/`Water given by hand after task` (hand-typed per row) are now fields directly
+  in the xlsx itself, since that's the one file already committed and synced; the script never
+  overwrites a cell that's already been hand-filled.
+- **`Weight after task (g)`/`Weight after task %`/`Water given by hand after task`** — three
+  columns added alongside the original `Weight (g)`/`Weight %` pair, same placement logic
+  (clustered together, right after `Weight %`, pushing `Trials`/etc. down). `Weight after task (g)`
+  and `Water given by hand after task` are **manual** (added to `_MANUAL_COLUMNS`, carried forward
+  across each run's full-sheet rewrite via the same read-before-clear/carry-forward-by-session-
+  identity mechanism `Weight (g)`/`Notes` already use — extended the same non-generalized way,
+  two more explicit keys in the same two spots, not refactored into a loop). `Weight after task %`
+  is a **formula column**, byte-identical pattern to `Weight %`
+  (`=IFERROR(<weight cell>/$<baseline cell>,"")`, refreshed every run) just referencing
+  `Weight after task (g)`'s own resolved column letter instead of `Weight (g)`'s — both formulas
+  read the *same* per-subject baseline weight cell, so a session's before/after weight both stay
+  comparable to the same reference point.
 - **Column layout is fully canonicalized (header row included) on every run**, not just
   append-only. An earlier design only ever *appended* new columns to whatever historical order a
   sheet already had, self-migrating the schema but never actually fixing a column's *position* once
@@ -807,6 +856,29 @@ Python Bpod stack):
   the pulse-related buttons are disabled for the run's duration so only one thread ever touches the
   Bpod connection at a time (per the "background thread can never safely share a live Bpod
   connection with another thread" hazard documented under "Hardware module notes" below).
+- **`calibrate_liquid.py` needs `Bpod(serial_port=VAR_BPOD_SERIAL_PORT)`, not a bare `Bpod()` —
+  confirmed as a real, previously-shipped bug, not a hypothetical.** `BpodCOMProtocol.__init__`
+  (`pybpod-api`) only calls `self.open()` automatically `if self.serial_port:`, and
+  `self.serial_port` normally resolves from `settings.PYBPOD_SERIAL_PORT` — which every *real* task
+  script gets for free from the session-local `user_settings.py` the PyBpod GUI auto-generates per
+  run (confirmed on disk: `PYBPOD_SERIAL_PORT = 'COM10'` in dozens of session folders). This tool
+  deliberately skips all of that GUI/project scaffolding, which also means it skips the one
+  mechanism that gets a serial port into `Bpod()` automatically — so a bare `Bpod()` here silently
+  never opens, `hardware.max_states` stays `None`, and "Run Pulses" fails with `TypeError: can't
+  multiply sequence by non-int type 'NoneType'` deep inside `state_machine_base.py`. This shipped
+  broken (the tool's very first hardware test hit exactly this, and it went unfixed and
+  undocumented for a while — confirmed via git history: `Calibration/`'s entire history was one
+  commit that added both files, no follow-up) until traced all the way through the actual
+  `Bpod`/`BpodIO`/`BpodCOMProtocol` MRO chain. Fixed by adding `VAR_BPOD_SERIAL_PORT = 'COM10'` as
+  a module-level, machine-specific constant (same "edit per box" convention as
+  `VAR_ROTARY_USB_PORT`/etc. elsewhere) and passing it explicitly. **No real calibration data had
+  ever been collected before this fix** (`liquid_calibration.json` didn't exist on this machine).
+- **Fit-curve plot** (added per explicit follow-up — "similar to what is implemented in matlab"):
+  a `matplotlib.backends.backend_qt5agg.FigureCanvasQTAgg` embedded directly in
+  `CalibrationWindow`'s own PyQt5 layout (genuinely embedded, not a separate popup) — scatters the
+  selected valve's raw points and overlays the fitted curve once one exists, refreshed from the
+  same two places (`_refresh_table()`, `_on_fit()`) the points table/coefficients already refresh
+  from, so it can't go stale relative to what else is on screen.
 - **Not yet done, deliberately scoped out for now**: no existing task script has been wired to call
   `get_valve_time_s()` in place of its own hardcoded `VAR_REWARD_DURATION` — that's a ~12-file,
   two-project change, intentionally left as a separate follow-up once real measured calibration data

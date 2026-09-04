@@ -23,14 +23,35 @@ used throughout this codebase) while the main thread keeps the Qt UI responsive;
 buttons are disabled for the run's duration so only one thread ever touches the Bpod connection at
 a time (per CLAUDE.md's own documented hazard: concurrent access to the same Bpod USB connection
 from two threads is genuinely unsynchronized, not just a style choice).
+
+**`Bpod(serial_port=VAR_BPOD_SERIAL_PORT)`, not a bare `Bpod()`, confirmed necessary on hardware**:
+`BpodCOMProtocol.__init__` (pybpod-api) only calls `self.open()` automatically `if self.serial_port:`,
+and `self.serial_port` normally resolves from `settings.PYBPOD_SERIAL_PORT` -- which every *real*
+task script gets for free from the session-local `user_settings.py` the PyBpod GUI auto-generates
+per run. This script deliberately skips all of that scaffolding (see above), which also means it
+skips the one mechanism that gets a serial port into `Bpod()` automatically -- without an explicit
+`serial_port=`, `open()` silently never fires, `hardware.max_states` stays `None`, and "Run Pulses"
+fails with `TypeError: can't multiply sequence by non-int type 'NoneType'` deep inside
+`pybpodapi/state_machine/state_machine_base.py`. Confirmed as the actual root cause (not a
+one-off hardware fluke) by tracing the full `Bpod`/`BpodIO`/`BpodCOMProtocol` MRO chain directly.
+
+**Fit-curve plot, added per explicit follow-up ("similar to what is implemented in matlab")**:
+`matplotlib.backends.backend_qt5agg.FigureCanvasQTAgg` embedded directly in this window's own
+layout -- the standard, canonical way to combine PyQt5 + matplotlib in one widget tree, genuinely
+embedded rather than a separate popup window. Refreshed from the same two places the points
+table/coefficients already refresh (`_refresh_table()`, `_on_fit()`), so it never goes stale
+relative to what's on screen.
 """
 import sys
 import traceback
 
+import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QDoubleSpinBox,
     QSpinBox, QPushButton, QLabel, QTableWidget, QTableWidgetItem, QGroupBox, QMessageBox)
 from PyQt5.QtCore import QThread, pyqtSignal
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 
 from liquid_calibration import LiquidCalibration
 
@@ -40,6 +61,11 @@ VAR_VALVE_IDS = [1]   # this rig's single valve (see CLAUDE.md: "wheel-turn choi
                        # -- extend this list for a future second valve, nothing else needs to change.
 VAR_DEFAULT_DURATION_MS = 50.0
 VAR_DEFAULT_N_PULSES = 200   # within MATLAB's own suggested 100-500 range
+VAR_BPOD_SERIAL_PORT = 'COM10'   # MACHINE-SPECIFIC -- this rig's own confirmed Bpod COM port
+                                  # (Device Manager/"USB Serial Device"). Update per box, same
+                                  # "edit per box" convention as e.g. VAR_ROTARY_USB_PORT elsewhere
+                                  # in this codebase. See module docstring for why this is required
+                                  # here specifically, unlike every other task script.
 
 
 class PulseRunner(QThread):
@@ -83,7 +109,7 @@ class CalibrationWindow(QWidget):
 
         self.calibration = LiquidCalibration()
 
-        self.my_bpod = Bpod()
+        self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT)
         print("Connected to Bpod on {0}".format(self.my_bpod.serial_port), flush=True)
 
         self.runner = None   # holds the current PulseRunner while a pulse batch is in flight
@@ -167,6 +193,11 @@ class CalibrationWindow(QWidget):
         fit_group.setLayout(fit_form)
         layout.addWidget(fit_group)
 
+        self.figure = Figure(figsize=(4, 3))
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        layout.addWidget(self.canvas)
+
         self.setLayout(layout)
 
     def _current_valve_id(self):
@@ -227,6 +258,7 @@ class CalibrationWindow(QWidget):
             QMessageBox.warning(self, 'Cannot fit', str(err))
             return
         self._update_lookup_preview()
+        self._refresh_plot()
 
     def _update_lookup_preview(self):
         valve_id = self._current_valve_id()
@@ -251,6 +283,38 @@ class CalibrationWindow(QWidget):
             self.coeffs_label.setText('[{0:.6g}, {1:.6g}, {2:.6g}]'.format(*coeffs))
         else:
             self.coeffs_label.setText('(not fit yet)')
+
+        self._refresh_plot()
+
+    def _refresh_plot(self):
+        """ Scatters the selected valve's raw (duration_ms, volume_uL) points, and -- if a fit
+        exists -- overlays the fitted curve across the observed volume range. Axes match the
+        underlying fit direction (duration_ms = f(volume_uL), see liquid_calibration.py's own
+        docstring for why it's fit this way, not the reverse). """
+        valve_id = self._current_valve_id()
+        table = self.calibration.table(valve_id)
+        coeffs = self.calibration.coeffs(valve_id)
+
+        self.ax.clear()
+        if table:
+            durations = [row[0] for row in table]
+            volumes = [row[1] for row in table]
+            self.ax.scatter(volumes, durations, color='tab:blue', label='Measured points')
+
+            if coeffs:
+                v_min, v_max = min(volumes), max(volumes)
+                v_span = max(v_max - v_min, 1e-6)
+                v_range = np.linspace(max(0.0, v_min - 0.1 * v_span), v_max + 0.1 * v_span, 100)
+                d_fit = np.polyval(coeffs, v_range)
+                self.ax.plot(v_range, d_fit, color='tab:orange', label='Fit')
+
+            self.ax.legend(loc='best')
+
+        self.ax.set_xlabel('Volume (uL)')
+        self.ax.set_ylabel('Duration (ms)')
+        self.ax.set_title('Valve {0} calibration'.format(valve_id))
+        self.figure.tight_layout()
+        self.canvas.draw()
 
     def closeEvent(self, event):
         self.my_bpod.close()
