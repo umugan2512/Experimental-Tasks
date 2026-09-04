@@ -728,6 +728,38 @@ non-obvious design choices:
   `Weight after task (g)`'s own resolved column letter instead of `Weight (g)`'s — both formulas
   read the *same* per-subject baseline weight cell, so a session's before/after weight both stay
   comparable to the same reference point.
+- **`scan_all_sessions()` now scans the `Tests` project too, not just `AuditoryEvidenceAccum`**
+  (`_SCAN_PROJECT_DIRS`) — added per explicit request once `full_protocol_lookback_test.py` (see
+  "Poisson-clicks..." above) was confirmed working well on hardware, so its sessions could start
+  feeding into the same per-animal training log. **Only protocols with a real `PROTOCOL_CONFIG`
+  entry generate a row at all** (`summarize_session()` now returns `None` for anything else) — the
+  `Tests` project has many bench-test protocols (`dot_wheel_test`, `camera_test`, `lick_reward`,
+  ...) with no meaningful outcome taxonomy to report, and blindly including all of them would flood
+  the log with all-`'unknown'`-outcome noise. Currently only `full_protocol_lookback_test` has a
+  config entry beyond stage1/2. Its rows land in their own **`Test` section**
+  (`_stage_label()`/`_TEST_PROTOCOL_LABELS`) within the relevant subject's own sheet, sorted after
+  every numbered stage (the existing `_stage_sort_key()` fallback already sorted non-`stageN_`
+  protocols last, alphabetically — no change needed there).
+- **`full_protocol_lookback_test` needed two genuinely new outcome types in `classify_trial()`,
+  not a fit into Stage 1/2's existing vocabulary.** It's a real 2AFC choice protocol — `incorrect`
+  (`ErrorConsumption` visited, a real wrong-choice outcome) and `aborted` (`WheelAbort` visited, a
+  mid-*cue*-period wheel movement from the separate `cue_sma` that runs before the choice state
+  machine even exists for that trial — never co-occurs with rewarded/incorrect/no-response, since
+  an aborted trial never reaches the second state machine at all) have no equivalent in Stage 1/2's
+  shaping-only outcome set (`rewarded`/`withheld`/`no_movement`). Approximating them onto
+  `withheld`/`aborts` was considered and rejected — those columns would then mean different things
+  for different protocols' rows in the same sheet, which is exactly the kind of silent mismapping
+  this codebase's own "native-STATE/EVENT-parsing" preference exists to avoid. Added as real new
+  columns instead: `Incorrect`, `Wheel Aborts` (both auto, summed across a merged group same as
+  `Withheld`/`No-movement`) — distinct from the pre-existing `Aborts` column, which is Stage 1/2's
+  own `QUIESCENCE_BREAKS` VAL count and means something different again. `no_movement_states` is
+  reused for `NoResponse` (a response-timeout, not "never moved the wheel") — close enough in
+  spirit ("no choice made") that a new column wasn't worth it there. `side_from: 'event'` for this
+  protocol, keyed on the same raw `RotaryEncoder1_3`/`RotaryEncoder1_4` threshold-crossing events
+  the task script itself uses for `left_event`/`right_event` (its `Reward`/`ErrorConsumption` state
+  names don't carry an L/R suffix the way Stage 2's `RewardL`/`RewardR` do, so `side_from: 'state'`
+  doesn't apply here — same reasoning Stage 1 already established for its own `side_from: 'event'`
+  choice).
 - **Column layout is fully canonicalized (header row included) on every run**, not just
   append-only. An earlier design only ever *appended* new columns to whatever historical order a
   sheet already had, self-migrating the schema but never actually fixing a column's *position* once

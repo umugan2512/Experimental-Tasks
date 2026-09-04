@@ -34,6 +34,26 @@ PROTOCOL_CONFIG = {
         'no_movement_states': ['NoMovement'],
         'side_from': 'state',   # the state name's own trailing L/R suffix
     },
+    # A genuine 2AFC choice protocol (_projects/Tests/tasks/full_protocol_lookback_test/), a
+    # structurally different trial-outcome shape than Stage 1/2's shaping-only one -- 'incorrect'
+    # (a real wrong-choice outcome, not "withheld") and 'aborted' (a mid-CUE wheel movement, from
+    # the separate cue_sma that runs BEFORE the choice state machine even exists for that trial --
+    # never co-occurs with rewarded/incorrect/no_movement, since a trial that aborts never reaches
+    # the second state machine at all) are real, distinct outcomes here, not present in Stage 1/2 at
+    # all -- see classify_trial()'s own docstring for why they're kept as their own outcome values
+    # rather than approximated onto 'withheld'/'aborts'. 'no_movement_states' here really means "no
+    # response within the timeout" (NoResponse), not "never moved the wheel" the way it does in
+    # Stage 1/2 -- close enough in spirit (no choice made) to reuse the same bucket/column.
+    'full_protocol_lookback_test': {
+        'rewarded_states': ['Reward'],
+        'incorrect_states': ['ErrorConsumption'],
+        'no_movement_states': ['NoResponse'],
+        'aborted_states': ['WheelAbort'],
+        'withheld_states': [],
+        'side_from': 'event',
+        'left_event': 'RotaryEncoder1_3',    # ALL_THRESHOLDS_DEG's 3rd entry (LEFT_THRESHOLD_DEG)
+        'right_event': 'RotaryEncoder1_4',   # ALL_THRESHOLDS_DEG's 4th entry (RIGHT_THRESHOLD_DEG)
+    },
 }
 
 
@@ -107,11 +127,14 @@ def parse_subject_name(raw):
 
 def classify_trial(trial, config):
     """ Returns (outcome, side, reward_duration_s, consumed). outcome in {'rewarded', 'withheld',
-    'no_movement', 'unknown'}; side in {'L', 'R', None}; reward_duration_s is that trial's own
-    logged Reward-state duration if rewarded, else None. consumed is True/False for a rewarded
-    trial (whether a Port1In lick was detected at/after that trial's own reward-delivery start
-    time -- no dedicated Consumption-window state exists in Stage 1/2, Port1In is a raw event
-    regardless of which state is active), None for a non-rewarded trial. """
+    'no_movement', 'incorrect', 'aborted', 'unknown'} -- 'incorrect'/'aborted' only occur for
+    protocols whose PROTOCOL_CONFIG sets 'incorrect_states'/'aborted_states' (Stage 1/2 never
+    produce them, since those keys are simply absent from their config dicts). side in
+    {'L', 'R', None}; reward_duration_s is that trial's own logged Reward-state duration if
+    rewarded, else None. consumed is True/False for a rewarded trial (whether a Port1In lick was
+    detected at/after that trial's own reward-delivery start time -- no dedicated
+    Consumption-window state exists in Stage 1/2, Port1In is a raw event regardless of which state
+    is active), None for a non-rewarded trial. """
     states = trial['states']
     events = trial['events']
 
@@ -120,11 +143,16 @@ def classify_trial(trial, config):
 
     rewarded_name = next((n for n in config.get('rewarded_states', []) if visited(n)), None)
     withheld_name = next((n for n in config.get('withheld_states', []) if visited(n)), None)
+    incorrect_name = next((n for n in config.get('incorrect_states', []) if visited(n)), None)
 
     if rewarded_name:
         outcome = 'rewarded'
     elif withheld_name:
         outcome = 'withheld'
+    elif incorrect_name:
+        outcome = 'incorrect'
+    elif any(visited(n) for n in config.get('aborted_states', [])):
+        outcome = 'aborted'
     elif any(visited(n) for n in config.get('no_movement_states', [])):
         outcome = 'no_movement'
     else:

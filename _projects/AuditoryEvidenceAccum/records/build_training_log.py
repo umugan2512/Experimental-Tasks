@@ -67,12 +67,17 @@ _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed
 
 def summarize_session(path):
     """ Parses one session CSV and returns a flat dict of everything the training log wants for
-    one row, or None if the file has no recognizable protocol name. """
+    one row, or None if the file has no recognizable protocol name OR the protocol has no
+    PROTOCOL_CONFIG entry. The latter matters now that scan_all_sessions() also scans the Tests
+    project (see its own docstring) -- that folder has many bench-test protocols (dot_wheel_test,
+    camera_test, lick_reward, ...) with no meaningful outcome taxonomy to report; only protocols
+    explicitly configured (currently: stage1/2 and full_protocol_lookback_test) generate a row, so
+    the log doesn't fill up with all-'unknown'-outcome noise from every bench script ever run. """
     info, session_vals, trials = session_csv_parser.parse_session_csv(path)
     protocol_name = info.get('PROTOCOL-NAME')
-    if not protocol_name:
+    if not protocol_name or protocol_name not in session_csv_parser.PROTOCOL_CONFIG:
         return None
-    config = session_csv_parser.PROTOCOL_CONFIG.get(protocol_name, {})
+    config = session_csv_parser.PROTOCOL_CONFIG[protocol_name]
 
     subject = session_csv_parser.parse_subject_name(info.get('SUBJECT-NAME', ''))
     session_started = info.get('SESSION-STARTED', '')
@@ -81,6 +86,7 @@ def summarize_session(path):
     trials = session_csv_parser.real_trials(trials)
 
     reward_count = withheld_count = no_movement_count = 0
+    incorrect_count = wheel_abort_count = 0
     l_count = r_count = lick_count = consumed_reward_count = 0
 
     for trial in trials:
@@ -93,6 +99,10 @@ def summarize_session(path):
             withheld_count += 1
         elif outcome == 'no_movement':
             no_movement_count += 1
+        elif outcome == 'incorrect':
+            incorrect_count += 1
+        elif outcome == 'aborted':
+            wheel_abort_count += 1
         if side == 'L':
             l_count += 1
         elif side == 'R':
@@ -153,6 +163,8 @@ def summarize_session(path):
         'consumed_reward_count': consumed_reward_count,
         'withheld_count': withheld_count,
         'no_movement_count': no_movement_count,
+        'incorrect_count': incorrect_count,
+        'wheel_abort_count': wheel_abort_count,
         'l_count': l_count,
         'r_count': r_count,
         'lick_count': lick_count,
@@ -173,20 +185,32 @@ def summarize_session(path):
 
 # --- scan every session on THIS machine ----------------------------------------------------------
 
+_SCAN_PROJECT_DIRS = [
+    _PROJECT_DIR,                                          # AuditoryEvidenceAccum -- real training
+    os.path.join(_PROJECT_DIR, '..', 'Tests'),              # bench-test sessions -- see
+                                                             # summarize_session()'s own docstring
+                                                             # for why only EXPLICITLY configured
+                                                             # protocols from here generate a row
+]
+
+
 def scan_all_sessions():
     """ Returns {subject: [session_summary, ...]}, each subject's list sorted by session_started.
-    Only scans this machine's own local experiments/ folder -- inherently per-box. """
-    pattern = os.path.join(_PROJECT_DIR, 'experiments', '*', 'setups', '*', 'sessions', '*', '*.csv')
+    Only scans this machine's own local experiments/ folders (AuditoryEvidenceAccum + Tests, see
+    _SCAN_PROJECT_DIRS) -- inherently per-box. """
     by_subject = {}
-    for path in sorted(glob.glob(pattern)):
-        try:
-            summary = summarize_session(path)
-        except Exception as err:
-            print("WARNING: failed to parse {0}: {1}".format(path, err), flush=True)
-            continue
-        if summary is None:
-            continue
-        by_subject.setdefault(summary['subject'], []).append(summary)
+    for project_dir in _SCAN_PROJECT_DIRS:
+        pattern = os.path.join(project_dir, 'experiments', '*', 'setups', '*', 'sessions', '*',
+                                '*.csv')
+        for path in sorted(glob.glob(pattern)):
+            try:
+                summary = summarize_session(path)
+            except Exception as err:
+                print("WARNING: failed to parse {0}: {1}".format(path, err), flush=True)
+                continue
+            if summary is None:
+                continue
+            by_subject.setdefault(summary['subject'], []).append(summary)
     for sessions in by_subject.values():
         sessions.sort(key=lambda s: s['session_started'])
     return by_subject
@@ -254,6 +278,8 @@ def combine_group(group):
         'aborts': sum(s['aborts'] for s in group),
         'withheld_count': sum(s['withheld_count'] for s in group),
         'no_movement_count': sum(s['no_movement_count'] for s in group),
+        'incorrect_count': sum(s['incorrect_count'] for s in group),
+        'wheel_abort_count': sum(s['wheel_abort_count'] for s in group),
         'l_count': sum(s['l_count'] for s in group),
         'r_count': sum(s['r_count'] for s in group),
         'lick_count': sum(s['lick_count'] for s in group),
@@ -278,11 +304,19 @@ def _stage_sort_key(protocol_name):
     return (1, 0, protocol_name)
 
 
+_TEST_PROTOCOL_LABELS = {
+    'full_protocol_lookback_test': 'Test',   # the Tests-project protocol currently scanned -- see
+                                              # summarize_session()'s docstring. Add further
+                                              # entries here if more Tests-project protocols ever
+                                              # get a real PROTOCOL_CONFIG entry.
+}
+
+
 def _stage_label(protocol_name):
     match = re.match(r'stage(\d+)', protocol_name)
     if match:
         return 'Stage {0}'.format(match.group(1))
-    return protocol_name
+    return _TEST_PROTOCOL_LABELS.get(protocol_name, protocol_name)
 
 
 # --- workbook update-in-place --------------------------------------------------------------------
@@ -308,6 +342,11 @@ COLUMNS = [
     ('aborts', 'Aborts'),
     ('withheld_count', 'Withheld'),
     ('no_movement_count', 'No-movement'),
+    ('incorrect_count', 'Incorrect'),           # full_protocol_lookback_test only -- a genuine
+                                                 # wrong-choice outcome, distinct from Withheld
+    ('wheel_abort_count', 'Wheel Aborts'),      # full_protocol_lookback_test only -- mid-cue wheel
+                                                 # movement aborts, distinct from Aborts (which is
+                                                 # Stage 1/2's QUIESCENCE_BREAKS count)
     ('l_count', 'L turns'),
     ('r_count', 'R turns'),
     ('lick_count', 'Licks'),
