@@ -911,10 +911,52 @@ Python Bpod stack):
   selected valve's raw points and overlays the fitted curve once one exists, refreshed from the
   same two places (`_refresh_table()`, `_on_fit()`) the points table/coefficients already refresh
   from, so it can't go stale relative to what else is on screen.
-- **Not yet done, deliberately scoped out for now**: no existing task script has been wired to call
-  `get_valve_time_s()` in place of its own hardcoded `VAR_REWARD_DURATION` — that's a ~12-file,
-  two-project change, intentionally left as a separate follow-up once real measured calibration data
-  exists to validate against, rather than bundled into building the tool itself.
+- **Fit persistence**: the fitted polynomial coefficients live in the same
+  `Calibration/liquid_calibration.json` as the raw points (per-valve `coeffs` +
+  `last_modified`, written by `LiquidCalibration.fit()`), not a separate file — same
+  gitignored-machine-specific file as the raw data itself, so a fresh box always needs its own
+  "Run Pulses" + "Fit" pass before any task script's calibrated-duration lookup will return real
+  data (see `get_reward_duration_s()`'s fallback behavior below).
+- **LED-blink diagnostic** (added after a hardware report of "no pulses heard, no liquid
+  dispensed" during Run Pulses, with no error surfaced): `PulseRunner.run()`'s per-pulse
+  `StateMachine` now also turns on `VAR_PULSE_LED_CHANNEL` (`'PWM1'`, Port 1's built-in LED — same
+  channel/convention every task script already uses for a go-cue LED) for the same duration as the
+  valve, in the same state, so both outputs start and stop together. Purely a diagnostic signal
+  for a hardware run: if the LED blinks but no liquid comes out, Bpod is issuing the command
+  correctly and the problem is physical (valve/tubing/reservoir); if the LED doesn't blink either,
+  the problem is upstream of the valve command itself. The state-machine shape itself was
+  structurally identical to every other reward-firing script in this codebase even before this
+  diagnostic was added, so this doesn't fix anything by itself — it only narrows down *where* to
+  keep looking. Root cause of the original "no liquid" report on this rig was never explicitly
+  confirmed back to this tool; real calibration data has since been collected successfully.
+- **Delete-point** (added after spotting a real data-quality issue in this rig's own collected
+  data — duplicate 100ms entries logged at inconsistent volumes, 5.0 vs 10.0 µL/pulse, implying one
+  was a bad run): `LiquidCalibration.remove_point(valve_id, index)` deletes one table entry and
+  clears that valve's `coeffs`/`last_modified` (forces a re-fit before the next lookup rather than
+  leaving a stale fit computed with the bad point still baked in). Exposed in the GUI as a "Delete
+  Selected Point" button next to the points table (single-row selection, confirmation dialog before
+  deleting) — no undo, so double-check the selected row before confirming.
+- **`get_reward_duration_s(target_volume_ul, valve_id=1, fallback_s=0.1)`** (module-level function
+  in `liquid_calibration.py`) is the actual integration point every task script uses — a thin
+  try/except wrapper around `LiquidCalibration().get_valve_time_s()` that returns `fallback_s`
+  (with a printed warning) instead of raising if that valve has no calibration data/fit yet, so an
+  uncalibrated box still runs (at the old hardcoded 0.1s default) rather than crashing at import
+  time. **All ~13 reward-delivering task scripts now call this** in place of a hardcoded
+  `VAR_REWARD_DURATION`, across both projects:
+  `Tests/tasks/{full_protocol_lookback_test, hifi_singleside_dot_test, hifi_singleside_gabor_test,
+  hifi_singleside_test, hifi_alternating_easy_test, hifi_alternating_easy_gabor_test,
+  gabor_wheel_test, camera_test, wheel_turn_reward, lick_reward, lick_timer}` and
+  `AuditoryEvidenceAccum/tasks/{stage1_wheel_shaping, stage2_threshold_staircase}` (stage2 has two
+  reward states, `RewardL`/`RewardR`, that already shared one `VAR_REWARD_DURATION` variable, so
+  one substitution covers both). Each script sets its own `VAR_REWARD_UL` (target volume, `4.0` by
+  default — the same magnitude the fallback's 0.1s was already approximating) and computes
+  `VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)` at import time, right where the
+  hardcoded constant used to be. Every task file is exactly 4 directory levels below the repo root
+  (`_projects/<Project>/tasks/<taskname>/<file>.py`), so the import boilerplate is identical
+  everywhere: `sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))`
+  before `from liquid_calibration import get_reward_duration_s`. Re-run "Run Pulses" + "Fit" in
+  `calibrate_liquid.py` any time the physical rig's tubing/valve/reservoir changes — every script
+  reads the JSON fresh at its own next launch, no code change needed to pick up a new fit.
 
 ## Architecture notes
 

@@ -32,6 +32,7 @@ through the same register_lock-protected register_value() calls, so the live "Wh
 sees one continuous trace across the whole trial regardless of which phase is running.
 """
 import math
+import os
 import random
 import sys
 import threading
@@ -41,6 +42,10 @@ from collections import deque
 
 from pybpodapi.protocol import Bpod, StateMachine
 from pybpod_rotaryencoder_module.module_api import RotaryEncoderModule
+
+_TASK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
+from liquid_calibration import get_reward_duration_s
 
 VAR_N_TRIALS = 30
 VAR_HOLD_MIN_S = 1                # randomized hold-steady duration range
@@ -52,7 +57,11 @@ VAR_ITI = 2                       # seconds between trials
 VAR_LEFT_THRESHOLD_DEG = -30      # confirmed via the Tools > Rotary encoder live-plot panel
 VAR_RIGHT_THRESHOLD_DEG = 30
 VAR_REWARDED_DIRECTION = 'LEFT'   # 'LEFT' or 'RIGHT' -- flip to test each side independently
-VAR_REWARD_DURATION = 0.1         # seconds Valve1 stays open
+VAR_REWARD_UL = 4.0                # target reward volume -- valve open time is derived from this
+                                    # via Calibration/liquid_calibration.py's own fitted curve
+                                    # (falls back to a hardcoded 0.1s if no calibration data/fit
+                                    # exists yet on this machine -- see get_reward_duration_s()).
+VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)   # seconds Valve1 stays open
 VAR_ROTARY_USB_PORT = None        # optional override; None = auto-discover
 VAR_STILL_POLL_HZ = 50            # wait_for_held_steady()'s own position-sampling rate
 

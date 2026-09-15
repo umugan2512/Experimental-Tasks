@@ -54,6 +54,7 @@ import matplotlib.pyplot as plt
 _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '_wheel_shaping_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
 import staircase
 import session_state
 import session_struct_export
@@ -63,6 +64,7 @@ from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 from dot_display import DotDisplay
+from liquid_calibration import get_reward_duration_s
 
 from confapp import conf as settings
 from pybpodapi.protocol import Bpod, StateMachine
@@ -103,12 +105,11 @@ VAR_RESPONSE_TIMEOUT_S = 10.0       # same flagged/tunable placeholder as Stage 
 VAR_THRESHOLD_FINAL_DEG = 35        # matches Stage 1 / this project's established final-task value
 VAR_TRIAL_COUNT_ADVANCE = 200
 
-VAR_REWARD_DURATION = 0.1
-VAR_REWARD_UL = 4.0                 # uncalibrated placeholder -- no valve uL calibration exists
-                                     # anywhere in this codebase yet; update once real calibration
-                                     # data ties valve-open time to delivered volume (same
-                                     # "uncalibrated placeholder" convention as VAR_DEG_TO_PX_GAIN
-                                     # elsewhere)
+VAR_REWARD_UL = 4.0                 # target reward volume -- valve open time is derived from this
+                                     # via Calibration/liquid_calibration.py's own fitted curve
+                                     # (falls back to a hardcoded 0.1s if no calibration data/fit
+                                     # exists yet on this machine -- see get_reward_duration_s()).
+VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1    # J1/J2 unchanged from Stage 1 -- never change during training
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2

@@ -98,6 +98,7 @@ import matplotlib.pyplot as plt
 _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', 'poisson_clicks_test'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
 import click_train_v2 as click_train
 import trial_scheduler as ts
 from live_plots_lookback import LookbackBenchPlots
@@ -106,6 +107,7 @@ import rotary_setup
 import hifi_setup
 from dot_display import DotDisplay, MiddleScreenDotDisplay
 from camera_recorder import CameraRecorder
+from liquid_calibration import get_reward_duration_s
 
 from pybpodapi.protocol import Bpod, StateMachine
 
@@ -120,7 +122,11 @@ VAR_RIGHT_THRESHOLD_DEG = 35        # IBL convention
 VAR_CUE_ABORT_THRESHOLD_DEG = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10deg -- looser than quiescence,
                                                                  # still much tighter than a choice turn
 VAR_RESPONSE_TIMEOUT = 5
-VAR_REWARD_DURATION = 0.1
+VAR_REWARD_UL = 4.0                 # target reward volume -- valve open time is derived from this
+                                     # via Calibration/liquid_calibration.py's own fitted curve
+                                     # (falls back to a hardcoded 0.1s if no calibration data/fit
+                                     # exists yet on this machine -- see get_reward_duration_s()).
+VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 VAR_CONSUMPTION_WINDOW_S = 3.0
 VAR_ITI = 0.1 #2s
 VAR_ABORT_ITI_S = 5.0               # cue-period wheel-abort timeout (unchanged from before)

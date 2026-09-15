@@ -41,6 +41,20 @@ layout -- the standard, canonical way to combine PyQt5 + matplotlib in one widge
 embedded rather than a separate popup window. Refreshed from the same two places the points
 table/coefficients already refresh (`_refresh_table()`, `_on_fit()`), so it never goes stale
 relative to what's on screen.
+
+**LED blink on every pulse, added because a real hardware run produced no audible/visible valve
+clicks and no dispensed liquid, with no error raised.** `PulseRunner`'s per-pulse state machine is
+structurally identical to every other reward-triggering script in this codebase (same
+`state_timer`/`Tup`-to-`exit`/`(Bpod.OutputChannels.Valve, id)` shape, confirmed working elsewhere
+on this same rig) -- no code-level bug was found by inspection, which leaves two possibilities that
+look identical from this GUI alone: Bpod isn't actually sending the valve command, or it is and the
+problem is downstream (valve/tubing/reservoir/power, entirely outside this code). `VAR_PULSE_LED_CHANNEL`
+(Port 1's built-in LED, same channel/convention every other task script already uses for a go-cue
+LED) now fires alongside the valve on every pulse, same state/same duration -- if the LED blinks
+with no liquid, the problem is physical; if it doesn't blink either, that points back to the Bpod
+connection/command path for further investigation on hardware. This can't be fully root-caused
+without watching the physical rig, so the LED is the diagnostic signal for the next hardware run,
+not a fix in itself.
 """
 import sys
 import traceback
@@ -48,7 +62,8 @@ import traceback
 import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QDoubleSpinBox,
-    QSpinBox, QPushButton, QLabel, QTableWidget, QTableWidgetItem, QGroupBox, QMessageBox)
+    QSpinBox, QPushButton, QLabel, QTableWidget, QTableWidgetItem, QGroupBox, QMessageBox,
+    QAbstractItemView)
 from PyQt5.QtCore import QThread, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -66,6 +81,9 @@ VAR_BPOD_SERIAL_PORT = 'COM10'   # MACHINE-SPECIFIC -- this rig's own confirmed 
                                   # "edit per box" convention as e.g. VAR_ROTARY_USB_PORT elsewhere
                                   # in this codebase. See module docstring for why this is required
                                   # here specifically, unlike every other task script.
+VAR_PULSE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, same convention as every other task
+                                  # script's own go-cue LED -- see module docstring's "LED blink"
+                                  # note for why this exists.
 
 
 class PulseRunner(QThread):
@@ -93,7 +111,8 @@ class PulseRunner(QThread):
                     state_name='Pulse',
                     state_timer=duration_s,
                     state_change_conditions={Bpod.Events.Tup: 'exit'},
-                    output_actions=[(Bpod.OutputChannels.Valve, self.valve_id)])
+                    output_actions=[(Bpod.OutputChannels.Valve, self.valve_id),
+                                     (VAR_PULSE_LED_CHANNEL, 255)])
                 self.my_bpod.send_state_machine(sma)
                 self.my_bpod.run_state_machine(sma)
             self.finished_ok.emit()
@@ -169,7 +188,13 @@ class CalibrationWindow(QWidget):
 
         self.points_table = QTableWidget(0, 2)
         self.points_table.setHorizontalHeaderLabels(['Duration (ms)', 'Volume (uL/pulse)'])
+        self.points_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.points_table.setSelectionMode(QAbstractItemView.SingleSelection)
         layout.addWidget(self.points_table)
+
+        self.delete_point_button = QPushButton('Delete Selected Point')
+        self.delete_point_button.clicked.connect(self._on_delete_point)
+        layout.addWidget(self.delete_point_button)
 
         fit_group = QGroupBox('3. Fit and look up')
         fit_form = QFormLayout()
@@ -214,7 +239,9 @@ class CalibrationWindow(QWidget):
 
         self.run_button.setEnabled(False)
         self.add_point_button.setEnabled(False)
-        self.status_label.setText('Running {0} pulses at {1:.1f}ms...'.format(n_pulses, duration_ms))
+        self.status_label.setText(
+            'Running {0} pulses at {1:.1f}ms -- watch Port 1\'s LED: it should blink once per '
+            'pulse, same duration as the valve.'.format(n_pulses, duration_ms))
 
         self.runner = PulseRunner(self.my_bpod, valve_id, duration_ms, n_pulses)
         self.runner.finished_ok.connect(self._on_pulses_done)
@@ -247,6 +274,30 @@ class CalibrationWindow(QWidget):
         self.status_label.setText('Added point: {0:.1f}ms -> {1:.4f} uL/pulse.'.format(
             duration_ms, volume_ul))
         self.mass_input.setValue(0.0)
+        self._refresh_table()
+
+    def _on_delete_point(self):
+        valve_id = self._current_valve_id()
+        selected_rows = self.points_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, 'No point selected',
+                                 'Click a row in the points table first, then Delete Selected '
+                                 'Point.')
+            return
+
+        row = selected_rows[0].row()
+        duration_ms, volume_ul = self.calibration.table(valve_id)[row]
+        reply = QMessageBox.question(
+            self, 'Delete point',
+            'Delete this point?\n\n{0:.1f}ms -> {1:.4f} uL/pulse\n\n'
+            'Any existing fit for this valve will be cleared -- fit again afterward.'.format(
+                duration_ms, volume_ul))
+        if reply != QMessageBox.Yes:
+            return
+
+        self.calibration.remove_point(valve_id, row)
+        self.status_label.setText('Deleted point: {0:.1f}ms -> {1:.4f} uL/pulse.'.format(
+            duration_ms, volume_ul))
         self._refresh_table()
 
     def _on_fit(self):

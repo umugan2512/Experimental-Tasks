@@ -85,6 +85,22 @@ class LiquidCalibration(object):
         self.save()
         return volume_ul
 
+    def remove_point(self, valve_id, index):
+        """
+        Removes the measurement at index (0-based, same order as table()) from valve_id's table --
+        for discarding a bad/outlier point (e.g. a mistyped mass or pulse count) without needing to
+        hand-edit the JSON file. Also clears any existing fit for this valve: a fit computed from
+        the table BEFORE this removal no longer reflects the current data, and silently leaving a
+        stale fit/coeffs in place would be misleading -- fit() must be called again explicitly
+        after removing a point, same "don't show stale data" principle as everywhere else in this
+        project. Saves immediately, same as add_measurement().
+        """
+        entry = self._entry(valve_id)
+        del entry['table'][index]
+        entry['coeffs'] = None
+        entry['last_modified'] = None
+        self.save()
+
     def fit(self, valve_id):
         """
         Fits valve_id's table as a 2nd-order polynomial duration_ms = f(volume_uL) -- same
@@ -111,12 +127,14 @@ class LiquidCalibration(object):
 
     def get_valve_time_s(self, volume_ul, valve_id=1):
         """
-        The one function a task script should actually call: returns the valve-open duration, in
-        SECONDS (ready to assign straight to a state_timer), that this calibration predicts will
-        deliver volume_ul from valve_id -- numpy.polyval(coeffs, volume_ul) / 1000.0, mirroring
-        LegacyGetValveTimes.m's own ms->s conversion. Raises ValueError if valve_id has never been
-        fit (fit() must be called, and succeed, at least once first) -- never silently returns a
-        guessed/placeholder duration.
+        Returns the valve-open duration, in SECONDS (ready to assign straight to a state_timer),
+        that this calibration predicts will deliver volume_ul from valve_id --
+        numpy.polyval(coeffs, volume_ul) / 1000.0, mirroring LegacyGetValveTimes.m's own ms->s
+        conversion. Raises ValueError if valve_id has never been fit (fit() must be called, and
+        succeed, at least once first) -- never silently returns a guessed/placeholder duration.
+        Task scripts should generally call the module-level get_reward_duration_s() instead of
+        this directly -- it adds a graceful hardcoded-fallback for a box with no calibration data
+        yet, so a missing/incomplete calibration doesn't crash every reward-delivering task script.
         """
         entry = self._valves.get(valve_id)
         if entry is None or entry.get('coeffs') is None:
@@ -135,3 +153,33 @@ class LiquidCalibration(object):
     def coeffs(self, valve_id):
         """ valve_id's fitted polynomial coefficients, or None if it hasn't been fit yet. """
         return self._entry(valve_id).get('coeffs')
+
+
+def get_reward_duration_s(target_volume_ul, valve_id=1, fallback_s=0.1):
+    """
+    The function a task script should actually call to turn a target reward volume into a valve
+    open duration -- wraps LiquidCalibration.get_valve_time_s() with a graceful fallback: if no
+    calibration data/fit exists yet for valve_id on this machine (a fresh box, or one that just
+    hasn't been calibrated yet), returns fallback_s (with a printed warning) instead of raising --
+    so a missing/incomplete calibration doesn't crash every reward-delivering task script at
+    startup. Loads Calibration/liquid_calibration.json fresh on every call rather than trying to
+    cache/share one LiquidCalibration instance across callers -- calibration data changes rarely
+    (only during an actual bench-calibration session), and each task script only calls this once,
+    at startup, so the extra file read is negligible.
+
+    :param float target_volume_ul: desired reward volume, in microliters
+    :param int valve_id: which valve (this rig has one, see CLAUDE.md -- "wheel-turn choice +
+        single valve")
+    :param float fallback_s: hardcoded duration to fall back to (seconds) if no calibration exists
+    :return: valve-open duration in seconds, ready to assign straight to a state_timer
+    """
+    try:
+        cal = LiquidCalibration()
+        duration_s = cal.get_valve_time_s(target_volume_ul, valve_id)
+        print("Reward duration from calibration: {0:.1f}ms for {1}uL (valve {2}).".format(
+            duration_s * 1000.0, target_volume_ul, valve_id), flush=True)
+        return duration_s
+    except ValueError as err:
+        print("WARNING: liquid calibration unavailable ({0}) -- using hardcoded fallback "
+              "VAR_REWARD_DURATION={1}s.".format(err, fallback_s), flush=True)
+        return fallback_s

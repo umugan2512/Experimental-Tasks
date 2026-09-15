@@ -64,9 +64,11 @@ import traceback
 
 _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 from gabor_display import GaborDisplay
+from liquid_calibration import get_reward_duration_s
 
 from pybpodapi.protocol import Bpod, StateMachine
 
@@ -77,7 +79,11 @@ VAR_STEADY_THRESHOLD_DEG = 5       # same as wheel_turn_reward.py -- not being r
 VAR_LEFT_THRESHOLD_DEG = -30
 VAR_RIGHT_THRESHOLD_DEG = 30
 VAR_RESPONSE_TIMEOUT = 5
-VAR_REWARD_DURATION = 0.1
+VAR_REWARD_UL = 4.0                 # target reward volume -- valve open time is derived from this
+                                     # via Calibration/liquid_calibration.py's own fitted curve
+                                     # (falls back to a hardcoded 0.1s if no calibration data/fit
+                                     # exists yet on this machine -- see get_reward_duration_s()).
+VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 VAR_ITI = 2
 VAR_STILL_POLL_HZ = 50
 VAR_POLL_HZ = 10

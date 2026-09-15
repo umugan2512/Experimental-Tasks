@@ -26,10 +26,21 @@ CURRENT level, so a state trying to wait for a release that may have already hap
 case for any lick shorter than the reward cycle) would hang forever. A timer-based lockout needs no
 level query, and doubles as the requested minimum time between separately-counted licks.
 """
+import os
+import sys
+
+_TASK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
+from liquid_calibration import get_reward_duration_s
+
 from pybpodapi.protocol import Bpod, StateMachine
 
 VAR_N_TRIALS = 30
-VAR_REWARD_DURATION = 0.1        # seconds Valve1 stays open per lick
+VAR_REWARD_UL = 4.0              # target reward volume -- valve open time is derived from this via
+                                  # Calibration/liquid_calibration.py's own fitted curve (falls back
+                                  # to a hardcoded 0.1s if no calibration data/fit exists yet on
+                                  # this machine -- see get_reward_duration_s()).
+VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)   # seconds Valve1 stays open per lick
 VAR_MIN_LICK_DURATION_S = 0.01   # beam must stay broken this long to count -- see module docstring
 VAR_LICK_REFRACTORY_S = 0.3      # minimum gap between separately-counted/rewarded licks -- see
                                   # module docstring's "Refractory lockout" note. Separate from
