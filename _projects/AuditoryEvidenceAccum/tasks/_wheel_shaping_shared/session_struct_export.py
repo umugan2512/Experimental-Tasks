@@ -54,12 +54,35 @@ def _matlab_safe(obj):
     return obj
 
 
+def _split_stream_values(trials):
+    """ Post-processes each trial's STREAM_KEYS values (lists of raw VAL strings -- see
+    session_csv_parser.STREAM_KEYS) into numeric arrays, so the exported struct is directly usable
+    without a second parse pass in MATLAB/Python. 'WHEEL_POS' rows are "t,pos" pairs -> {'t':
+    [...], 'pos': [...]}; 'QUIESCENCE_RESET_TIME' rows are bare floats -> a flat list of floats.
+    Mutates each trial's 'vals' dict in place and returns trials, so it can be chained inline at
+    the call site. A trial with no rows for a given stream key simply has no key there (nothing to
+    split), same as before this existed. """
+    for trial in trials:
+        vals = trial['vals']
+        if 'WHEEL_POS' in vals:
+            times, positions = [], []
+            for raw in vals['WHEEL_POS']:
+                t_str, pos_str = raw.split(',')
+                times.append(float(t_str))
+                positions.append(float(pos_str))
+            vals['WHEEL_POS'] = {'t': times, 'pos': positions}
+        if 'QUIESCENCE_RESET_TIME' in vals:
+            vals['QUIESCENCE_RESET_TIME'] = [float(raw) for raw in vals['QUIESCENCE_RESET_TIME']]
+    return trials
+
+
 def export_session_struct(csv_path, task_params):
     """ task_params: dict of every VAR_* constant the calling task script used this run -- pass
     {k: v for k, v in globals().items() if k.startswith('VAR_')} from the call site. Automatic,
     stays complete as new parameters get added, no hand-maintained list to fall out of sync.
     Returns (mat_path, json_path). """
     info, session_vals, trials = session_csv_parser.parse_session_csv(csv_path)
+    trials = _split_stream_values(trials)
     struct = {'info': info, 'task_params': task_params, 'session_vals': session_vals,
               'trials': trials}
 
@@ -91,6 +114,7 @@ def _load_member(csv_path):
         except (ValueError, OSError):
             pass   # fall through to the raw-CSV fallback below
     info, _session_vals, trials = session_csv_parser.parse_session_csv(csv_path)
+    trials = _split_stream_values(trials)
     return {'info': info, 'task_params': None, 'trials': trials}
 
 

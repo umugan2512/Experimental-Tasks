@@ -75,6 +75,30 @@ background thread was unavoidable for recording itself, but confining the (compa
 expensive) per-frame preview conversion+repaint to two ~1s windows instead of the whole ~5s
 decision period was a confirmed, worthwhile reduction in that same risk, not just a cosmetic
 choice.
+
+**additions.txt instrumentation pass, added in this pass**: per-click times (`CLICK_TIMES_L/R`,
+`N_CLICKS_L/R`, `STIM_SEED` -- a fresh per-trial seed, not a globally reseeded generator, so a
+trial's exact click train is reproducible offline from the logged seed alone); Bpod-send anchors
+(`SM_SEND_TIME` once per state-machine run, `CUE_ONSET_TIME` for the cue machine only) so a
+trial-relative Bpod timestamp can be mapped onto the session clock without wrongly assuming the
+send instant equals `TRIAL_START` (false here -- the hold-to-init wait runs first, a variable-
+length gap); the cue state machine's single `CuePeriod` split into `CuePeriod` + a new
+`DelayPeriod` (identical wheel-abort monitoring, same total enforced hold to the millisecond --
+verify via realized `states_durations` on hardware) so `ABORT_EPOCH` can distinguish a cue-phase
+abort from a delay-phase one; per-trial staircase/timing state (`CUE_ABORT_THRESHOLD_DEG`,
+`RESPONSE_THRESHOLD_DEG`, `QUIESCENCE_DUR_S`, `ITI_S` -- frozen values here, but registered every
+trial for convention-consistency with Stage 3/4, where they genuinely vary); `QUIESCENCE_BREAKS`
+(Stage 1/2 already had it, this script didn't); `SESSION_END_REASON='completed'` on the natural-
+end path (deliberately still absent on every early-end path -- same "absence signals abnormal
+end" convention Stage 1/2 already use); `SESSION_WATER_UL` at session end; and a genuinely new
+`_export_session_struct()`/`_cleanup_and_export()` pair (this file never called
+`session_struct_export.py` at all before) wired into every exit path, including a real,
+previously-unfixed gap: an unhandled per-trial exception used to `raise` straight out of the
+whole trial loop, skipping teardown (`camera`/`dot`/`hifi`/`rotary`/`my_bpod` all left unclosed,
+no struct exported) entirely -- `_cleanup_and_export()` now runs first on that path too.
+Deliberately NOT touched: `click_train_v2.py`'s ISI floor, rate calibration, or Poisson generation
+math; the difficulty grid; any staircase/threshold/timing parameter's own value; or trial
+scheduling logic (`trial_scheduler.py`) -- per additions.txt's own explicit scope.
 """
 import os
 import random
@@ -99,6 +123,12 @@ _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', 'poisson_clicks_test'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
+# AuditoryEvidenceAccum's own _wheel_shaping_shared/ -- only for session_struct_export.py (+ its
+# session_csv_parser.py dependency), which are protocol-agnostic parsing/export utilities despite
+# their current location (see additions.txt T8: this script never had a struct-export call at all).
+# Not importing anything paradigm-specific from there (no staircase/session_state/direction_tracker).
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', 'AuditoryEvidenceAccum', 'tasks',
+                                 '_wheel_shaping_shared'))
 import click_train_v2 as click_train
 import trial_scheduler as ts
 from live_plots_lookback import LookbackBenchPlots
@@ -108,6 +138,7 @@ import hifi_setup
 from dot_display import DotDisplay, MiddleScreenDotDisplay
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
+import session_struct_export
 
 from pybpodapi.protocol import Bpod, StateMachine
 
@@ -131,8 +162,11 @@ VAR_CONSUMPTION_WINDOW_S = 3.0
 VAR_ITI = 0.1 #2s
 VAR_ABORT_ITI_S = 5.0               # cue-period wheel-abort timeout (unchanged from before)
 VAR_INCORRECT_ITI_S = 0.1 #5s           # longer than VAR_ITI -- error timeout for a wrong turn
-VAR_STILL_POLL_HZ = 50
-VAR_POLL_HZ = 10
+VAR_STILL_POLL_HZ = 100              # additions.txt T4: raised 50->100. NEEDS ON-RIG CONFIRMATION
+VAR_POLL_HZ = 100                    # that the poll thread keeps up without delaying state-machine
+                                      # handling -- if not, fall back to 50/50 (still a real
+                                      # improvement over the old 50/10 split) and note which rate
+                                      # was actually used when reporting results from a real session.
 VAR_ROTARY_USB_PORT = None
 
 VAR_USE_MIDDLE_SCREEN_ONLY = True   # False = DotDisplay (full/spanned screen). True =
@@ -192,6 +226,43 @@ VAR_DOT_DISAPPEAR_MAX_S = 0.9
 ALL_THRESHOLDS_DEG = [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
                        VAR_LEFT_THRESHOLD_DEG, VAR_RIGHT_THRESHOLD_DEG,
                        -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG]
+
+def _export_session_struct(csv_path):
+    """ Every VAR_* constant this run used, harvested automatically -- stays complete as new
+    parameters get added later, no hand-maintained list to fall out of sync. Wrapped in try/except
+    so an export hiccup (e.g. a scipy/disk issue) never blocks session teardown -- the animal's run
+    is already fully logged in the CSV regardless of whether this convenience export succeeds. Same
+    helper shape as stage1_wheel_shaping.py/stage2_threshold_staircase.py's own. """
+    task_params = {k: v for k, v in globals().items() if k.startswith('VAR_')}
+    try:
+        mat_path, json_path = session_struct_export.export_session_struct(csv_path, task_params)
+        print("Session struct exported: {0} / {1}".format(mat_path, json_path), flush=True)
+    except Exception as err:
+        print("WARNING: session struct export failed: {0}".format(err), flush=True)
+
+
+def _cleanup_and_export():
+    """ Shared teardown, called from every exit path (normal end, Stop-triggered break, Kill,
+    and an unhandled per-trial exception -- see each call site below) so hardware connections and
+    the struct export are never skipped regardless of how the session ended. Fixes a real gap in
+    the previous version of this file: an unhandled exception used to `raise` straight out of the
+    trial loop, skipping this teardown entirely (confirmed: `camera`/`dot`/`hifi`/`rotary`/
+    `my_bpod` were all left unclosed, and no struct was ever exported, on that path). Only ever
+    called once per run (each call site's own control flow -- sys.exit()/re-raise/falling out of
+    the loop -- ensures no path reaches more than one of them). """
+    try:
+        runner.register('SESSION_WATER_UL', session_reward_count * VAR_REWARD_UL)
+    except Exception as err:
+        print("WARNING: could not register SESSION_WATER_UL: {0}".format(err), flush=True)
+    camera.close()
+    dot.close()
+    hifi.close()
+    rotary.close()
+    csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
+                                        # that holds it (see CLAUDE.md)
+    my_bpod.close()
+    _export_session_struct(csv_path)
+
 
 # --- connect to Bpod, resolve modules -------------------------------------------------------------
 
@@ -272,14 +343,13 @@ bench_plots = LookbackBenchPlots(
     stim_end=click_train.CLICK_START_OFFSET_S + click_train.VAR_STIM_DURATION_S,
     onset_pulse_duration=click_train.VAR_ONSET_PULSE_DURATION_S)
 
-CUE_MONITOR_DURATION_S = click_train.TOTAL_WAVEFORM_DURATION_S + 0.1
-
 # --- trial loop -----------------------------------------------------------------------------------
 
 print("Starting up to {0} trials, stopping early on the disengagement circuit-breaker".format(
     VAR_MAX_TRIALS), flush=True)
 
 trial = 0
+session_reward_count = 0   # feeds SESSION_WATER_UL at session end (additions.txt T8)
 while trial < VAR_MAX_TRIALS:
     if ts.should_stop_session(history):
         print("Circuit-breaker: ending session after trial {0} (disengagement detected).".format(
@@ -306,6 +376,7 @@ while trial < VAR_MAX_TRIALS:
         rotary.enable_evt_transmission()
 
         runner.register('TRIAL_START', trial_start_t)
+        runner.register('QUIESCENCE_BREAKS', n_breaks)
         dot.clear()
         dot.pump()
         camera.pump()
@@ -321,7 +392,12 @@ while trial < VAR_MAX_TRIALS:
         recent_right_frac = ts.recency_weighted_right_fraction(history)
         side = ts.draw_side_debiased_capped(np.random, p_right_target, recent_right_frac, history)
 
-        trial_clicks = click_train.generate_trial_clicks(difficulty, side)
+        # additions.txt T1: a fresh per-trial seed, not a globally-reseeded generator -- the exact
+        # click train is then reproducible offline from STIM_SEED alone (regenerate_trial_clicks
+        # with the same difficulty/side/rng seed reproduces left_times/right_times exactly).
+        stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
+        trial_clicks = click_train.generate_trial_clicks(
+            difficulty, side, rng=np.random.RandomState(stim_seed))
         left_wave, right_wave = click_train.build_waveform(trial_clicks, hifi.sampling_rate)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
@@ -332,6 +408,26 @@ while trial < VAR_MAX_TRIALS:
         runner.register('TRIAL_TYPE', trial_type)
         runner.register('P_RIGHT_TARGET', p_right_target)
         runner.register('RECENT_RIGHT_FRACTION', recent_right_frac)
+
+        # additions.txt T1: per-click times, generator-relative (i.e. relative to stimulus onset,
+        # NOT offset by CLICK_START_OFFSET_S -- CUE_ONSET_TIME below is what analysis adds back to
+        # reconstruct an absolute click time), comma-joined at 4dp. Empty side -> empty string.
+        runner.register('CLICK_TIMES_L', ','.join(
+            '{0:.4f}'.format(t) for t in trial_clicks['left_times']))
+        runner.register('CLICK_TIMES_R', ','.join(
+            '{0:.4f}'.format(t) for t in trial_clicks['right_times']))
+        runner.register('N_CLICKS_L', trial_clicks['n_left'])
+        runner.register('N_CLICKS_R', trial_clicks['n_right'])
+        runner.register('STIM_SEED', stim_seed)
+
+        # additions.txt T6: the staircase/timing state actually in force THIS trial -- Bpod-side
+        # values here are frozen (this protocol has no active staircase), but registering them per
+        # trial (not just once at session start) keeps the convention identical to Stage 3/4, where
+        # they genuinely do vary trial-to-trial.
+        runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
+        runner.register('RESPONSE_THRESHOLD_DEG', VAR_RIGHT_THRESHOLD_DEG)
+        runner.register('QUIESCENCE_DUR_S', required_hold)
+        runner.register('ITI_S', VAR_ITI)
 
         print("Trial {0}: held steady -- playing {1} stimulus (side={2}, n_L={3}, n_R={4}, "
               "trial_type={5}, p_right_target={6:.3f})".format(
@@ -356,12 +452,36 @@ while trial < VAR_MAX_TRIALS:
         hifi.play(0)
 
         cue_send_t = time.time() - log_python_t0
+        # additions.txt T2: the Bpod-send anchor for this cue state machine, plus the moment the
+        # click waveform's own onset (past the bilateral marker pulse + gap) actually plays --
+        # without SM_SEND_TIME, a state's trial-relative Bpod timestamp can only be mapped to the
+        # session clock by wrongly assuming the state machine's send instant equals TRIAL_START,
+        # which is false here (the hold-to-init wait runs first, a variable-length gap).
+        runner.register('SM_SEND_TIME', cue_send_t)
+        runner.register('CUE_ONSET_TIME', cue_send_t + click_train.CLICK_START_OFFSET_S)
 
         cue_sma = StateMachine(my_bpod)
 
+        # additions.txt T5: CuePeriod (the click train itself) and DelayPeriod (the enforced silent
+        # gap after it) are now separate states with identical wheel-abort monitoring, so an abort
+        # can be attributed to the right epoch -- previously one combined CuePeriod state spanned
+        # both, so every abort during the whole waveform was indistinguishable. The 0.1s safety
+        # buffer moves from CuePeriod's own timer to DelayPeriod's, so the TOTAL enforced hold
+        # (CuePeriod + DelayPeriod) is unchanged to the millisecond -- verify via realized
+        # states_durations on hardware, not by reading this code.
         cue_sma.add_state(
             state_name='CuePeriod',
-            state_timer=CUE_MONITOR_DURATION_S,
+            state_timer=click_train.CLICK_START_OFFSET_S + click_train.VAR_STIM_DURATION_S,
+            state_change_conditions={
+                wheel_abort_event_neg: 'WheelAbort',
+                wheel_abort_event_pos: 'WheelAbort',
+                Bpod.Events.Tup: 'DelayPeriod',
+            },
+            output_actions=[])
+
+        cue_sma.add_state(
+            state_name='DelayPeriod',
+            state_timer=click_train.VAR_DELAY_DURATION_S + 0.1,
             state_change_conditions={
                 wheel_abort_event_neg: 'WheelAbort',
                 wheel_abort_event_pos: 'WheelAbort',
@@ -401,6 +521,11 @@ while trial < VAR_MAX_TRIALS:
         if aborted:
             abort_time_abs = cue_send_t + cue_visited['WheelAbort'][-1][0]
             runner.register('ABORT', abort_time_abs)
+            # additions.txt T5: DelayPeriod is only genuinely entered (a real, non-nan start time)
+            # if CuePeriod completed without aborting -- so "DelayPeriod visited" cleanly
+            # distinguishes which epoch this abort actually happened in.
+            abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
+            runner.register('ABORT_EPOCH', abort_epoch)
 
             monitor.record_outcome(difficulty, side, trial_type, abort=True, response=None,
                                     correct=None, rt=None)
@@ -423,6 +548,9 @@ while trial < VAR_MAX_TRIALS:
 
         send_epoch = time.time()
         send_t = send_epoch - log_python_t0
+        # additions.txt T2: the decision machine's own send anchor (a trial with a cue machine +
+        # decision machine gets two SM_SEND_TIME rows -- this is the second).
+        runner.register('SM_SEND_TIME', send_t)
 
         # "First second after task start" -- one of the two brief preview windows requested (see
         # VAR_CAMERA_PREVIEW's own comment for why this is snippet-only, not continuous).
@@ -548,11 +676,7 @@ while trial < VAR_MAX_TRIALS:
 
         if decision_result.get('killed'):
             print("Bpod Kill received -- ending session.", flush=True)
-            camera.close()
-            dot.close()
-            hifi.close()
-            rotary.close()
-            my_bpod.close()
+            _cleanup_and_export()
             sys.exit(0)
 
         if not decision_result.get('ran', False):
@@ -574,6 +698,7 @@ while trial < VAR_MAX_TRIALS:
 
         # --- trial-lookback scheduler update ---
         if outcome_state == 'Reward':
+            session_reward_count += 1   # feeds SESSION_WATER_UL at session end
             response = side
         elif outcome_state == 'ErrorConsumption':
             response = 'L' if side == 'R' else 'R'
@@ -631,16 +756,23 @@ while trial < VAR_MAX_TRIALS:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)
         traceback.print_exc(file=sys.stdout)
         sys.stdout.flush()
+        # Fix (was a real gap, not intentional): re-raising here used to skip teardown entirely --
+        # nothing after this while/else block ever ran, so camera/dot/hifi/rotary/my_bpod were all
+        # left open and no struct was exported on any trial-loop exception. Clean up FIRST, then
+        # still re-raise so the failure is exactly as loud/visible as before.
+        _cleanup_and_export()
         raise
 else:
+    runner.register('SESSION_END_REASON', 'completed')
     print("Done: reached VAR_MAX_TRIALS ({0}) without the circuit-breaker firing".format(
         VAR_MAX_TRIALS), flush=True)
 
-camera.close()
-dot.close()
-hifi.close()
-rotary.close()
-my_bpod.close()
+# Reached on natural completion (the else: clause above already ran) OR any Stop-triggered break
+# (should_stop_session, a mid-trial Stop signal) -- SESSION_END_REASON is deliberately left
+# unregistered on the break paths (absence itself signals an abnormal/early end, same convention
+# documented in CLAUDE.md for Stage 1/2). The Kill and exception paths never reach here at all --
+# each already called _cleanup_and_export() itself above, before exiting/re-raising.
+_cleanup_and_export()
 
 print("Close the plot windows to exit.", flush=True)
 plt.ioff()

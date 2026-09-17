@@ -11,19 +11,31 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   6. Session merging: classify_trial()'s consumed-reward classification, group_sessions()'s
      merge-eligible-ending/same-protocol/gap-threshold rule, combine_group()'s field combination,
      and the stage-ordering helpers
+  7. QuiescenceStaircase (Stage 4): step-up/step-down, floor/ceiling, same shape as Section 1
+  8. stage3_gates_met()/stage4_gates_met()/select_stage4_staircase_to_tighten() (Tag B policy)
+  9. debiasing.next_side_after_error(): statistical repeat-rate check over many draws
+  10. session_csv_parser.STREAM_KEYS fix: repeated VAL rows (e.g. WHEEL_POS) are retained as a
+      list, not collapsed to the last value -- the additions.txt T3 regression this guards against
+  11. derive_intrial_threshold.py: sliding-window excursion percentile against a synthetic trace
+      with a known injected value
 
 Run with the pybpod-environment interpreter:
     /c/Users/2P-Behav/.conda/envs/pybpod-environment/python.exe validate_wheel_shaping.py
 """
+import csv
 import datetime
 import os
 import shutil
 import sys
 import tempfile
 
+import numpy as np
+
 import staircase
 import session_state
 import session_csv_parser
+import debiasing
+import derive_intrial_threshold
 from direction_tracker import DirectionRatioTracker
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'records'))
@@ -333,6 +345,15 @@ def _fake_session(started, protocol, session_end_reason, trial_count=10, duratio
         'threshold_start_deg': 7.0, 'threshold_end_deg': 7.0, 'threshold_final_deg': 35.0,
         'iti_end_s': 0.5, 'gain_mult_end': 2.0, 'direction_ratio_end': None,
         'simple_gates_met': None,
+        # Stage 3/4 fields -- None here since this fixture models a Stage 1/2 session (matches
+        # what a real summarize_session() call returns for those protocols: the keys always
+        # exist, populated only when the protocol's own PROTOCOL_CONFIG/VAL registrations apply).
+        'response_threshold_start_deg': None, 'response_threshold_end_deg': None,
+        'quiescence_start_s': None, 'quiescence_end_s': None, 'cue_abort_threshold_deg': None,
+        'click_level_attenuated': None, 'accuracy_aos': None, 'abort_rate': None,
+        'aborts_quiescence': 0, 'aborts_cue': 0, 'aborts_delay': 0, 'aborts_response': 0,
+        'warmup_trial_count': 0, 'repeat_trial_count': 0, 'session_water_ul': None,
+        'staircase_advanced_this_session': None, 'git_commit': None,
         'session_csv_path': csv_path or (started.replace(' ', '_').replace(':', '') + '.csv'),
         'session_struct_path': None,
     }
@@ -424,10 +445,229 @@ section6_pass = section6a_pass and section6b_pass and section6c_pass and section
 print("Section 6 result: {0}".format("PASS" if section6_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
+# Section 7: QuiescenceStaircase (Stage 4) -- same step-up/step-down/floor/ceiling shape as
+# Section 1's ThresholdStaircase
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 7: QuiescenceStaircase")
+print("=" * 100)
+
+qs = staircase.QuiescenceStaircase(current_s=0.1)
+for _ in range(staircase.QUIESCENCE_SUCCESSES_TO_STEP_UP - 1):
+    qs.record_outcome(success=True)
+qs_below_step = abs(qs.current_s - 0.1) < 1e-9
+qs.record_outcome(success=True)
+qs_stepped_up = abs(qs.current_s - (0.1 + staircase.QUIESCENCE_STEP_UP_S)) < 1e-9
+print("  {0} consecutive successful initiations: scale unchanged (0.1s): {1}".format(
+    staircase.QUIESCENCE_SUCCESSES_TO_STEP_UP - 1, qs_below_step))
+print("  {0}th consecutive success: scale stepped up by {1}s: {2}".format(
+    staircase.QUIESCENCE_SUCCESSES_TO_STEP_UP, staircase.QUIESCENCE_STEP_UP_S, qs_stepped_up))
+
+qs2 = staircase.QuiescenceStaircase(current_s=staircase.QUIESCENCE_CEILING_S)
+for _ in range(staircase.QUIESCENCE_SUCCESSES_TO_STEP_UP * 3):
+    qs2.record_outcome(success=True)
+qs_ceiling_check = qs2.current_s <= staircase.QUIESCENCE_CEILING_S + 1e-9
+print("  scale never exceeds the {0}s ceiling after many successes (final={1:.3f}s): {2}".format(
+    staircase.QUIESCENCE_CEILING_S, qs2.current_s, qs_ceiling_check))
+
+qs3 = staircase.QuiescenceStaircase(current_s=staircase.QUIESCENCE_FLOOR_S)
+for _ in range(staircase.QUIESCENCE_FAILURES_TO_STEP_DOWN * 3):
+    qs3.record_outcome(success=False)
+qs_floor_check = qs3.current_s >= staircase.QUIESCENCE_FLOOR_S - 1e-9
+print("  scale never drops below the {0}s floor after many resets (final={1:.3f}s): {2}".format(
+    staircase.QUIESCENCE_FLOOR_S, qs3.current_s, qs_floor_check))
+
+section7_pass = qs_below_step and qs_stepped_up and qs_ceiling_check and qs_floor_check
+print("Section 7 result: {0}".format("PASS" if section7_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 8: stage3_gates_met() / stage4_gates_met() / select_stage4_staircase_to_tighten()
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 8: Stage 3/4 gates + Tag B staircase selection")
+print("=" * 100)
+
+s3_pass = staircase.stage3_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+s3_fail_acc = staircase.stage3_gates_met(accuracy_aos=0.60, abort_rate=0.10, trial_count=250)
+s3_fail_abort = staircase.stage3_gates_met(accuracy_aos=0.75, abort_rate=0.25, trial_count=250)
+s3_fail_trials = staircase.stage3_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=150)
+print("  Stage 3 gates: all met (75% acc, 10% abort, 250 trials) -> True: {0}".format(s3_pass))
+print("  Stage 3 gates: accuracy below 70% -> False: {0}".format(s3_fail_acc is False))
+print("  Stage 3 gates: abort rate above 20% -> False: {0}".format(s3_fail_abort is False))
+print("  Stage 3 gates: trial count below 200 -> False: {0}".format(s3_fail_trials is False))
+section8a_pass = s3_pass and s3_fail_acc is False and s3_fail_abort is False and s3_fail_trials is False
+
+s4_pass = staircase.stage4_gates_met(
+    response_threshold_fraction=0.95, quiescence_s=staircase.QUIESCENCE_CEILING_S,
+    accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+s4_fail_resp = staircase.stage4_gates_met(
+    response_threshold_fraction=0.5, quiescence_s=staircase.QUIESCENCE_CEILING_S,
+    accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+s4_fail_quiescence = staircase.stage4_gates_met(
+    response_threshold_fraction=0.95, quiescence_s=0.2,
+    accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+print("  Stage 4 gates: both staircases at target -> True: {0}".format(s4_pass))
+print("  Stage 4 gates: response threshold not at target -> False: {0}".format(
+    s4_fail_resp is False))
+print("  Stage 4 gates: quiescence not at ceiling -> False: {0}".format(
+    s4_fail_quiescence is False))
+section8b_pass = s4_pass and s4_fail_resp is False and s4_fail_quiescence is False
+
+# Tag B: whichever parameter is furthest from its own final value wins; ties alternate.
+pick_response = staircase.select_stage4_staircase_to_tighten(
+    response_threshold_fraction=0.3, quiescence_s=0.45, last_advanced=None)
+pick_quiescence = staircase.select_stage4_staircase_to_tighten(
+    response_threshold_fraction=0.85, quiescence_s=0.15, last_advanced=None)
+print("  Tag B: response furthest from target -> picks 'response': {0}".format(
+    pick_response == 'response'))
+print("  Tag B: quiescence furthest from target -> picks 'quiescence': {0}".format(
+    pick_quiescence == 'quiescence'))
+
+# A genuine tie (both staircases equally far from final, on the SAME normalized 0-1 scale this
+# function itself uses) -- tie-break alternates away from last_advanced.
+tie_resp_frac = 0.5 * staircase.STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION
+tie_quiescence_s = staircase.QUIESCENCE_CEILING_S - 0.5 * (
+    staircase.QUIESCENCE_CEILING_S - staircase.QUIESCENCE_FLOOR_S)
+tie_break_from_response = staircase.select_stage4_staircase_to_tighten(
+    tie_resp_frac, tie_quiescence_s, last_advanced='response')
+tie_break_from_quiescence = staircase.select_stage4_staircase_to_tighten(
+    tie_resp_frac, tie_quiescence_s, last_advanced='quiescence')
+tie_break_correct = (tie_break_from_response == 'quiescence' and
+                      tie_break_from_quiescence == 'response')
+print("  Tag B: exact tie alternates away from last_advanced: {0}".format(tie_break_correct))
+
+section8c_pass = (pick_response == 'response' and pick_quiescence == 'quiescence' and
+                   tie_break_correct)
+section8_pass = section8a_pass and section8b_pass and section8c_pass
+print("Section 8 result: {0}".format("PASS" if section8_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 9: debiasing.next_side_after_error() -- statistical repeat-rate check
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 9: debiasing.next_side_after_error()")
+print("=" * 100)
+
+rng = np.random.RandomState(12345)
+n_draws = 20000
+repeats = sum(1 for _ in range(n_draws)
+              if debiasing.next_side_after_error('L', rng=rng) == 'L')
+realized_rate = repeats / float(n_draws)
+rate_within_tol = abs(realized_rate - debiasing.VAR_DEBIAS_REPEAT_PROB) < 0.02
+print("  Realized repeat rate over {0} draws (target {1:.2f}): {2:.4f} -- within 2%: {3}".format(
+    n_draws, debiasing.VAR_DEBIAS_REPEAT_PROB, realized_rate, rate_within_tol))
+
+flip_only = all(debiasing.next_side_after_error('R', rng=rng, repeat_prob=0.0) == 'L'
+                 for _ in range(50))
+repeat_only = all(debiasing.next_side_after_error('R', rng=rng, repeat_prob=1.0) == 'R'
+                   for _ in range(50))
+print("  repeat_prob=0.0 always flips: {0}".format(flip_only))
+print("  repeat_prob=1.0 always repeats: {0}".format(repeat_only))
+
+section9_pass = rate_within_tol and flip_only and repeat_only
+print("Section 9 result: {0}".format("PASS" if section9_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 10: session_csv_parser.STREAM_KEYS fix -- repeated VAL rows retained as a list
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 10: session_csv_parser STREAM_KEYS fix")
+print("=" * 100)
+
+tmp_csv_dir = tempfile.mkdtemp(prefix='stream_keys_test_')
+try:
+    csv_path = os.path.join(tmp_csv_dir, 'synth_session.csv')
+    rows = [
+        ['INFO', '2026-01-01 00:00:00.000000', '', '', 'SUBJECT-NAME', "['t', 'x']"],
+        ['TRIAL', '', '', '', ''],
+        ['STATE', '', '0.0', '0.5', 'WheelPeriod', '0.5'],
+        ['VAL', '', '', '', 'WHEEL_POS', '0.100,1.20'],
+        ['VAL', '', '', '', 'WHEEL_POS', '0.200,1.40'],
+        ['VAL', '', '', '', 'WHEEL_POS', '0.300,1.60'],
+        ['VAL', '', '', '', 'QUIESCENCE_RESET_TIME', '0.150'],
+        ['VAL', '', '', '', 'QUIESCENCE_RESET_TIME', '0.280'],
+        ['VAL', '', '', '', 'TRIAL_START', '0.05'],   # NOT a stream key -- scalar, last-value-wins
+        ['VAL', '', '', '', 'TRIAL_START', '0.06'],   # (shouldn't normally repeat, but confirms
+                                                        # non-stream keys still collapse correctly)
+    ]
+    with open(csv_path, 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows)
+
+    _info, _session_vals, trials = session_csv_parser.parse_session_csv(csv_path)
+    wheel_pos_all_retained = len(trials[0]['vals']['WHEEL_POS']) == 3
+    quiescence_all_retained = len(trials[0]['vals']['QUIESCENCE_RESET_TIME']) == 2
+    scalar_still_collapses = trials[0]['vals']['TRIAL_START'] == '0.06'
+    print("  3x repeated WHEEL_POS rows all retained (not collapsed to the last): {0}".format(
+        wheel_pos_all_retained))
+    print("  2x repeated QUIESCENCE_RESET_TIME rows all retained: {0}".format(
+        quiescence_all_retained))
+    print("  a NON-stream-key repeated VAL still collapses to its last value: {0}".format(
+        scalar_still_collapses))
+
+    section10_pass = (wheel_pos_all_retained and quiescence_all_retained and
+                       scalar_still_collapses)
+finally:
+    shutil.rmtree(tmp_csv_dir, ignore_errors=True)
+
+print("Section 10 result: {0}".format("PASS" if section10_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 11: derive_intrial_threshold.py -- sliding-window excursion percentile against a
+# synthetic trace with a KNOWN injected excursion
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 11: derive_intrial_threshold.py")
+print("=" * 100)
+
+tmp_thresh_dir = tempfile.mkdtemp(prefix='intrial_threshold_test_')
+try:
+    csv_path = os.path.join(tmp_thresh_dir, 'synth_stage4_session.csv')
+    rows = [
+        ['INFO', '2026-01-01 00:00:00.000000', '', '', 'SUBJECT-NAME', "['t', 'x']"],
+        ['TRIAL', '', '', '', ''],
+        ['STATE', '', '0.0', '60.0', 'WheelPeriod', '60.0'],
+    ]
+    # A sine wave, amplitude 5deg (peak-to-peak 10deg), sampled at 100Hz for 60s -- every FULL
+    # 2.75s window should see ~10deg excursion, so the 80th percentile should land close to 10.0.
+    amp, period, dt_step = 5.0, 0.5, 0.01
+    t = 0.0
+    while t < 60.0:
+        pos = amp * np.sin(2 * np.pi * t / period)
+        rows.append(['VAL', '', '', '', 'WHEEL_POS', '{0:.3f},{1:.3f}'.format(t, pos)])
+        t += dt_step
+    with open(csv_path, 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows)
+
+    threshold_deg, n_samples, n_windows = derive_intrial_threshold.derive_intrial_threshold(
+        csv_path, window_s=2.75, percentile=80)
+    threshold_near_expected = abs(threshold_deg - 2 * amp) < 0.5
+    samples_correct = n_samples == n_windows and n_samples > 5000
+    print("  derived threshold from a known 10deg-peak-to-peak trace (expect ~10.0): {0:.2f}deg "
+          "-- within tolerance: {1}".format(threshold_deg, threshold_near_expected))
+    print("  sample/window counts sane ({0} samples): {1}".format(n_samples, samples_correct))
+
+    section11_pass = threshold_near_expected and samples_correct
+finally:
+    shutil.rmtree(tmp_thresh_dir, ignore_errors=True)
+
+print("Section 11 result: {0}".format("PASS" if section11_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
 
 print()
 print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
-                 section5_pass and section6_pass)
+                 section5_pass and section6_pass and section7_pass and section8_pass and
+                 section9_pass and section10_pass and section11_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

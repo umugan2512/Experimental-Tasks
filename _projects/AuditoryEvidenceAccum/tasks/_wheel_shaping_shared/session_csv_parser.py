@@ -15,6 +15,14 @@ import csv
 import datetime
 import math
 
+# VAL keys that get registered repeatedly WITHIN a single trial (e.g. once per wheel-position
+# sample, once per quiescence reset) rather than once -- the generic VAL branch below used to keep
+# only the LAST such registration per trial (current['vals'][key] = value), silently discarding
+# every earlier sample. WHEEL_POS's own full per-sample stream never round-tripped into
+# session_struct_export.py's exported struct for exactly this reason. Any key in this tuple is
+# instead accumulated into a list, in registration order, preserving every sample.
+STREAM_KEYS = ('WHEEL_POS', 'QUIESCENCE_RESET_TIME')
+
 # --- per-protocol state/event meaning -- extend as new protocols (Stage 3+) are built ---------------
 
 PROTOCOL_CONFIG = {
@@ -53,6 +61,33 @@ PROTOCOL_CONFIG = {
         'side_from': 'event',
         'left_event': 'RotaryEncoder1_3',    # ALL_THRESHOLDS_DEG's 3rd entry (LEFT_THRESHOLD_DEG)
         'right_event': 'RotaryEncoder1_4',   # ALL_THRESHOLDS_DEG's 4th entry (RIGHT_THRESHOLD_DEG)
+    },
+    # Stage 3 ("clicks and direction") and Stage 4 ("resume threshold and quiescence staircases")
+    # -- training_protocol.md Revision 2. Same real-2AFC-choice shape as full_protocol_lookback_test
+    # above (a genuine incorrect/aborted outcome exists, unlike Stage 1/2's shaping-only outcomes),
+    # and deliberately the SAME state names (CuePeriod/DelayPeriod/WheelAbort/WheelDotPeriod/Reward/
+    # ErrorConsumption/NoResponse) and event-index convention (ALL_THRESHOLDS_DEG's 3rd/4th entries
+    # for left/right) as that already-validated script, since stage3_clicks_direction.py/
+    # stage4_resume_staircases.py's own state machines were built as direct structural copies of it.
+    'stage3_clicks_direction': {
+        'rewarded_states': ['Reward'],
+        'incorrect_states': ['ErrorConsumption'],
+        'no_movement_states': ['NoResponse'],
+        'aborted_states': ['WheelAbort'],
+        'withheld_states': [],
+        'side_from': 'event',
+        'left_event': 'RotaryEncoder1_3',
+        'right_event': 'RotaryEncoder1_4',
+    },
+    'stage4_resume_staircases': {
+        'rewarded_states': ['Reward'],
+        'incorrect_states': ['ErrorConsumption'],
+        'no_movement_states': ['NoResponse'],
+        'aborted_states': ['WheelAbort'],
+        'withheld_states': [],
+        'side_from': 'event',
+        'left_event': 'RotaryEncoder1_3',
+        'right_event': 'RotaryEncoder1_4',
     },
 }
 
@@ -104,7 +139,10 @@ def parse_session_csv(path):
             elif row_type == 'VAL' and len(row) > 5:
                 key, value = row[4], row[5]
                 if current is not None:
-                    current['vals'][key] = value
+                    if key in STREAM_KEYS:
+                        current['vals'].setdefault(key, []).append(value)
+                    else:
+                        current['vals'][key] = value
                 else:
                     session_vals[key] = value
 

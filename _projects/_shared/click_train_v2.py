@@ -18,6 +18,27 @@ what they always have. This version:
 Everything else (floored-Poisson generation, rate calibration, build_waveform) is unchanged from
 click_train.py -- see that file's docstring for the rationale behind the ISI floor, rate
 calibration, and audible-range carrier frequencies, all of which still apply here unmodified.
+
+Lives in `_projects/_shared/` (moved here from `Tests/tasks/poisson_clicks_test/`) so the real
+`AuditoryEvidenceAccum` project can use it without depending on `Tests/`, the bench-test sandbox --
+same "protocol-agnostic, usable by any task in any GUI project" placement already used for
+`rotary_setup.py`/`dot_display.py`/`hifi_setup.py`/`camera_recorder.py`. `Tests/tasks/
+poisson_clicks_test/` keeps `click_train.py` (v1, byte-identical, untouched) and every other
+paradigm-specific file (`live_plots.py`, `trial_scheduler.py`, etc.) -- only this generator and its
+offline validator moved.
+
+Two additive parameters were added on top of the original (ISI floor/rate calibration/Poisson
+generation math untouched, per this repo's own "don't touch stimulus generation" convention):
+  - `build_waveform(..., amplitude_scale=1.0)`: an outer multiply on the returned stereo buffers,
+    for a click-level attenuation ramp (e.g. AuditoryEvidenceAccum's Stage 3, which starts new
+    subjects a few dB below final level for their first few sessions). Never touches `pure_tone`/
+    `_place` internals.
+  - `generate_trial_clicks(..., stim_duration_s=None)` / `build_waveform(..., stim_duration_s=None)`:
+    both default to the module's own `VAR_STIM_DURATION_S` (2.0s) so every existing caller is
+    byte-for-byte unaffected. AuditoryEvidenceAccum's Stage 3/4 pass `stim_duration_s=0.25` (per
+    the training protocol's "0.25s Poisson clicks" spec) -- a real duration mismatch against this
+    module's original 2.0s grid, not something the original 6-level DIFFICULTY_GRID/timing design
+    anticipated, so it's a parameter rather than a second hardcoded constant.
 """
 import numpy as np
 from scipy.optimize import brentq
@@ -45,6 +66,15 @@ VAR_ONSET_RAMP_MS = 1.0             # cosine ramp for the (very short) bilateral
 # onset -- not to the start of the waveform buffer, which also has the onset pulse + gap first).
 CLICK_START_OFFSET_S = VAR_ONSET_PULSE_DURATION_S + VAR_ONSET_GAP_S
 TOTAL_WAVEFORM_DURATION_S = CLICK_START_OFFSET_S + VAR_STIM_DURATION_S + VAR_DELAY_DURATION_S
+
+
+def total_waveform_duration_s(stim_duration_s=None):
+    """ TOTAL_WAVEFORM_DURATION_S generalized to a caller-supplied stim_duration_s (see module
+    docstring) -- callers needing the module's own default duration can keep using the
+    TOTAL_WAVEFORM_DURATION_S constant directly. """
+    stim_duration_s = VAR_STIM_DURATION_S if stim_duration_s is None else stim_duration_s
+    return CLICK_START_OFFSET_S + stim_duration_s + VAR_DELAY_DURATION_S
+
 
 # --- difficulty grid -----------------------------------------------------------------------------
 # gamma = (r_high - r_low) / lambda (linear contrast, NOT the old log rate ratio) --
@@ -78,9 +108,10 @@ DIFFICULTY_ORDER = ['G05', 'G12', 'G22', 'G38', 'G65', 'AOS']
 DIFFICULTY_WEIGHTS = {level: 1.0 / len(DIFFICULTY_ORDER) for level in DIFFICULTY_ORDER}
 
 
-def nominal_delta(difficulty):
+def nominal_delta(difficulty, stim_duration_s=None):
     grid = DIFFICULTY_GRID[difficulty]
-    return (grid['r_high'] - grid['r_low']) * VAR_STIM_DURATION_S
+    stim_duration_s = VAR_STIM_DURATION_S if stim_duration_s is None else stim_duration_s
+    return (grid['r_high'] - grid['r_low']) * stim_duration_s
 
 
 # --- rate calibration ------------------------------------------------------------------------------
@@ -153,22 +184,27 @@ def generate_floored_poisson_train(rate_hz, duration_s, isi_floor_s, rng=None):
     return np.array(times)
 
 
-def generate_trial_clicks(difficulty, side, rng=None):
+def generate_trial_clicks(difficulty, side, rng=None, stim_duration_s=None):
     """
     :param str difficulty: one of DIFFICULTY_GRID's keys
     :param str side: 'L' or 'R' -- which side is the higher-evidence side this trial
+    :param float stim_duration_s: cue duration in seconds -- defaults to the module's own
+        VAR_STIM_DURATION_S (2.0s). Pass an explicit value (e.g. 0.25 for AuditoryEvidenceAccum's
+        Stage 3/4) to generate a shorter/longer click train without touching the module default or
+        any other caller. See module docstring.
     :return: dict with left_times/right_times (seconds from stimulus onset), n_left/n_right,
         realized_delta (n_right - n_left, signed), and the nominal per-side rates used.
     """
     rng = rng or np.random
+    stim_duration_s = VAR_STIM_DURATION_S if stim_duration_s is None else stim_duration_s
     grid = DIFFICULTY_GRID[difficulty]
     r_high, r_low = grid['r_high'], grid['r_low']
     r_left, r_right = (r_low, r_high) if side == 'R' else (r_high, r_low)
 
     left_times = generate_floored_poisson_train(
-        calibrated_rate(r_left), VAR_STIM_DURATION_S, VAR_ISI_FLOOR_S, rng)
+        calibrated_rate(r_left), stim_duration_s, VAR_ISI_FLOOR_S, rng)
     right_times = generate_floored_poisson_train(
-        calibrated_rate(r_right), VAR_STIM_DURATION_S, VAR_ISI_FLOOR_S, rng)
+        calibrated_rate(r_right), stim_duration_s, VAR_ISI_FLOOR_S, rng)
 
     return {
         'left_times': left_times,
@@ -181,7 +217,7 @@ def generate_trial_clicks(difficulty, side, rng=None):
     }
 
 
-def build_waveform(trial_clicks, sampling_rate):
+def build_waveform(trial_clicks, sampling_rate, amplitude_scale=1.0, stim_duration_s=None):
     """
     Assemble the actual stereo audio buffer for one trial from a generate_trial_clicks() result:
     bilateral onset pulse (both bands, both channels -- leaks no side) + onset gap (silence) +
@@ -191,13 +227,20 @@ def build_waveform(trial_clicks, sampling_rate):
 
     :param dict trial_clicks: a generate_trial_clicks() result
     :param int sampling_rate: HiFi module sampling rate (Hz)
-    :return: (left, right) -- equal-length 1-D numpy arrays, each TOTAL_WAVEFORM_DURATION_S long
+    :param float amplitude_scale: outer multiplier applied to both returned buffers (default 1.0,
+        i.e. unchanged) -- e.g. 10**(-6/20) for a -6dB click-level attenuation ramp. Applied after
+        all tone placement, never inside pure_tone()/_place().
+    :param float stim_duration_s: must match whatever stim_duration_s was passed to
+        generate_trial_clicks() for this same trial_clicks (defaults to VAR_STIM_DURATION_S,
+        matching generate_trial_clicks()'s own default) -- determines the buffer's total length.
+    :return: (left, right) -- equal-length 1-D numpy arrays, each
+        total_waveform_duration_s(stim_duration_s) long
     """
     # Imported lazily so click_train_v2.py stays importable (e.g. for validate_click_train_v2.py)
     # on a machine without the HiFi plugin package installed.
     from pybpod_hifi_module.utils.generate_sound import pure_tone
 
-    n_total = int(round(TOTAL_WAVEFORM_DURATION_S * sampling_rate))
+    n_total = int(round(total_waveform_duration_s(stim_duration_s) * sampling_rate))
     left = np.zeros(n_total)
     right = np.zeros(n_total)
 
@@ -227,5 +270,9 @@ def build_waveform(trial_clicks, sampling_rate):
         _place(left, CLICK_START_OFFSET_S + t, click_tone_left)
     for t in trial_clicks['right_times']:
         _place(right, CLICK_START_OFFSET_S + t, click_tone_right)
+
+    if amplitude_scale != 1.0:
+        left = left * amplitude_scale
+        right = right * amplitude_scale
 
     return left, right

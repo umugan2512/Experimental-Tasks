@@ -57,12 +57,43 @@ import session_csv_parser     # noqa: E402 -- same-project import (records/ -> t
 import session_struct_export  # noqa: E402
 import staircase               # noqa: E402
 
-_SIMPLE_GATES_PROTOCOLS = ('stage2_threshold_staircase',)   # which protocols have a
-                                                              # stage2_simple_gates_met()-style
-                                                              # advancement check worth computing
+_SIMPLE_GATES_PROTOCOLS = ('stage2_threshold_staircase', 'stage3_clicks_direction',
+                            'stage4_resume_staircases')   # which protocols have an
+                                                           # auto-checkable advancement-gate
+                                                           # function worth computing -- see
+                                                           # _compute_simple_gates_met()'s own
+                                                           # per-protocol dispatch (each of these
+                                                           # three uses a DIFFERENT staircase.py
+                                                           # function/signature).
 
 _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed' session's own end
                        # are combined into one row/struct with it (same protocol only)
+
+
+def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_ratio_end,
+                               accuracy_aos, abort_rate, response_threshold_end_deg,
+                               threshold_final_deg, quiescence_end_s):
+    """ Dispatches to whichever staircase.py gate-check function matches this protocol -- each of
+    _SIMPLE_GATES_PROTOCOLS uses a genuinely different function/signature (Stage 2's is
+    deliberately partial, deferring to a human for its real statistical criterion; Stage 3/4's
+    each cover their WHOLE doc-specified criterion). Returns None if the protocol isn't one of
+    these three, or if a required input is missing (e.g. no ITI-bearing trial found yet). """
+    if protocol_name == 'stage2_threshold_staircase':
+        if iti_end_s is None:
+            return None
+        return staircase.stage2_simple_gates_met(
+            trial_count=trial_count, iti_s=iti_end_s,
+            direction_ratio_in_band=(direction_ratio_end is not None
+                                      and 0.30 <= direction_ratio_end <= 0.70))
+    if protocol_name == 'stage3_clicks_direction':
+        return staircase.stage3_gates_met(accuracy_aos or 0.0, abort_rate or 0.0, trial_count)
+    if protocol_name == 'stage4_resume_staircases':
+        if response_threshold_end_deg is None or quiescence_end_s is None:
+            return None
+        response_frac = response_threshold_end_deg / threshold_final_deg
+        return staircase.stage4_gates_met(response_frac, quiescence_end_s, accuracy_aos or 0.0,
+                                           abort_rate or 0.0, trial_count)
+    return None
 
 
 def summarize_session(path):
@@ -89,25 +120,57 @@ def summarize_session(path):
     incorrect_count = wheel_abort_count = 0
     l_count = r_count = lick_count = consumed_reward_count = 0
 
+    # Stage 3/4 only -- their own PROTOCOL_CONFIG entries produce 'incorrect'/'aborted' outcomes
+    # (see session_csv_parser.PROTOCOL_CONFIG), so these stay 0 for Stage 1/2's rows, same as
+    # incorrect_count/wheel_abort_count above already do.
+    warmup_trial_count = repeat_trial_count = 0
+    main_trial_total = main_trial_correct_count = 0
+    aborts_quiescence = aborts_cue = aborts_delay = aborts_response = 0
+
     for trial in trials:
         outcome, side, _reward_duration, consumed = session_csv_parser.classify_trial(trial, config)
+        trial_type = trial['vals'].get('TRIAL_TYPE')   # Stage 3/4's own custom VAL -- absent (None)
+                                                          # for Stage 1/2 and full_protocol_lookback_test
         if outcome == 'rewarded':
             reward_count += 1
             if consumed:
                 consumed_reward_count += 1
+            if trial_type == 'main':
+                main_trial_total += 1
+                main_trial_correct_count += 1
         elif outcome == 'withheld':
             withheld_count += 1
         elif outcome == 'no_movement':
             no_movement_count += 1
         elif outcome == 'incorrect':
             incorrect_count += 1
+            if trial_type == 'main':
+                main_trial_total += 1
         elif outcome == 'aborted':
             wheel_abort_count += 1
+            epoch = trial['vals'].get('ABORT_EPOCH')
+            if epoch == 'quiescence':
+                aborts_quiescence += 1
+            elif epoch == 'cue':
+                aborts_cue += 1
+            elif epoch == 'delay':
+                aborts_delay += 1
+            elif epoch == 'response':
+                aborts_response += 1
         if side == 'L':
             l_count += 1
         elif side == 'R':
             r_count += 1
         lick_count += len(trial['events'].get('Port1In', []))
+
+        if trial_type == 'warmup':
+            warmup_trial_count += 1
+        elif trial_type == 'repeat':
+            repeat_trial_count += 1
+
+    accuracy_aos = (main_trial_correct_count / float(main_trial_total)
+                    if main_trial_total else None)
+    abort_rate = (wheel_abort_count / float(len(trials))) if trials else None
 
     all_event_times = [t for trial in trials for times in trial['events'].values() for t in times]
     session_duration_s = (max(all_event_times) - min(all_event_times)) if all_event_times else None
@@ -122,6 +185,25 @@ def summarize_session(path):
     session_end_reason = session_csv_parser.find_val_str_backward(trials, session_vals,
                                                                     'SESSION_END_REASON')
 
+    # Stage 3/4 only -- all from custom VALs those two protocols' own task scripts register;
+    # simply absent (None) for every other protocol.
+    response_threshold_start_deg = session_csv_parser.find_val_forward(
+        trials, session_vals, 'RESPONSE_THRESHOLD_DEG')
+    response_threshold_end_deg = session_csv_parser.find_val_backward(
+        trials, session_vals, 'RESPONSE_THRESHOLD_DEG')
+    quiescence_start_s = session_csv_parser.find_val_forward(trials, session_vals, 'QUIESCENCE_DUR_S')
+    quiescence_end_s = session_csv_parser.find_val_backward(trials, session_vals, 'QUIESCENCE_DUR_S')
+    cue_abort_threshold_deg = session_csv_parser.find_val_backward(
+        trials, session_vals, 'CUE_ABORT_THRESHOLD_DEG')
+    _click_level_attenuated_raw = session_csv_parser.find_val_str_backward(
+        trials, session_vals, 'CLICK_LEVEL_ATTENUATED')
+    click_level_attenuated = (_click_level_attenuated_raw == 'True'
+                               if _click_level_attenuated_raw is not None else None)
+    session_water_ul = session_csv_parser.find_val_backward(trials, session_vals, 'SESSION_WATER_UL')
+    staircase_advanced_this_session = session_csv_parser.find_val_str_backward(
+        trials, session_vals, 'STAIRCASE_ACTIVE_THIS_SESSION')
+    git_commit = session_csv_parser.find_val_str_backward(trials, session_vals, 'GIT_COMMIT')
+
     # ITI is a native STATE (the 'ITI' state's own logged duration), not a custom VAL row --
     # constant within a session in both stages, so any visited trial's value works; take the last.
     iti_end_s = None
@@ -132,12 +214,9 @@ def summarize_session(path):
                 iti_end_s = trial['states']['ITI'][2]
                 break
 
-    simple_gates_met = None
-    if protocol_name in _SIMPLE_GATES_PROTOCOLS and iti_end_s is not None:
-        simple_gates_met = staircase.stage2_simple_gates_met(
-            trial_count=len(trials), iti_s=iti_end_s,
-            direction_ratio_in_band=(direction_ratio_end is not None and
-                                      0.30 <= direction_ratio_end <= 0.70))
+    simple_gates_met = _compute_simple_gates_met(
+        protocol_name, len(trials), iti_end_s, direction_ratio_end, accuracy_aos, abort_rate,
+        response_threshold_end_deg, threshold_final_deg, quiescence_end_s)
 
     started_dt = session_csv_parser.parse_datetime(session_started)
     ended_dt = session_csv_parser.session_end_datetime(info, started_dt, session_duration_s)
@@ -178,6 +257,23 @@ def summarize_session(path):
         'gain_mult_end': gain_mult_end,
         'direction_ratio_end': direction_ratio_end,
         'simple_gates_met': simple_gates_met,
+        'response_threshold_start_deg': response_threshold_start_deg,
+        'response_threshold_end_deg': response_threshold_end_deg,
+        'quiescence_start_s': quiescence_start_s,
+        'quiescence_end_s': quiescence_end_s,
+        'cue_abort_threshold_deg': cue_abort_threshold_deg,
+        'click_level_attenuated': click_level_attenuated,
+        'accuracy_aos': accuracy_aos,
+        'abort_rate': abort_rate,
+        'aborts_quiescence': aborts_quiescence,
+        'aborts_cue': aborts_cue,
+        'aborts_delay': aborts_delay,
+        'aborts_response': aborts_response,
+        'warmup_trial_count': warmup_trial_count,
+        'repeat_trial_count': repeat_trial_count,
+        'session_water_ul': session_water_ul,
+        'staircase_advanced_this_session': staircase_advanced_this_session,
+        'git_commit': git_commit,
         'session_csv_path': path,
         'session_struct_path': session_struct_path,
     }
@@ -261,6 +357,22 @@ def combine_group(group):
     duration_s = sum(durations) if durations else None
 
     consumed_vals = [s['consumed_volume_ul'] for s in group if s['consumed_volume_ul'] is not None]
+    water_vals = [s['session_water_ul'] for s in group if s['session_water_ul'] is not None]
+
+    # accuracy_aos/abort_rate are session-level RATES, not counts -- can't just sum them across a
+    # merged group. Re-derive each from the group's own summed numerator/denominator instead of
+    # averaging the per-member rates (correct under unequal trial counts; averaging isn't).
+    total_trials = sum(s['trial_count'] for s in group)
+    accuracy_nums = [(s['accuracy_aos'], s['trial_count']) for s in group
+                      if s['accuracy_aos'] is not None]
+    # accuracy_aos's own denominator (MAIN trials with a genuine response) isn't separately
+    # tracked per-member here -- approximating it via trial_count is a known imprecision for a
+    # merged (restart) group specifically; an un-merged single-session row (the common case) is
+    # exact, since there's nothing to weight against.
+    accuracy_aos = (sum(a * n for a, n in accuracy_nums) / sum(n for _a, n in accuracy_nums)
+                    if accuracy_nums else None)
+    abort_rate = ((sum(s['wheel_abort_count'] for s in group) / float(total_trials))
+                  if total_trials else None)
 
     return {
         'session_started': '; '.join(s['session_started'] for s in group),
@@ -290,6 +402,23 @@ def combine_group(group):
         'gain_mult_end': last['gain_mult_end'],
         'direction_ratio_end': last['direction_ratio_end'],
         'simple_gates_met': last['simple_gates_met'],
+        'response_threshold_start_deg': first['response_threshold_start_deg'],
+        'response_threshold_end_deg': last['response_threshold_end_deg'],
+        'quiescence_start_s': first['quiescence_start_s'],
+        'quiescence_end_s': last['quiescence_end_s'],
+        'cue_abort_threshold_deg': last['cue_abort_threshold_deg'],
+        'click_level_attenuated': last['click_level_attenuated'],
+        'accuracy_aos': accuracy_aos,
+        'abort_rate': abort_rate,
+        'aborts_quiescence': sum(s['aborts_quiescence'] for s in group),
+        'aborts_cue': sum(s['aborts_cue'] for s in group),
+        'aborts_delay': sum(s['aborts_delay'] for s in group),
+        'aborts_response': sum(s['aborts_response'] for s in group),
+        'warmup_trial_count': sum(s['warmup_trial_count'] for s in group),
+        'repeat_trial_count': sum(s['repeat_trial_count'] for s in group),
+        'session_water_ul': sum(water_vals) if water_vals else None,
+        'staircase_advanced_this_session': last['staircase_advanced_this_session'],
+        'git_commit': last['git_commit'],
         'session_csv_path': '; '.join(s['session_csv_path'] for s in group),
         'session_struct_path': None,   # filled in by the caller
     }
@@ -356,7 +485,27 @@ COLUMNS = [
     ('iti_end_s', 'ITI (s)'),
     ('gain_mult_end', 'Gain mult (Stage 1)'),
     ('direction_ratio_end', 'Direction ratio (Stage 2)'),
-    ('simple_gates_met', 'Simple gates met (Stage 2)'),
+    ('simple_gates_met', 'Simple gates met'),   # covers Stage 2 (partial) and Stage 3/4 (whole
+                                                 # criterion) -- see _compute_simple_gates_met()
+    # Stage 3/4 only, below -- every cross-session-varying value those two protocols' own task
+    # scripts track, so the training log has a column for each without opening a session struct.
+    ('response_threshold_start_deg', 'Response Thresh Start (deg)'),
+    ('response_threshold_end_deg', 'Response Thresh End (deg)'),
+    ('quiescence_start_s', 'Quiescence Start (s)'),
+    ('quiescence_end_s', 'Quiescence End (s)'),
+    ('cue_abort_threshold_deg', 'In-trial Threshold (deg)'),
+    ('click_level_attenuated', 'Click Attenuated (Stage 3)'),
+    ('accuracy_aos', 'Accuracy (gamma=1.0)'),
+    ('abort_rate', 'Abort Rate'),
+    ('aborts_quiescence', 'Aborts: Quiescence'),
+    ('aborts_cue', 'Aborts: Cue'),
+    ('aborts_delay', 'Aborts: Delay'),
+    ('aborts_response', 'Aborts: Response'),
+    ('warmup_trial_count', 'Warmup Trials'),
+    ('repeat_trial_count', 'Repeat Trials'),
+    ('session_water_ul', 'Session Water (uL)'),
+    ('staircase_advanced_this_session', 'Staircase Advanced (Stage 4)'),
+    ('git_commit', 'Git Commit'),
     ('num_sessions', 'Num. Sessions'),
     ('notes', 'Notes'),                       # MANUAL -- never written for an existing row
     ('session_started', 'Session started'),   # hidden key -- `; `-joined member timestamps
@@ -494,6 +643,8 @@ def _write_row(ws, row, col_map, row_data):
         value = row_data.get(key)
         cell = ws.cell(row=row, column=col_idx, value=value)
         if key == 'threshold_pct_final' and value is not None:
+            cell.number_format = '0%'
+        elif key in ('accuracy_aos', 'abort_rate') and value is not None:
             cell.number_format = '0%'
 
     for key in _MANUAL_COLUMNS:

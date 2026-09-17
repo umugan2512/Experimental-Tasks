@@ -38,6 +38,13 @@ Bpod round-trip required.
 Trial-loop/module-connection/dot-render-loop plumbing otherwise identical to
 stage1_wheel_shaping.py -- see that file's docstring for the render-loop/thread-inversion/
 hardware-timestamp-gap details, all unchanged here.
+
+**Retrofit pass (propagating what Tests/ proved out, same as stage1_wheel_shaping.py)**:
+`CameraRecorder` now records every session here too; the dot-gain computation now goes through
+`rotary_setup.screen_direction_gain()` (previously missing here, unlike every other dot-coupled
+script); `_cleanup_and_export()` consolidates the three separate hand-copied cleanup blocks into
+one and fixes a real gap -- an unhandled per-trial exception used to `raise` straight out of the
+loop, skipping teardown (and the staircase/ITI/spout persistence bookkeeping) entirely.
 """
 import os
 import sys
@@ -64,6 +71,7 @@ from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 from dot_display import DotDisplay
+from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
 
 from confapp import conf as settings
@@ -81,6 +89,21 @@ def _export_session_struct(csv_path):
         print("Session struct exported: {0} / {1}".format(mat_path, json_path), flush=True)
     except Exception as err:
         print("WARNING: session struct export failed: {0}".format(err), flush=True)
+
+
+def _cleanup_and_export():
+    """ Shared teardown, called from every exit path (normal end, Stop-triggered break, Kill, and
+    an unhandled per-trial exception) so hardware connections and the struct export are never
+    skipped regardless of how the session ended -- fixes a real gap: an unhandled exception used
+    to `raise` straight out of the trial loop, skipping this teardown (and the Kill/final-cleanup
+    code below used to duplicate this by hand in three places instead of sharing it). """
+    camera.close()
+    dot.close()
+    rotary.close()
+    csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
+                                        # that holds it
+    my_bpod.close()
+    _export_session_struct(csv_path)
 
 # --- who this session is for -----------------------------------------------------------------------
 
@@ -127,10 +150,24 @@ VAR_SPOUT_STEP_MM = 2.5             # doc: "~2-3mm per session" -- midpoint, fla
                                      # printed as a manual-action reminder only, no actuator exists
 
 VAR_ROTARY_USB_PORT = None
-VAR_STILL_POLL_HZ = 50
-VAR_POLL_HZ = 10
+VAR_STILL_POLL_HZ = 100              # additions.txt T4: raised 50->100. NEEDS ON-RIG CONFIRMATION
+VAR_POLL_HZ = 100                    # that the poll thread keeps up without delaying state-machine
+                                      # handling -- if not, fall back to 50/50 (still a real
+                                      # improvement over the old 50/10 split) and note which rate
+                                      # was actually used when reporting results from a real session.
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'
+
+VAR_CAMERA_INDEX = None                      # None = auto-discover, see
+                                              # camera_recorder.discover_camera()
+VAR_CAMERA_OUTPUT_PATH = 'session_video.avi' # relative to cwd -- lands in the real session
+                                              # folder when run for real via the GUI's Run button.
+VAR_CAMERA_FPS = 30.0
+VAR_CAMERA_PREVIEW = True             # preview shown only in short snippets (see
+                                       # camera.show_snippet() calls below), never continuously --
+                                       # same low-overhead choice full_protocol_lookback_test.py
+                                       # already made (see camera_recorder.py's own docstring).
+VAR_CAMERA_SNIPPET_S = 1.0            # snippet duration for both preview windows below.
 
 # --- persisted cross-session state (shared file with Stage 1) ---------------------------------------
 
@@ -172,8 +209,21 @@ dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER
 dot.show()
 dot.clear()
 
+camera = CameraRecorder(log_python_t0, camera_index=VAR_CAMERA_INDEX,
+                         output_path=VAR_CAMERA_OUTPUT_PATH, fps=VAR_CAMERA_FPS,
+                         preview=VAR_CAMERA_PREVIEW)
+camera.start()
+
+my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
+my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
+my_bpod.register_value('CAMERA_FPS', camera.fps)
+
+# rotary_setup.screen_direction_gain() applies this rig's confirmed wheel->screen sign correction
+# (see rotary_setup.py's WHEEL_TO_SCREEN_SIGN) -- previously missing here, unlike every other
+# dot-coupled script, so the dot most likely moved opposite the wheel-turn direction on this rig.
 screen_width_px = dot.get_screen_width_px()
-final_dot_gain = (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / VAR_THRESHOLD_FINAL_DEG
+final_dot_gain = rotary_setup.screen_direction_gain(
+    (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / VAR_THRESHOLD_FINAL_DEG)
 dot.set_deg_to_px_gain(final_dot_gain)   # Stage 2 has no gain multiplier -- that was Stage 1's
                                           # concept only, gain is already at its final value here
 print("Dot gain calibrated to {0:.2f} px/wheel-deg (screen width {1}px)".format(
@@ -225,6 +275,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         runner.register('THRESHOLD_DEG', cur_threshold_deg)
         dot.clear()
         dot.pump()
+        camera.pump()
 
         # Known BEFORE the trial starts -- depends only on the last ~40 trials' recorded
         # directions, not on anything that happens this trial (see module docstring for why this
@@ -237,6 +288,8 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
 
         send_epoch = time.time()
         send_t = send_epoch - log_python_t0
+
+        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
 
         sma = StateMachine(my_bpod)
 
@@ -325,6 +378,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
                 dot.clear()
 
             dot.pump()
+            camera.pump()
             time.sleep(render_interval)
 
         decision_thread.join(timeout=3.0)
@@ -335,14 +389,12 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         dot.clear()
         dot.pump()
 
+        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
+        camera.pump()
+
         if decision_result.get('killed'):
             print("Bpod Kill received -- ending session.", flush=True)
-            dot.close()
-            rotary.close()
-            csv_path = my_bpod.session._path   # grab before close() -- close() deletes the
-                                                # Session object that holds it
-            my_bpod.close()
-            _export_session_struct(csv_path)
+            _cleanup_and_export()
             sys.exit(0)
 
         if not decision_result.get('ran', False):
@@ -394,6 +446,10 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)
         traceback.print_exc(file=sys.stdout)
         sys.stdout.flush()
+        # Fix (was a real gap, not intentional): re-raising here used to skip everything below,
+        # including session-end bookkeeping and teardown -- camera/dot/rotary/my_bpod were all
+        # left open and no struct was exported on any trial-loop exception.
+        _cleanup_and_export()
         raise
 else:
     runner.register('SESSION_END_REASON', 'completed')
@@ -435,12 +491,7 @@ print("NOTE: the doc's real advancement criterion is a statistical test (bimodal
       "human judgment call (review the movement raster above) even when the simple gates are met.",
       flush=True)
 
-dot.close()
-rotary.close()
-csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
-                                    # that holds it
-my_bpod.close()
-_export_session_struct(csv_path)
+_cleanup_and_export()
 
 print("Close the plot window to exit.", flush=True)
 plt.ioff()

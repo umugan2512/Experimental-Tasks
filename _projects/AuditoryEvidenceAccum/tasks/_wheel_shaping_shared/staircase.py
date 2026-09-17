@@ -101,3 +101,116 @@ def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_c
     docstring). This only reports whether the easy, unambiguous gates are met; the statistical
     test remains a human judgment call until it's built. """
     return trial_count > trial_count_gate and iti_s >= ITI_CEILING_S and direction_ratio_in_band
+
+
+# --- Stage 3/4 (training_protocol.md Revision 2) -----------------------------------------------
+
+QUIESCENCE_STEP_UP_S = 0.025        # doc: "+25ms per 20 consecutive successful initiations"
+QUIESCENCE_SUCCESSES_TO_STEP_UP = 20
+QUIESCENCE_STEP_DOWN_S = 0.025      # doc: "-25ms per 5 resets"
+QUIESCENCE_FAILURES_TO_STEP_DOWN = 5
+QUIESCENCE_FLOOR_S = 0.1            # Stage 1-3's own frozen value -- the natural starting point
+QUIESCENCE_CEILING_S = 0.5          # doc: "0.1-0.5s exponential"
+
+STAGE3_ACCURACY_GATE = 0.70         # doc: ">70% correct at gamma=+-1.0"
+STAGE3_ABORT_RATE_GATE = 0.20       # doc: "abort rate <20%"
+
+STAGE4_ACCURACY_GATE = 0.70         # doc: ">70% correct at gamma=+-1.0", same as Stage 3
+STAGE4_ABORT_RATE_GATE = 0.25       # doc: "abort rate <25%" -- looser than Stage 3's, since Stage
+                                     # 4's staircases are actively tightening again
+STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION = 0.90   # doc: "current -> final (90% of edge azimuth)"
+                                                    # -- Stage 4's own target, NOT ThresholdStaircase's
+                                                    # own 1.0 ceiling (which stays unchanged; Stage 4
+                                                    # just treats 0.90 as "done" for advancement).
+
+
+class QuiescenceStaircase(object):
+    """ Tracks the quiescence-duration EXPONENTIAL DRAW's scale parameter (seconds), resumed at
+    Stage 4 per training_protocol.md: frozen at 100ms through Stages 1-3, then staircased toward a
+    0.1-0.5s exponential -- +25ms per 20 consecutive successful initiations (no reset during that
+    trial's quiescence hold), -25ms per 5 consecutive resets, floor QUIESCENCE_FLOOR_S, ceiling
+    QUIESCENCE_CEILING_S. Same consecutive-counter/streak-reset shape as ThresholdStaircase above.
+    A trial's actual quiescence duration is drawn fresh each trial as
+    np.random.exponential(current_s) clipped to [QUIESCENCE_FLOOR_S, QUIESCENCE_CEILING_S] --
+    current_s here is the distribution's scale parameter, not a fixed per-trial duration.
+
+    Constructed fresh from persisted StageState each session, same round-trip convention as
+    ThresholdStaircase. """
+
+    def __init__(self, current_s, consecutive_successes=0, consecutive_failures=0):
+        self.current_s = current_s
+        self.consecutive_successes = consecutive_successes
+        self.consecutive_failures = consecutive_failures
+
+    def record_outcome(self, success):
+        """ success=True if this trial's quiescence hold completed without a reset (a genuine
+        clean initiation), False if at least one reset occurred during it. """
+        if success:
+            self.consecutive_successes += 1
+            self.consecutive_failures = 0
+            if self.consecutive_successes >= QUIESCENCE_SUCCESSES_TO_STEP_UP:
+                self.current_s = min(QUIESCENCE_CEILING_S, self.current_s + QUIESCENCE_STEP_UP_S)
+                self.consecutive_successes = 0
+        else:
+            self.consecutive_failures += 1
+            self.consecutive_successes = 0
+            if self.consecutive_failures >= QUIESCENCE_FAILURES_TO_STEP_DOWN:
+                self.current_s = max(QUIESCENCE_FLOOR_S, self.current_s - QUIESCENCE_STEP_DOWN_S)
+                self.consecutive_failures = 0
+
+
+def stage3_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200):
+    """ training_protocol.md Stage 3 advancement: >70% correct at gamma=+-1.0 (AOS), abort rate
+    <20%, >200 trials/session. Unlike Stage 2's gate (stage2_simple_gates_met -- deliberately
+    partial, since Stage 2's real criterion is a deferred statistical test), this covers Stage 3's
+    ENTIRE doc-specified advancement criterion; no separate human-judgment component. Caller
+    tracks the "three consecutive sessions" requirement itself (same StageState-backed history
+    list pattern as sessions_trial_count_history elsewhere), this only checks one session's own
+    gates. accuracy_aos/abort_rate must already exclude warmup/repeat trials (see
+    stage3_clicks_direction.py's own trial classification) -- this function trusts its inputs,
+    it doesn't re-derive them from raw trial data. """
+    return (accuracy_aos > STAGE3_ACCURACY_GATE and abort_rate < STAGE3_ABORT_RATE_GATE
+            and trial_count > trial_count_gate)
+
+
+def stage4_gates_met(response_threshold_fraction, quiescence_s, accuracy_aos, abort_rate,
+                      trial_count, trial_count_gate=200):
+    """ training_protocol.md Stage 4 advancement: both staircases at final values (response
+    threshold >= STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION of edge azimuth, quiescence at
+    QUIESCENCE_CEILING_S), >70% correct at gamma=+-1.0, abort rate <25%, >=200 trials/session.
+    Caller tracks the "two consecutive sessions" requirement itself. """
+    response_at_final = response_threshold_fraction >= STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION
+    quiescence_at_final = quiescence_s >= QUIESCENCE_CEILING_S
+    return (response_at_final and quiescence_at_final and accuracy_aos > STAGE4_ACCURACY_GATE
+            and abort_rate < STAGE4_ABORT_RATE_GATE and trial_count >= trial_count_gate)
+
+
+def select_stage4_staircase_to_tighten(response_threshold_fraction, quiescence_s, last_advanced):
+    """ Tag B (training_protocol.md Revision 2 Appendix A): at most ONE of Stage 4's two
+    staircases (response threshold, quiescence) may tighten in any given SESSION -- running both
+    concurrently can compound-step the animal on a dimension it didn't earn, producing a
+    performance "collapse" that reads as the animal losing the task and makes a later drop
+    decision unattributable to either staircase specifically. The doc leaves the selection policy
+    itself open ("alternate across sessions, or prioritise whichever is further from final").
+
+    Policy chosen here: prioritize whichever parameter is furthest from ITS OWN final value,
+    normalized to a comparable 0.0-1.0 "fraction remaining" for each (response threshold's own
+    units are already a 0-1 fraction; quiescence's seconds are normalized against its own
+    floor-ceiling span) since the two staircases use different units and aren't otherwise
+    comparable; tie-break by alternating away from last_advanced (the previous session's own
+    choice -- 'response'/'quiescence'/None, read from persisted state).
+
+    Returns 'response' or 'quiescence' -- the caller applies record_outcome() calls to ONLY the
+    returned staircase's own object this session; the other staircase's counters may still be
+    tracked/logged, but its current_fraction/current_s must not change until a future session
+    selects it. """
+    response_remaining = (max(0.0, STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION
+                               - response_threshold_fraction) / STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION)
+    quiescence_span = QUIESCENCE_CEILING_S - QUIESCENCE_FLOOR_S
+    quiescence_remaining = max(0.0, QUIESCENCE_CEILING_S - quiescence_s) / quiescence_span
+
+    if response_remaining > quiescence_remaining:
+        return 'response'
+    if quiescence_remaining > response_remaining:
+        return 'quiescence'
+    return 'quiescence' if last_advanced == 'response' else 'response'

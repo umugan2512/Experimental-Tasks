@@ -40,7 +40,7 @@ class TrialRunner(object):
     connections are up: `runner = TrialRunner(my_bpod, rotary, log_python_t0)`.
     """
 
-    def __init__(self, bpod, rotary, log_python_t0, still_poll_hz=50, poll_hz=10):
+    def __init__(self, bpod, rotary, log_python_t0, still_poll_hz=100, poll_hz=100):
         self.bpod = bpod
         self.rotary = rotary
         self.log_python_t0 = log_python_t0
@@ -134,7 +134,15 @@ class TrialRunner(object):
         Returns the wheel break count on success, or None if a Stop/Kill interrupted the lick-check
         loop (require_no_lick=True only) -- callers should check for None and stop their own trial
         loop the same way they already do when run_trial_state_machine() returns False.
+
+        Registers 'TRIAL_INIT_START' once, right at entry (the moment this trial's quiescence-hold
+        attempt begins), and a 'QUIESCENCE_RESET_TIME' row each time the trailing window is broken
+        by movement -- both on the same time.time() - log_python_t0 clock as every other VAL row,
+        so a trial's own initiation cost (and how many resets it took) is directly recoverable from
+        the session CSV without having to reconstruct it from HoldCheck/LickDuringHold state times.
         """
+        self.register('TRIAL_INIT_START', self._now())
+
         wheel_ready = threading.Event()
         stop_wheel_watch = threading.Event()
         n_breaks_holder = [0]
@@ -150,6 +158,7 @@ class TrialRunner(object):
                 now = time.time()
                 if window and abs(pos - window[-1][1]) > steady_threshold_deg:
                     n_breaks_holder[0] += 1
+                    self.register('QUIESCENCE_RESET_TIME', now - self.log_python_t0)
                 window.append((now, pos))
                 while len(window) > 1 and window[1][0] <= now - required_hold:
                     window.popleft()
