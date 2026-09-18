@@ -1,0 +1,48 @@
+__UUID4__;039704ce-49c7-46a7-a258-1c996d39c8aa
+__CREATED-ON__;2026-09-18 11:09:41.608956
+__DEF-URL__;http://pybpod-api.readthedocs.org
+__DEF-TEXT__;This file contains data recorded during a session from the PyBpod system
+__SOFTWARE__;PyBpod API v1.8.2
+__HAS-HEADER__
+TYPE;PC-TIME;BPOD-INITIAL-TIME;BPOD-FINAL-TIME;MSG;+INFO
+INFO;2026-09-18 11:09:41.608956;;;SERIAL-PORT;COM10
+INFO;2026-09-18 11:09:41.608956;;;PROTOCOL-NAME;stage3_clicks_direction
+INFO;2026-09-18 11:09:41.608956;;;CREATOR-NAME;["UM", "f519825a-ab5d-4fe9-91c0-a52f3d5afee3", "local"]
+INFO;2026-09-18 11:09:41.608956;;;PROJECT-NAME;AuditoryEvidenceAccum
+INFO;2026-09-18 11:09:41.608956;;;EXPERIMENT-NAME;Stage3
+INFO;2026-09-18 11:09:41.608956;;;BOARD-NAME;Box3
+INFO;2026-09-18 11:09:41.608956;;;SETUP-NAME;Stage3
+INFO;2026-09-18 11:09:41.608956;;;BPOD-GUI-VERSION;
+INFO;2026-09-18 11:09:41.608956;;;NET-PORT;36000
+INFO;2026-09-18 11:09:41.608956;;;SUBJECT-NAME;['test_stage3', '7ccf4666-0f7e-47ec-b218-76d067d83f69']
+INFO;2026-09-18 11:09:42.074192;;;This is a PYBPOD file. Find more info at http://pybpod.readthedocs.io;
+INFO;2026-09-18 11:09:42.074192;;;BPOD-API-VERSION;1.8.2
+INFO;2026-09-18 11:09:42.074192;;;SESSION-NAME;20260918-110940
+INFO;2026-09-18 11:09:42.074192;;;SESSION-STARTED;2026-09-18 11:09:41.608956
+stdout;2026-09-18 11:09:42.074192;;;Connected to Bpod on COM10;
+stdout;2026-09-18 11:09:42.074192;;;|
+|;
+stdout;2026-09-18 11:09:42.074192;;;Resolved module 'RotaryEncoder1' on Bpod port 1;
+stdout;2026-09-18 11:09:42.074192;;;|
+|;
+stdout;2026-09-18 11:09:42.105444;;;RotaryEncoderModule.discover: probing ['COM11', 'COM1', 'COM14'] (excluding ['COM10']);
+stdout;2026-09-18 11:09:42.105444;;;|
+|;
+stdout;2026-09-18 11:09:44.125220;;;  COM11: ack=217;
+stdout;2026-09-18 11:09:44.125220;;;|
+|;
+stdout;2026-09-18 11:09:46.150898;;;Connected to rotary encoder on COM11;
+stdout;2026-09-18 11:09:46.150898;;;|
+|;
+stdout;2026-09-18 11:09:46.299096;;;Connected to HiFi module on COM14 (192000Hz sampling);
+stdout;2026-09-18 11:09:46.299096;;;|
+|;
+VAL;2026-09-18 11:09:46.314723;;;LEFT_THRESHOLD_DEG;-35.0
+VAL;2026-09-18 11:09:46.314723;;;RIGHT_THRESHOLD_DEG;35.0
+VAL;2026-09-18 11:10:48.369978;;;GIT_COMMIT;f63385200c72f20c041f38f5d1de44ad97556fe1-dirty
+stdout;2026-09-18 11:10:50.585409;;;CameraRecorder: index 0, 640x480 @ 30.0fps -> session_video.avi;
+stderr;2026-09-18 11:10:50.585409;;|Traceback (most recent call last):
+|;;
+stderr;2026-09-18 11:10:50.585409;;|
+|;;
+stderr;2026-09-18 11:10:50.585409;;Exception ignored in: ;;

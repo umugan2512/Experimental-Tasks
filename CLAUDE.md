@@ -568,6 +568,30 @@ Durable facts/gotchas from building this:
   per-frame `cv2.cvtColor`/`QImage`/`QPixmap` conversion+repaint is the dominant remaining
   main-thread cost once the background thread itself is rate-limited. The full video recording is
   completely unaffected by which preview mode (or neither) is active.
+- **`dot_display.create_dot_display()`** is now the one place every dot-coupled task script across
+  both projects constructs its dot display — added after confirming a real, already-happened drift
+  bug: `stage2_threshold_staircase.py`, `stage3_clicks_direction.py`, `stage4_resume_staircases.py`,
+  and `dot_wheel_test.py` were all still constructing a plain, full-spanned `DotDisplay` (silently
+  showing the dot smeared across all three physical monitors on this rig), never updated to match
+  the `MiddleScreenDotDisplay` fix already applied to `stage1_wheel_shaping.py` and
+  `full_protocol_lookback_test.py` — each script had independently copy-pasted its own
+  `VAR_USE_MIDDLE_SCREEN_ONLY`/`VAR_DOT_SCREEN_INDEX`/`VAR_N_PHYSICAL_MONITORS_IN_SPAN`/
+  `VAR_ACTIVE_MONITOR_INDEX`/`VAR_DOT_DIAMETER_PX` constants and its own if/else construction, with
+  no single source of truth. `create_dot_display(diameter_px=None, background_gray=128, dot_gray=0,
+  screen_index=None, use_middle_screen_only=None, n_segments=None, active_segment_index=None)` now
+  holds this rig's real monitor/size configuration as `DEFAULT_*` module-level constants in
+  `dot_display.py` itself — every caller just does
+  `dot_display.create_dot_display(background_gray=..., dot_gray=...)` (the two genuinely
+  per-experiment contrast parameters), no local screen/middle-screen constants needed at all unless
+  a script has a real reason to override one explicitly. A future remounting/resizing only needs
+  the `DEFAULT_*` constants changed once, not every task script individually.
+- **`_MiddleOnlyDotWidget`'s inactive-segment fill has flipped between black and mean-gray twice,
+  both times per explicit instruction, not a bug either time** — originally hardcoded black; changed
+  to mean-gray (`self._background_gray`) after a Stage 1 bench-test report asked for it; then
+  changed back to solid black after a later explicit "black out the two unused screens" instruction.
+  Currently: solid black. If this ever needs revisiting again, check which behavior is actually
+  wanted directly rather than assuming either direction is "the fix" — this specific pixel has now
+  been deliberately flipped in both directions once already.
 
 ## Wheel-shaping training stages (Stage 1/2, `AuditoryEvidenceAccum`)
 
@@ -698,6 +722,79 @@ anywhere in the curriculum).
   data structure — animal ID, protocol run, equipment on/off checklist, pre-session checks, outcome
   summary; purely physical record-keeping, never auto-populated, since none of it has a digital
   source).
+- **Stage 1 bench-test fixes (real bugs found via actual bench testing, not just code review)**:
+  starting threshold raised `VAR_THRESHOLD_STARTING_FRACTION` 0.05→0.10 (1.75deg→3.5deg — only
+  affects a subject's very first Stage 1 session). A real "reward given when the dot isn't moving"
+  bug: rotary thresholds were armed and Bpod's `WheelPeriod` state was already listening within ms
+  of trial start, well before the dot's own 100-200ms J1 onset delay, so a brisk turn right as
+  quiescence released could fire `Reward` before the dot ever rendered. Fixed by splitting
+  `WheelPeriod` into `PreDotDelay` (a native Bpod `state_timer=dot_onset_delay`, no
+  `neg_event`/`pos_event` wired — a crossing during this window is still logged by Bpod as a raw
+  event, it just can't trigger a transition, matching the documented "a state with no
+  `state_change_conditions` for an event silently ignores it" behavior elsewhere in this file) +
+  the real `WheelPeriod` (entered only once that same delay has elapsed, `state_timer =
+  VAR_RESPONSE_TIMEOUT_S - dot_onset_delay` so the total LED-on-to-timeout window is unchanged).
+  Keeps reward gating fully Bpod-native/hardware-timed, not Python-timed — same principle as every
+  other reward-timing decision in this codebase. Two compounding display bugs fixed alongside it in
+  `dot_display.py` (affecting `DotDisplay`/`MiddleScreenDotDisplay` both): the render loop wasn't
+  calling `set_position_deg()` on the frame the dot's first visible position was already past
+  threshold (dot jumped straight from invisible to frozen, no travel shown); and `clear()` wasn't
+  resetting the x-offset, so a new trial's dot could reappear at a stale off-center position left
+  over from the previous trial's frozen spot.
+- **Stage 3's real startup freeze (confirmed via a real bench-test log, `log-stage3.txt`) — root
+  cause was a Windows-specific `subprocess`/pipe hang, not what it first looked like.** The
+  session-startup `_git_commit()` helper (`stage3_clicks_direction.py`/`stage4_resume_staircases.py`,
+  identical copy in both) originally used `subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+  timeout=N)` — this `timeout=` is **not reliably enforced on Windows** in this scenario: CPython's
+  `Popen.communicate(timeout=...)`, on hitting the timeout, calls `kill()` then does a SECOND,
+  **unbounded** `communicate()` to drain any remaining output before raising `TimeoutExpired` — if
+  `git.exe` (or something wrapping it) leaves a descendant process holding the stdout/stderr pipe
+  open, `kill()` only terminates the immediate child, and that second unbounded drain blocks until
+  the real operation finishes on its own regardless of the requested timeout. Confirmed directly: a
+  real session stalled ~84s on `git rev-parse HEAD` alone despite `timeout=3` already being passed.
+  **Fix**: run the actual git calls on a background daemon thread and bound the MAIN thread with
+  `thread.join(timeout=...)` instead — even if the underlying subprocess call never returns, the
+  main thread is never blocked past the join timeout; the daemon thread is simply abandoned (same
+  "stale thread" tolerance already documented for `TrialRunner.run_trial_state_machine()`'s
+  `_stale_poll_threads`). **The underlying git slowness on this rig is still unexplained and NOT
+  fixed by this** — confirmed on real hardware that even after the threading fix, `git rev-parse
+  HEAD` alone was still regularly taking longer than the initial 5s join timeout (registering
+  `GIT_COMMIT='unknown'` every real session), so the timeout was bumped to 15s — enough room to
+  usually succeed, while staying far below the original 60-90s stall this mechanism exists to
+  bound. If `GIT_COMMIT` still shows `'unknown'` after this, that's this same pre-existing rig-level
+  git slowness, not a new problem.
+- **`WheelShapingPlots` (`_wheel_shaping_shared/wheel_shaping_plots.py`) was deliberately pruned,
+  then partially re-expanded, per explicit back-and-forth feedback — check current scope before
+  assuming a panel is or isn't wanted.** An early pass removed the outcome tally, click raster,
+  abort-by-epoch tally, and response-time histogram panels as either redundant with panels already
+  shown or more post-hoc-analysis than live-session-relevant. A later explicit request restored (in
+  a different, more compact form) the outcome-percentage bars (now a fixed 4-category
+  correct/incorrect/no_response/abort vocabulary, `_OUTCOME4_ORDER`/`_OUTCOME4_COLORS`, distinct
+  from the raw per-protocol `OUTCOME_COLORS` dict) and the reaction-time histogram
+  (correct/incorrect), and added a genuinely new psychometric-curve panel (P(chose right) vs. signed
+  click-count evidence via `trial_clicks['realized_delta']` — confirmed to be exactly `n_right -
+  n_left`, signed independent of presented side — binned; only meaningful for a genuine
+  Reward/NoReward response, gated the same way `response_time_s`/`click_diff` are in `add_trial()`).
+  Click raster and abort-by-epoch tally stayed pruned (not re-requested). Layout was also reworked:
+  `constrained_layout=True` (not a one-time `tight_layout()` call, which doesn't recompute as
+  legends/content change) + per-row `gridspec_kw={'height_ratios': [...]}` so only the movement
+  raster and the two lick panels span full width — every other panel (bars, small line plots) is
+  genuinely compact, not stretched to a full-width row's default height. `_capped_figsize()` also
+  changed semantics: instead of only ever shrinking a fixed "desired" size to fit the screen, it now
+  targets `width_fraction` (default 0.5, i.e. half the actual screen width, queried the same
+  Tk-root way as before) and scales height to match the mosaic's own natural aspect ratio, THEN
+  shrinks both dimensions further (preserving that ratio) only if the resulting height would still
+  overflow the screen — fitting on screen always wins over hitting the exact width target. On this
+  rig's real 1920x1080 screen, Stage 3/4's taller 6-row mosaic lands around 786x1000px (height-bound,
+  short of the full half-width target), Stage 1/2's shorter mosaic around 909x1000px (closer to it)
+  — expected and correct given the aspect-ratio math, not a bug. `WheelShapingPlots.__init__()` also
+  gained a `reward_ul=None` constructor parameter (passed by all 4 stage scripts as
+  `reward_ul=VAR_REWARD_UL`) purely so the reward-aligned lick raster's own title can show total
+  **consumed** water (`VAR_REWARD_UL * count of rewarded trials with >=1 lick registered`, not
+  merely delivered) — every panel `fontsize=`/`tick_params(labelsize=...)` was also generally
+  reduced for panels that are now half-width, since the earlier layout rework otherwise left
+  several titles/legends visibly overflowing their own panel (confirmed by rendering real preview
+  PNGs and reading them back, not just running headless-without-inspecting).
 
 ## Multi-box training-log sync (`AuditoryEvidenceAccum/records/build_training_log.py`)
 
@@ -946,10 +1043,11 @@ Python Bpod stack):
   `Tests/tasks/{full_protocol_lookback_test, hifi_singleside_dot_test, hifi_singleside_gabor_test,
   hifi_singleside_test, hifi_alternating_easy_test, hifi_alternating_easy_gabor_test,
   gabor_wheel_test, camera_test, wheel_turn_reward, lick_reward, lick_timer}` and
-  `AuditoryEvidenceAccum/tasks/{stage1_wheel_shaping, stage2_threshold_staircase}` (stage2 has two
-  reward states, `RewardL`/`RewardR`, that already shared one `VAR_REWARD_DURATION` variable, so
-  one substitution covers both). Each script sets its own `VAR_REWARD_UL` (target volume, `4.0` by
-  default — the same magnitude the fallback's 0.1s was already approximating) and computes
+  `AuditoryEvidenceAccum/tasks/{stage1_wheel_shaping, stage2_threshold_staircase,
+  stage3_clicks_direction, stage4_resume_staircases}` (stage2 has two reward states,
+  `RewardL`/`RewardR`, that already shared one `VAR_REWARD_DURATION` variable, so one substitution
+  covers both). Each script sets its own `VAR_REWARD_UL` (target volume, `4.0` by default — the
+  same magnitude the fallback's 0.1s was already approximating) and computes
   `VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)` at import time, right where the
   hardcoded constant used to be. Every task file is exactly 4 directory levels below the repo root
   (`_projects/<Project>/tasks/<taskname>/<file>.py`), so the import boilerplate is identical
@@ -957,6 +1055,103 @@ Python Bpod stack):
   before `from liquid_calibration import get_reward_duration_s`. Re-run "Run Pulses" + "Fit" in
   `calibrate_liquid.py` any time the physical rig's tubing/valve/reservoir changes — every script
   reads the JSON fresh at its own next launch, no code change needed to pick up a new fit.
+- **`get_reward_duration_s(VAR_REWARD_UL)` (drives the valve) and `register_value('REWARD_UL',
+  VAR_REWARD_UL)` (drives the training log's "Reward Amount (uL)" column) are two SEPARATE
+  integration points — using one does not give you the other.** Confirmed as a real, already-shipped
+  gap: `stage3_clicks_direction.py`/`stage4_resume_staircases.py` both computed and used
+  `VAR_REWARD_UL` for the valve (and for their own `SESSION_WATER_UL` VAL) but never actually called
+  `my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)` the way `stage1_wheel_shaping.py`/
+  `stage2_threshold_staircase.py` already did — so `build_training_log.py`'s
+  `find_val_backward(trials, session_vals, 'REWARD_UL')` never found it, and every Stage 3/4 row's
+  "Reward Amount (uL)"/"Total Volume (uL)" stayed blank even for sessions with real trials. Fixed by
+  adding the missing `register_value()` call to both — but this only affects sessions recorded
+  *after* the fix; already-recorded CSVs genuinely don't have the VAL and will stay blank for those
+  historical rows, same "new column, old rows blank" precedent as every other column added to this
+  training log.
+
+## Sound (SPL) calibration (`Calibration/`) and its wiring into task scripts
+
+Same underlying approach as `liquid_calibration.py` (see "Liquid reward" above), ported for HiFi
+output level instead of valve timing: per-`(channel, frequency_hz)` `(amplitude, measured_spl_db)`
+points, a 2nd-order polynomial fit as `amplitude = f(spl_db)` (the useful lookup direction, same
+"fit in the direction actually needed at runtime" convention `liquid_calibration.py` already uses),
+JSON-persisted at `Calibration/sound_calibration.json` (gitignored, rig-specific, same reasoning as
+`liquid_calibration.json`). The HiFi driver has no native volume/gain/attenuation command at all —
+`HiFiModule`'s own API is only `load()`/`push()`/`play()`/`stop()` — so "gain" here can only mean
+the waveform's own peak-amplitude scale, a `[0, 1]` multiplier applied before `load()`.
+
+- **Calibration axis is `(channel, frequency_hz)`, not just frequency, and channel/frequency are
+  NOT independently choosable**: left is always the low-frequency channel, right always the
+  high-frequency channel (`sound_calibration.CHANNEL_FREQUENCIES_HZ`: `'L': [4000, 5000]`,
+  `'R': [10000, 12000]`) — one source of truth both this module's own validation and
+  `calibrate_sound.py`'s GUI read from, matching the same left=low/right=high convention
+  `click_train_v2.py`'s own `VAR_LEFT_FREQ_HZ`/`VAR_RIGHT_FREQ_HZ` now use (see below — this
+  wasn't always true, and the mismatch was a real, confirmed bug).
+- **`calibrate_sound.py`'s calibration stimulus is a repeated click train, not one long continuous
+  tone — a real, confirmed methodology gap, not a hypothetical one.** It originally played one long
+  tone (`VAR_DEFAULT_DURATION_S = 5.0`s) for the SPL meter to read, but the real task plays 8ms
+  click pips (`click_train_v2.VAR_CLICK_DURATION_S`). An SPL meter's time-integration (even on
+  "fast" response, ~125ms) cannot fully catch up to something that brief, so a click at the SAME
+  peak amplitude as a long calibration tone reads (and sounds) noticeably quieter than the tone
+  did — the peak-amplitude-to-dB mapping from a sustained tone simply doesn't transfer to something
+  that short; it's a different measurement, not just a less-precise one. Fixed by building the
+  actual "Play Tone" playback out of `click_train_v2.py`'s own `VAR_CLICK_DURATION_S`/
+  `VAR_CLICK_RAMP_MS` click shape (imported directly, not duplicated, so it can never silently drift
+  from what a real task actually plays) repeated at a fixed `VAR_CALIBRATION_CLICK_ISI_S` (0.1s,
+  10Hz) interval for the requested play duration — steady enough for the meter to read, while being
+  duty-cycle-representative of the real stimulus instead of a continuous tone. Any calibration data
+  collected before this fix (with the old tone-based stimulus) should be treated as suspect and
+  probably worth re-collecting.
+- **`get_calibrated_amplitude(target_spl_db, frequency_hz, channel='L', fallback_amplitude=1.0)`**
+  (module-level function in `sound_calibration.py`) is the actual integration point every task
+  script uses — same "thin try/except wrapper with a graceful hardcoded fallback" shape as
+  `liquid_calibration.get_reward_duration_s()`. Unlike the raw `SoundCalibration.get_amplitude_for_spl()`
+  it wraps (which stays intentionally unclamped, for the GUI's own preview/display purposes), this
+  wrapper DOES clip the result to `[0, 1]` with a printed warning if the fit predicts something
+  outside that range — a target dB beyond what the fit supports at unity gain would otherwise
+  produce a waveform that clips/distorts, and this is the function whose output goes straight into
+  a real waveform.
+- **A `(channel, frequency_hz)` pair can have real measurement points collected but still have no
+  usable fit** — confirmed directly on this rig's own `sound_calibration.json`: R/10000Hz had 5 real
+  points spanning the full amplitude range, but `"coeffs": null` (never fit, or fit then cleared —
+  `SoundCalibration.remove_point()` clears any existing fit as a side effect and requires an
+  explicit re-fit afterward, same "don't show stale data" principle as `liquid_calibration.py`'s own
+  `remove_point()`). `get_calibrated_amplitude()` can't distinguish "no data" from "data but no
+  fit" from its own caller's perspective — both raise the same `ValueError` internally and fall back
+  to `fallback_amplitude` — so a task script silently playing at an uncalibrated hardcoded fallback
+  doesn't necessarily mean no calibration data exists for that pairing; check
+  `calibrate_sound.py`'s own points table / `sound_calibration_report.txt` directly rather than
+  assuming.
+- **Click frequencies changed from 1000Hz(L)/4000Hz(R) to 4000Hz(L)/10000Hz(R)** in both
+  `_shared/click_train_v2.py` and the older, separate `Tests/tasks/poisson_clicks_test/click_train.py`
+  (v1, still used by `hifi_singleside_test.py`/`hifi_alternating_easy_test.py`, not yet migrated to
+  v2) — the lower of each of `sound_calibration.CHANNEL_FREQUENCIES_HZ`'s calibrated pairs, so a
+  real dB-SPL calibration fit actually exists for the frequencies really being played (the old
+  1000/4000Hz values were never in the calibrated set at all, and calibration literally cannot
+  apply to a frequency it has no data for). `build_waveform()` in both modules also changed from a
+  single `amplitude_scale=1.0` parameter to two independent `amplitude_scale_left=1.0`/
+  `amplitude_scale_right=1.0` parameters (applied as a final multiply of the whole `left`/`right`
+  buffer, same place the old single scalar multiply happened) — necessary because the calibration
+  fit is genuinely per-channel and the two channels' curves generally differ.
+- **`hifi_setup.compute_calibrated_amplitudes(target_spl_db, left_freq_hz, right_freq_hz)`** is the
+  one shared helper every HiFi-using task script calls to turn its own `VAR_TARGET_SPL_DB` into the
+  actual per-channel `amplitude_scale_left`/`amplitude_scale_right` passed to `build_waveform()` —
+  added to `hifi_setup.py` (all 8 HiFi-using scripts already import it) for the same "one place this
+  computation lives, can't drift between scripts" reasoning as `create_dot_display()` above. Wired
+  into all 8 HiFi-using task scripts across both projects:
+  `AuditoryEvidenceAccum/tasks/{stage3_clicks_direction, stage4_resume_staircases}` and
+  `Tests/tasks/{full_protocol_lookback_test, hifi_singleside_gabor_test, hifi_singleside_dot_test,
+  hifi_alternating_easy_gabor_test, hifi_singleside_test, hifi_alternating_easy_test}` — each sets
+  its own `VAR_TARGET_SPL_DB = 70.0` (flagged tunable, no doc-specified value) and registers it plus
+  `LEFT_FREQ_HZ`/`RIGHT_FREQ_HZ` as session-level VALs before its trial loop, same "registered once,
+  lands in `session_vals` not per-trial `vals`" pattern `GIT_COMMIT` already uses. Stage 3's existing
+  warmup click-level attenuation (`10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)`) is layered ON TOP of
+  the calibrated base amplitude per channel (dB below the calibrated target, not below a raw
+  uncalibrated amplitude) — the only script with this extra layering; the other 7 apply the
+  calibrated amplitudes directly. `build_training_log.py` reads `TARGET_SPL_DB`/`LEFT_FREQ_HZ`/
+  `RIGHT_FREQ_HZ` the same session-level-VAL way as `GIT_COMMIT`, as three new columns — populated
+  only for the 3 protocols with a `PROTOCOL_CONFIG` entry (`stage3_clicks_direction`,
+  `stage4_resume_staircases`, `full_protocol_lookback_test`), blank elsewhere.
 
 ## Architecture notes
 

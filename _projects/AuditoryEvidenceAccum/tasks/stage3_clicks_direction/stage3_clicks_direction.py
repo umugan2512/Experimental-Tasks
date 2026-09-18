@@ -83,7 +83,7 @@ from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 import hifi_setup
-from dot_display import DotDisplay
+import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
 
@@ -125,18 +125,52 @@ def _cleanup_and_export():
 
 def _git_commit():
     """ additions.txt T9: best-effort git commit hash (+dirty flag) for provenance, registered as
-    a session-level VAL. Never blocks the task -- returns 'unknown' if git isn't available or this
-    checkout isn't a git repo (e.g. a zipped deployment). """
-    try:
-        commit = subprocess.check_output(
-            ['git', 'rev-parse', 'HEAD'], cwd=_TASK_DIR,
-            stderr=subprocess.DEVNULL).decode('utf-8').strip()
-        dirty = subprocess.call(
-            ['git', 'diff', '--quiet'], cwd=_TASK_DIR,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0
-        return '{0}{1}'.format(commit, '-dirty' if dirty else '')
-    except Exception:
-        return 'unknown'
+    a session-level VAL. Never blocks the task -- returns 'unknown' if git isn't available, this
+    checkout isn't a git repo, or the git calls don't finish promptly.
+
+    Runs the actual git calls on a background daemon thread and bounds the MAIN thread with
+    thread.join(timeout=...) instead of relying on subprocess's own timeout= to bound the wait --
+    confirmed on real hardware (log-stage3.txt) that subprocess.check_output(..., timeout=3) alone
+    is NOT reliably enforced here: it still stalled ~84s with 'git rev-parse HEAD' despite the
+    timeout. Root cause: on Windows, when Popen.communicate(timeout=...) hits its timeout it calls
+    kill() then does a SECOND, unbounded communicate() to drain any remaining output before
+    raising TimeoutExpired -- if git.exe (or something wrapping it) leaves a descendant process
+    holding the stdout/stderr pipe open, kill() only terminates the immediate child, and that
+    second unbounded drain blocks until the real operation finishes on its own. Bounding the JOIN
+    instead sidesteps this entirely: even if the underlying subprocess call never returns, the main
+    thread is never blocked past the join timeout -- the daemon thread is simply abandoned (same
+    "stale thread" tolerance already used elsewhere in this codebase, e.g.
+    TrialRunner.run_trial_state_machine()'s _stale_poll_threads).
+
+    Timeout is 15s, not the original 5s -- confirmed on real hardware that even 'git rev-parse
+    HEAD' alone (normally near-instant) was still regularly taking longer than 5s on this rig even
+    after this threading fix went in (registering GIT_COMMIT='unknown' every real session since),
+    so 5s was cutting it off before it could ever actually succeed. The underlying git slowness on
+    this rig is unexplained and NOT fixed by this -- 15s just gives it more room to finish before
+    giving up, while staying far below the original 60-90s stall this whole mechanism exists to
+    bound. """
+    result = {}
+
+    def _worker():
+        try:
+            commit = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], cwd=_TASK_DIR,
+                stderr=subprocess.DEVNULL, timeout=15).decode('utf-8').strip()
+        except Exception:
+            return
+        try:
+            dirty = subprocess.call(
+                ['git', 'diff', '--quiet'], cwd=_TASK_DIR,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15) != 0
+            dirty_suffix = '-dirty' if dirty else ''
+        except Exception:
+            dirty_suffix = '-unknown'
+        result['commit'] = '{0}{1}'.format(commit, dirty_suffix)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout=15.0)
+    return result.get('commit', 'unknown')
 
 
 # --- who this session is for -----------------------------------------------------------------------
@@ -192,8 +226,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2
 VAR_DOT_DISAPPEAR_MIN_S = 0.4        # J2 -- unchanged
 VAR_DOT_DISAPPEAR_MAX_S = 0.9
 
-VAR_DOT_SCREEN_INDEX = 1
-VAR_DOT_DIAMETER_PX = 60             # same unconfirmed-placeholder flag as every dot-stimulus task
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9
@@ -202,6 +234,15 @@ VAR_RENDER_HZ = 30
 VAR_CLICK_ATTENUATION_DB = 6.0       # doc: "start ~6dB below final"
 VAR_CLICK_ATTENUATION_SESSIONS = 2   # doc: "for 2-3 sessions" -- picked 2, tunable; decremented
                                       # once per session RUN (not per qualifying session)
+
+VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same "pick a
+                                      # reasonable default" convention as other unset parameters
+                                      # here. Waveform amplitude is derived from this via
+                                      # Calibration/sound_calibration.py's fitted curve (see
+                                      # VAR_LEFT_AMPLITUDE_SCALE/VAR_RIGHT_AMPLITUDE_SCALE below) --
+                                      # VAR_CLICK_ATTENUATION_DB above is then an additional
+                                      # multiplier ON TOP of this calibrated base amplitude during
+                                      # the warmup-attenuation sessions, not a substitute for it.
 
 VAR_WARMUP_TRIAL_MIN = 20            # doc SS3.1 (Tag D): 20-40 trials at the easiest level,
 VAR_WARMUP_TRIAL_MAX = 40            # drawn fresh each session, excluded from advancement stats
@@ -270,16 +311,22 @@ wheel_abort_event_neg, wheel_abort_event_pos = event_names[4], event_names[5]
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
 
+VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibrated_amplitudes(
+    VAR_TARGET_SPL_DB, click_train.VAR_LEFT_FREQ_HZ, click_train.VAR_RIGHT_FREQ_HZ)
+
 my_bpod.register_value('LEFT_THRESHOLD_DEG', -VAR_RESPONSE_THRESHOLD_DEG)
 my_bpod.register_value('RIGHT_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
 my_bpod.register_value('GIT_COMMIT', _git_commit())
+my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
+my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
@@ -287,6 +334,13 @@ camera = CameraRecorder(log_python_t0, camera_index=VAR_CAMERA_INDEX,
                          output_path=VAR_CAMERA_OUTPUT_PATH, fps=VAR_CAMERA_FPS,
                          preview=VAR_CAMERA_PREVIEW)
 camera.start()
+# Diagnostic marker only (see STAGE3_TEST_PLAN.md) -- a real bench-test session froze right after
+# CameraRecorder's own construction print, with the actual exception truncated by the GUI's CSV
+# console capture ("Exception ignored in: ..." -- a GC/destructor-context error, which a try/except
+# around construction would not catch, and which Python 3.6 has no sys.unraisablehook to intercept
+# cleanly). This print exists only to confirm, on the next run, whether execution gets past
+# camera.start() before whatever kills the process -- not a fix for the crash itself.
+print("DEBUG: camera.start() returned OK", flush=True)
 
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
@@ -307,7 +361,8 @@ bench_plots = WheelShapingPlots(
     stage=3, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': VAR_RESPONSE_THRESHOLD_DEG},
     session_status={'click_attenuated': _click_attenuation_remaining > 0,
-                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG})
+                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
+    reward_ul=VAR_REWARD_UL)
 
 # --- trial loop -----------------------------------------------------------------------------------
 
@@ -366,13 +421,19 @@ while True:
         if pending_repeat:
             trial_type = 'repeat'
             side = repeat_side
+            # A post-abort repeat re-offers the same side deterministically, not a probabilistic
+            # draw -- p_right_target is 1.0/0.0 accordingly (feeds the sidebias plot's target line).
+            p_right_target = 1.0 if side == 'R' else 0.0
             pending_repeat = False
         else:
             fresh_trial_count += 1
             trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
             if prev_outcome == 'incorrect':
+                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if prev_side == 'R'
+                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
                 side = debiasing.next_side_after_error(prev_side)
             else:
+                p_right_target = 0.5
                 side = np.random.choice(['L', 'R'])
 
         rotary.disable_evt_transmission()
@@ -401,10 +462,14 @@ while True:
         stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
         trial_clicks = click_train.generate_trial_clicks(
             'AOS', side, rng=np.random.RandomState(stim_seed), stim_duration_s=VAR_STIM_DURATION_S)
-        amplitude_scale = (10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)
-                            if _click_attenuation_remaining > 0 else 1.0)
+        # Warmup attenuation is a multiplier ON TOP of the calibrated base amplitude (dB below the
+        # calibrated target), not a substitute for it.
+        attenuation_mult = (10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)
+                             if _click_attenuation_remaining > 0 else 1.0)
         left_wave, right_wave = click_train.build_waveform(
-            trial_clicks, hifi.sampling_rate, amplitude_scale=amplitude_scale,
+            trial_clicks, hifi.sampling_rate,
+            amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE * attenuation_mult,
+            amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE * attenuation_mult,
             stim_duration_s=VAR_STIM_DURATION_S)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
@@ -509,9 +574,7 @@ while True:
 
             bench_plots.add_trial(side, 0.0, VAR_RESPONSE_THRESHOLD_DEG, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   abort_epoch=abort_epoch,
-                                   click_times_l=trial_clicks['left_times'],
-                                   click_times_r=trial_clicks['right_times'])
+                                   p_right_target=p_right_target)
             continue
 
         consecutive_aborts = 0
@@ -711,16 +774,18 @@ while True:
             reward_time_abs = send_t + visited['Reward'][-1][0]
 
         # WheelDotPeriod is state index 0 of `sma`, so its own trial-relative outcome timestamp IS
-        # already "time since go-cue" -- no extra send_t arithmetic needed.
+        # already "time since go-cue" -- no extra send_t arithmetic needed. click_diff (signed
+        # click-count evidence) feeds the psychometric curve; both are None (and simply not fed to
+        # the panel) for a NoResponse trial, matching add_trial()'s own gating.
         response_time_s = (visited[outcome_state][-1][0]
                             if outcome_state in ('Reward', 'ErrorConsumption') else None)
+        click_diff = trial_clicks['realized_delta'] if response_time_s is not None else None
 
         bench_plots.add_trial(side, VAR_RESPONSE_THRESHOLD_DEG if response is not None else 0.0,
                                VAR_RESPONSE_THRESHOLD_DEG, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
-                               trial_type=trial_type, response_time_s=response_time_s,
-                               click_times_l=trial_clicks['left_times'],
-                               click_times_r=trial_clicks['right_times'])
+                               trial_type=trial_type, p_right_target=p_right_target,
+                               response_time_s=response_time_s, click_diff=click_diff)
 
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)

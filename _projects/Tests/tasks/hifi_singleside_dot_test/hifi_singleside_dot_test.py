@@ -10,14 +10,14 @@ imported unchanged: `_shared/bpod_trial_helpers.py`'s `TrialRunner`/`was_visited
 `_shared/rotary_setup.py`, `_shared/hifi_setup.py`. Click generation comes from
 `poisson_clicks_test/click_train_v2.py`, same as hifi_singleside_gabor_test.py.
 
-**The one thing this script adds beyond swapping Gabor for a dot: `VAR_USE_MIDDLE_SCREEN_ONLY`, a
-flag choosing which `_shared/dot_display.py` class to construct at startup:**
-- `False` (default): `DotDisplay`, same full/spanned-screen behavior as dot_wheel_test.py.
-- `True`: `MiddleScreenDotDisplay` (see dot_wheel_midscreen_test.py's own docstring for why this
-  exists -- this rig's three physical dot-stimulus monitors bond into one combined Qt screen, so
-  "only the middle physical monitor should show the dot" needs the dot's rendering AND its full
-  range of motion confined to one column of that combined window, with the other columns painted
-  solid black).
+**The one thing this script adds beyond swapping Gabor for a dot**: the dot display is now
+constructed via `dot_display.create_dot_display()` -- this rig's own monitor/size configuration
+(`MiddleScreenDotDisplay` vs plain `DotDisplay`, screen index, panel count/index, diameter) is
+centralized as `DEFAULT_*` constants in `_shared/dot_display.py` itself now, not a local flag this
+script used to own independently (see that module's own docstring for why: this rig's three
+physical dot-stimulus monitors bond into one combined Qt screen, so "only the middle physical
+monitor should show the dot" needs the dot's rendering AND its full range of motion confined to one
+column of that combined window, with the other columns painted mean gray).
 
 Both classes expose the exact same public method surface (`show()`/`close()`/
 `get_screen_width_px()`/`set_deg_to_px_gain()`/`clear()`/`set_position_deg()`/`pump()`), so which one
@@ -58,7 +58,7 @@ from live_plots import LiveBenchPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 import hifi_setup
-from dot_display import DotDisplay, MiddleScreenDotDisplay
+import dot_display
 from liquid_calibration import get_reward_duration_s
 
 from pybpodapi.protocol import Bpod, StateMachine
@@ -86,28 +86,17 @@ VAR_POLL_HZ = 10
 VAR_ROTARY_USB_PORT = None
 VAR_DIFFICULTY = 'AOS'              # fixed single-side stimulus, same convention as before
 
-VAR_USE_MIDDLE_SCREEN_ONLY = True  # False = DotDisplay (full/spanned screen, dot_wheel_test.py's
-                                     # own default behavior). True = MiddleScreenDotDisplay (confine
-                                     # the dot to one column of a multi-monitor-spanned Qt screen --
-                                     # see module docstring and dot_wheel_midscreen_test.py).
-
-VAR_DOT_SCREEN_INDEX = 1            # second monitor (or the combined spanned screen when
-                                     # VAR_USE_MIDDLE_SCREEN_ONLY is True); falls back to 0 with a
-                                     # warning if not found.
-VAR_N_PHYSICAL_MONITORS_IN_SPAN = 3 # only used when VAR_USE_MIDDLE_SCREEN_ONLY is True -- confirmed
-                                     # via screens(): the combined Qt screen on this rig is 6144px
-                                     # wide, 6144/3 = 2048px per physical panel.
-VAR_ACTIVE_MONITOR_INDEX = 1        # only used when VAR_USE_MIDDLE_SCREEN_ONLY is True -- 0=left,
-                                     # 1=middle, 2=right.
-
-VAR_DOT_DIAMETER_PX = 60            # UNCONFIRMED against training_protocol.md SS1.2's 3-4 visual-deg
-                                     # spec -- same guessed-pixel-value flag as dot_wheel_test.py.
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0                    # full black, per training_protocol.md SS1.2's default
 VAR_DOT_EDGE_FRACTION = 0.9         # place the choice threshold at ~90% of edge azimuth -- gain is
                                      # derived below from the ACTUAL resolved (active) screen width,
                                      # same convention as dot_wheel_test.py/dot_wheel_midscreen_test.py.
 VAR_RENDER_HZ = 60
+
+VAR_TARGET_SPL_DB = 70.0            # not specified anywhere -- flagged/tunable. Waveform amplitude
+                                     # is derived from this via Calibration/sound_calibration.py's
+                                     # fitted curve (see VAR_LEFT_AMPLITUDE_SCALE/
+                                     # VAR_RIGHT_AMPLITUDE_SCALE below).
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.05   # dot onset, positive-only, after LED/WheelDotPeriod start
 VAR_DOT_ONSET_JITTER_MAX_S = 0.35
@@ -139,8 +128,14 @@ VAR_GO_CUE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, confirmed as the go-c
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
 
+VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibrated_amplitudes(
+    VAR_TARGET_SPL_DB, click_train.VAR_LEFT_FREQ_HZ, click_train.VAR_RIGHT_FREQ_HZ)
+
 my_bpod.register_value('LEFT_THRESHOLD_DEG', VAR_LEFT_THRESHOLD_DEG)
 my_bpod.register_value('RIGHT_THRESHOLD_DEG', VAR_RIGHT_THRESHOLD_DEG)
+my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
+my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -148,15 +143,7 @@ runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POL
 
 # The only branch in the whole script -- see module docstring. Both classes share the exact same
 # public method surface, so nothing below this needs to know which one got constructed.
-if VAR_USE_MIDDLE_SCREEN_ONLY:
-    dot = MiddleScreenDotDisplay(screen_index=VAR_DOT_SCREEN_INDEX,
-                                  n_segments=VAR_N_PHYSICAL_MONITORS_IN_SPAN,
-                                  active_segment_index=VAR_ACTIVE_MONITOR_INDEX,
-                                  diameter_px=VAR_DOT_DIAMETER_PX,
-                                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
-else:
-    dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                      background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
@@ -173,8 +160,9 @@ dot_gain = rotary_setup.screen_direction_gain(
     (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / VAR_RIGHT_THRESHOLD_DEG)
 dot.set_deg_to_px_gain(dot_gain)
 print("Dot gain calibrated to {0:.2f} px/wheel-deg (active screen width {1}px, edge fraction "
-      "{2}, middle-screen-only={3})".format(dot_gain, screen_width_px, VAR_DOT_EDGE_FRACTION,
-                                             VAR_USE_MIDDLE_SCREEN_ONLY), flush=True)
+      "{2}, middle-screen-only={3})".format(
+          dot_gain, screen_width_px, VAR_DOT_EDGE_FRACTION,
+          dot_display.DEFAULT_USE_MIDDLE_SCREEN_ONLY), flush=True)
 
 render_interval = 1.0 / VAR_RENDER_HZ
 
@@ -221,7 +209,10 @@ for trial in range(VAR_N_TRIALS):
 
         side = click_train.draw_side()
         trial_clicks = click_train.generate_trial_clicks(VAR_DIFFICULTY, side)
-        left_wave, right_wave = click_train.build_waveform(trial_clicks, hifi.sampling_rate)
+        left_wave, right_wave = click_train.build_waveform(
+            trial_clicks, hifi.sampling_rate,
+            amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
+            amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 

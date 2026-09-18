@@ -57,8 +57,13 @@ VAR_ISI_FLOOR_S = 0.015             # click_duration (8ms) + ~7ms guard gap: the
 VAR_ONSET_GAP_S = VAR_ISI_FLOOR_S   # gap after the bilateral onset pulse, = ISI floor
 VAR_ONSET_PULSE_DURATION_S = 0.006  # bilateral onset marker pulse
 
-VAR_LEFT_FREQ_HZ = 1000             # left-side clicks
-VAR_RIGHT_FREQ_HZ = 4000            # right-side clicks -- 2 octaves above left
+VAR_LEFT_FREQ_HZ = 4000              # left-side clicks -- matches sound_calibration.py's own
+                                      # CHANNEL_FREQUENCIES_HZ['L'] (the lower of its two calibrated
+                                      # left frequencies), so a real dB-SPL calibration fit actually
+                                      # exists for the frequency being played (was 1000Hz, which
+                                      # sound_calibration.py never calibrated at all).
+VAR_RIGHT_FREQ_HZ = 10000            # right-side clicks -- matches CHANNEL_FREQUENCIES_HZ['R']'s
+                                      # lower calibrated right frequency (was 4000Hz).
 VAR_ONSET_RAMP_MS = 1.0             # cosine ramp for the (very short) bilateral onset pulse
 
 # Time within the baked waveform at which the click-train proper begins (clicks' own times, as
@@ -217,7 +222,8 @@ def generate_trial_clicks(difficulty, side, rng=None, stim_duration_s=None):
     }
 
 
-def build_waveform(trial_clicks, sampling_rate, amplitude_scale=1.0, stim_duration_s=None):
+def build_waveform(trial_clicks, sampling_rate, amplitude_scale_left=1.0,
+                    amplitude_scale_right=1.0, stim_duration_s=None):
     """
     Assemble the actual stereo audio buffer for one trial from a generate_trial_clicks() result:
     bilateral onset pulse (both bands, both channels -- leaks no side) + onset gap (silence) +
@@ -227,9 +233,13 @@ def build_waveform(trial_clicks, sampling_rate, amplitude_scale=1.0, stim_durati
 
     :param dict trial_clicks: a generate_trial_clicks() result
     :param int sampling_rate: HiFi module sampling rate (Hz)
-    :param float amplitude_scale: outer multiplier applied to both returned buffers (default 1.0,
-        i.e. unchanged) -- e.g. 10**(-6/20) for a -6dB click-level attenuation ramp. Applied after
-        all tone placement, never inside pure_tone()/_place().
+    :param float amplitude_scale_left: outer multiplier applied to the returned left buffer
+        (default 1.0, i.e. unchanged) -- e.g. a sound_calibration.get_calibrated_amplitude() result
+        for a target dB SPL, or that times 10**(-6/20) for an additional click-level attenuation
+        ramp on top. Applied after all tone placement, never inside pure_tone()/_place(). Separate
+        from amplitude_scale_right because the two channels' calibration curves generally differ
+        (was a single amplitude_scale applied to both -- split for per-channel SPL calibration).
+    :param float amplitude_scale_right: same as amplitude_scale_left, for the right buffer.
     :param float stim_duration_s: must match whatever stim_duration_s was passed to
         generate_trial_clicks() for this same trial_clicks (defaults to VAR_STIM_DURATION_S,
         matching generate_trial_clicks()'s own default) -- determines the buffer's total length.
@@ -271,8 +281,9 @@ def build_waveform(trial_clicks, sampling_rate, amplitude_scale=1.0, stim_durati
     for t in trial_clicks['right_times']:
         _place(right, CLICK_START_OFFSET_S + t, click_tone_right)
 
-    if amplitude_scale != 1.0:
-        left = left * amplitude_scale
-        right = right * amplitude_scale
+    if amplitude_scale_left != 1.0:
+        left = left * amplitude_scale_left
+    if amplitude_scale_right != 1.0:
+        right = right * amplitude_scale_right
 
     return left, right

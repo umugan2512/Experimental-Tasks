@@ -24,6 +24,23 @@ def connect_hifi(bpod, usb_port=None):
     return hifi
 
 
+def compute_calibrated_amplitudes(target_spl_db, left_freq_hz, right_freq_hz):
+    """
+    Returns (amplitude_left, amplitude_right) -- the waveform peak-amplitude scales that
+    Calibration/sound_calibration.py's fit predicts will produce target_spl_db from each channel
+    at its own actual click-train frequency. The one place every HiFi-using task script computes
+    this, so the calibration lookup/fallback/clipping behavior can't drift between scripts.
+
+    Lazy import: the caller's own sys.path.insert(...Calibration) (same one every HiFi-using
+    script already has for liquid_calibration.get_reward_duration_s()) must run before this is
+    called.
+    """
+    from sound_calibration import get_calibrated_amplitude
+    amplitude_left = get_calibrated_amplitude(target_spl_db, left_freq_hz, channel='L')
+    amplitude_right = get_calibrated_amplitude(target_spl_db, right_freq_hz, channel='R')
+    return amplitude_left, amplitude_right
+
+
 def build_stop_trigger(bpod):
     """
     Registers HiFiCommandType.STOP_ALL as a Bpod-relayed message, for use as an output_actions

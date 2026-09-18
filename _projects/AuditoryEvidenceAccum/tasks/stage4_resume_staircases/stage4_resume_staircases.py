@@ -69,7 +69,7 @@ from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 import hifi_setup
-from dot_display import DotDisplay
+import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
 
@@ -108,17 +108,44 @@ def _cleanup_and_export():
 
 
 def _git_commit():
-    """ additions.txt T9: best-effort git commit hash (+dirty flag) for provenance. """
-    try:
-        commit = subprocess.check_output(
-            ['git', 'rev-parse', 'HEAD'], cwd=_TASK_DIR,
-            stderr=subprocess.DEVNULL).decode('utf-8').strip()
-        dirty = subprocess.call(
-            ['git', 'diff', '--quiet'], cwd=_TASK_DIR,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0
-        return '{0}{1}'.format(commit, '-dirty' if dirty else '')
-    except Exception:
-        return 'unknown'
+    """ additions.txt T9: best-effort git commit hash (+dirty flag) for provenance. Runs the git
+    calls on a background daemon thread and bounds the MAIN thread with thread.join(timeout=...)
+    instead of relying on subprocess's own timeout= -- confirmed on real hardware (Stage 3, same
+    _git_commit() copy, log-stage3.txt) that subprocess.check_output(..., timeout=3) alone is NOT
+    reliably enforced on Windows here: it still stalled ~84s despite the timeout, a known CPython
+    Windows quirk where Popen.communicate(timeout=...), on timing out, kills the immediate child
+    then does a SECOND unbounded communicate() to drain output -- if a descendant process holds the
+    stdout/stderr pipe open, that second call blocks until the real operation finishes on its own.
+    Bounding the join instead means the main thread is never blocked past the join timeout
+    regardless of what the underlying subprocess does; the daemon thread is simply abandoned.
+
+    Timeout is 15s, not the original 5s -- confirmed on real hardware (Stage 3) that even 'git
+    rev-parse HEAD' alone was still regularly taking longer than 5s on this rig even after this
+    threading fix went in, so 5s was cutting it off before it could ever actually succeed. The
+    underlying git slowness on this rig is unexplained and NOT fixed by this -- 15s just gives it
+    more room to finish, while staying far below the original 60-90s stall. """
+    result = {}
+
+    def _worker():
+        try:
+            commit = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], cwd=_TASK_DIR,
+                stderr=subprocess.DEVNULL, timeout=15).decode('utf-8').strip()
+        except Exception:
+            return
+        try:
+            dirty = subprocess.call(
+                ['git', 'diff', '--quiet'], cwd=_TASK_DIR,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15) != 0
+            dirty_suffix = '-dirty' if dirty else ''
+        except Exception:
+            dirty_suffix = '-unknown'
+        result['commit'] = '{0}{1}'.format(commit, dirty_suffix)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout=15.0)
+    return result.get('commit', 'unknown')
 
 
 # --- who this session is for -----------------------------------------------------------------------
@@ -146,6 +173,13 @@ VAR_DELAY_DURATION_MAX_S = 0.2
 VAR_ABORT_TIMEOUT_MIN_S = 1.0
 VAR_ABORT_TIMEOUT_MAX_S = 2.0
 
+VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same default
+                                      # as Stage 3. Waveform amplitude is derived from this via
+                                      # Calibration/sound_calibration.py's fitted curve (see
+                                      # VAR_LEFT_AMPLITUDE_SCALE/VAR_RIGHT_AMPLITUDE_SCALE below) --
+                                      # Stage 4 has no warmup-attenuation mechanism, so this applies
+                                      # directly/unconditionally, unlike Stage 3.
+
 VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # see
                                       # stage3_clicks_direction.py's own identical constant --
                                       # still a placeholder through Stage 4's own trials; only
@@ -164,8 +198,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2
 VAR_DOT_DISAPPEAR_MIN_S = 0.4
 VAR_DOT_DISAPPEAR_MAX_S = 0.9
 
-VAR_DOT_SCREEN_INDEX = 1
-VAR_DOT_DIAMETER_PX = 60
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9
@@ -237,15 +269,21 @@ reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(ro
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
 
+VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibrated_amplitudes(
+    VAR_TARGET_SPL_DB, click_train.VAR_LEFT_FREQ_HZ, click_train.VAR_RIGHT_FREQ_HZ)
+
 my_bpod.register_value('GIT_COMMIT', _git_commit())
 my_bpod.register_value('STAIRCASE_ACTIVE_THIS_SESSION', active_staircase)
+my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
+my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
@@ -264,7 +302,8 @@ bench_plots = WheelShapingPlots(
     stage=4, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': threshold_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG},
     session_status={'staircase_active': active_staircase, 'quiescence_s': quiescence_obj.current_s,
-                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG})
+                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
+    reward_ul=VAR_REWARD_UL)
 
 print("Starting Stage 4 -- staircase active this session: {0} (response threshold {1:.1f}deg = "
       "{2:.0%} of final, quiescence scale {3:.3f}s)".format(
@@ -324,13 +363,19 @@ while True:
         if pending_repeat:
             trial_type = 'repeat'
             side = repeat_side
+            # A post-abort repeat re-offers the same side deterministically, not a probabilistic
+            # draw -- p_right_target is 1.0/0.0 accordingly (feeds the sidebias plot's target line).
+            p_right_target = 1.0 if side == 'R' else 0.0
             pending_repeat = False
         else:
             fresh_trial_count += 1
             trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
             if prev_outcome == 'incorrect':
+                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if prev_side == 'R'
+                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
                 side = debiasing.next_side_after_error(prev_side)
             else:
+                p_right_target = 0.5
                 side = np.random.choice(['L', 'R'])
 
         quiescence_duration_this_trial = float(
@@ -377,7 +422,10 @@ while True:
         trial_clicks = click_train.generate_trial_clicks(
             'AOS', side, rng=np.random.RandomState(stim_seed), stim_duration_s=VAR_STIM_DURATION_S)
         left_wave, right_wave = click_train.build_waveform(
-            trial_clicks, hifi.sampling_rate, stim_duration_s=VAR_STIM_DURATION_S)
+            trial_clicks, hifi.sampling_rate,
+            amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
+            amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE,
+            stim_duration_s=VAR_STIM_DURATION_S)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 
@@ -478,9 +526,7 @@ while True:
 
             bench_plots.add_trial(side, 0.0, cur_response_threshold_deg, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   abort_epoch=abort_epoch,
-                                   click_times_l=trial_clicks['left_times'],
-                                   click_times_r=trial_clicks['right_times'])
+                                   p_right_target=p_right_target)
             continue
 
         consecutive_aborts = 0
@@ -687,16 +733,17 @@ while True:
             reward_time_abs = send_t + visited['Reward'][-1][0]
 
         # WheelDotPeriod is state index 0 of `sma`, so its own trial-relative outcome timestamp IS
-        # already "time since go-cue" -- no extra send_t arithmetic needed.
+        # already "time since go-cue" -- no extra send_t arithmetic needed. click_diff (signed
+        # click-count evidence) feeds the psychometric curve; both are None for a NoResponse trial.
         response_time_s = (visited[outcome_state][-1][0]
                             if outcome_state in ('Reward', 'ErrorConsumption') else None)
+        click_diff = trial_clicks['realized_delta'] if response_time_s is not None else None
 
         bench_plots.add_trial(side, cur_response_threshold_deg if response is not None else 0.0,
                                cur_response_threshold_deg, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
-                               trial_type=trial_type, response_time_s=response_time_s,
-                               click_times_l=trial_clicks['left_times'],
-                               click_times_r=trial_clicks['right_times'],
+                               trial_type=trial_type, p_right_target=p_right_target,
+                               response_time_s=response_time_s, click_diff=click_diff,
                                in_trial_threshold_deg=VAR_CUE_ABORT_THRESHOLD_DEG)
 
     except Exception as err:

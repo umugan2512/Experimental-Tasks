@@ -69,7 +69,7 @@ _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
-from dot_display import MiddleScreenDotDisplay
+import dot_display
 
 from pybpodapi.protocol import Bpod, StateMachine
 
@@ -88,24 +88,6 @@ VAR_REQUIRE_NO_LICK = False        # no lick sensor assumed relevant to this ben
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, same convention as every other script
 
-VAR_DOT_SCREEN_INDEX = 1          # the combined 3-panel Qt screen; falls back to 0 with a warning
-                                   # if not found -- see module docstring for why this is one
-                                   # combined screen, not the middle monitor directly.
-VAR_N_PHYSICAL_MONITORS_IN_SPAN = 3   # confirmed via screens(): DISPLAY2 is 6144px wide, 6144/3 =
-                                       # 2048px per physical panel -- see module docstring.
-VAR_ACTIVE_MONITOR_INDEX = 1          # 0=left, 1=middle, 2=right -- middle panel only.
-VAR_DOT_DIAMETER_PX = 60          # UNCONFIRMED against training_protocol.md SS1.2's 3-4 visual-deg
-                                   # spec -- this is a guessed pixel value, not derived from it.
-                                   # Converting visual degrees -> px needs the monitor's physical
-                                   # width and the animal's viewing distance, neither measured yet
-                                   # (SS Part 6, item 1). Once both exist, replace this line with:
-                                   #   from dot_display import visual_deg_to_px
-                                   #   VAR_DOT_DIAMETER_PX = visual_deg_to_px(
-                                   #       3.5, dot.get_screen_width_px(),
-                                   #       screen_width_mm, viewing_distance_mm)
-                                   # (3.5 = midpoint of the doc's 3-4deg range; needs dot_display's
-                                   # get_screen_width_px(), so this can only run after DotDisplay is
-                                   # constructed, same ordering already used for the gain below.)
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0                  # full black, per training_protocol.md SS1.2's default (doc also
                                    # floats a sub-maximal-contrast option -- flagged, not built here)
@@ -145,11 +127,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = MiddleScreenDotDisplay(screen_index=VAR_DOT_SCREEN_INDEX,
-                              n_segments=VAR_N_PHYSICAL_MONITORS_IN_SPAN,
-                              active_segment_index=VAR_ACTIVE_MONITOR_INDEX,
-                              diameter_px=VAR_DOT_DIAMETER_PX,
-                              background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 

@@ -1,0 +1,20 @@
+{
+    "__CREATED-ON__": "2026-09-18 11:08:47.756123",
+    "__DEF-TEXT__": "This file contains information about a PyBpod experiment setup.",
+    "__DEF-URL__": "http://pybpod.readthedocs.org",
+    "__EXTERNAL-REF__": [
+        "431035f3-072f-48f2-bb28-b84e277ea6ef",
+        "47367562-47fc-46a6-9cf6-2c34f24df9e5"
+    ],
+    "__SOFTWARE__": "PyBpod GUI API v1.8.2",
+    "__UPDATED-ON__": "2026-09-18 11:08:47.756123",
+    "__UUID4__": "b6b49b5e-0d9b-4805-b714-f634406e2ad7",
+    "board": "Box3",
+    "detached": false,
+    "subjects": [
+        "test_stage1"
+    ],
+    "task": "stage1_wheel_shaping",
+    "update-variables": false,
+    "variables": []
+}

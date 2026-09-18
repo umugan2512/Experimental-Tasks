@@ -354,6 +354,7 @@ def _fake_session(started, protocol, session_end_reason, trial_count=10, duratio
         'aborts_quiescence': 0, 'aborts_cue': 0, 'aborts_delay': 0, 'aborts_response': 0,
         'warmup_trial_count': 0, 'repeat_trial_count': 0, 'session_water_ul': None,
         'staircase_advanced_this_session': None, 'git_commit': None,
+        'target_spl_db': None, 'left_freq_hz': None, 'right_freq_hz': None,
         'session_csv_path': csv_path or (started.replace(' ', '_').replace(':', '') + '.csv'),
         'session_struct_path': None,
     }

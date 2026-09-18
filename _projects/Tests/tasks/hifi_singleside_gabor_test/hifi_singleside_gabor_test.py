@@ -119,6 +119,11 @@ VAR_GABOR_BACKGROUND_GRAY = 128
 VAR_DEG_TO_PX_GAIN = 4.0            # uncalibrated placeholder -- see gabor_display.py docstring
 VAR_RENDER_HZ = 60
 
+VAR_TARGET_SPL_DB = 70.0            # not specified anywhere -- flagged/tunable. Waveform amplitude
+                                     # is derived from this via Calibration/sound_calibration.py's
+                                     # fitted curve (see VAR_LEFT_AMPLITUDE_SCALE/
+                                     # VAR_RIGHT_AMPLITUDE_SCALE below).
+
 VAR_GABOR_ONSET_JITTER_MIN_S = 0.05   # patch onset, positive-only, after LED/WheelGaborPeriod start
 VAR_GABOR_ONSET_JITTER_MAX_S = 0.35
 VAR_GABOR_DISAPPEAR_MIN_S = 0.4       # threshold crossing -> patch clears, positive-only
@@ -149,8 +154,14 @@ VAR_GO_CUE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, confirmed as the go-c
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
 
+VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibrated_amplitudes(
+    VAR_TARGET_SPL_DB, click_train.VAR_LEFT_FREQ_HZ, click_train.VAR_RIGHT_FREQ_HZ)
+
 my_bpod.register_value('LEFT_THRESHOLD_DEG', VAR_LEFT_THRESHOLD_DEG)
 my_bpod.register_value('RIGHT_THRESHOLD_DEG', VAR_RIGHT_THRESHOLD_DEG)
+my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
+my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -208,7 +219,10 @@ for trial in range(VAR_N_TRIALS):
 
         side = click_train.draw_side()
         trial_clicks = click_train.generate_trial_clicks(VAR_DIFFICULTY, side)
-        left_wave, right_wave = click_train.build_waveform(trial_clicks, hifi.sampling_rate)
+        left_wave, right_wave = click_train.build_waveform(
+            trial_clicks, hifi.sampling_rate,
+            amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
+            amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 

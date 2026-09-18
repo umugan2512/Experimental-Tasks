@@ -1,32 +1,39 @@
 # !/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-Live-updating matplotlib window for the wheel-shaping stages (training_protocol.md Stages 1-2) --
-scoped to what these two stages actually need, unlike poisson_clicks_test/live_plots_lookback.py's
-side-bias/remedial/circuit-breaker panels, all irrelevant here (no auditory clicks, no difficulty
-grid, no correct-side concept until Stage 3). Deliberately not placed under poisson_clicks_test/ or
-_shared/ -- this is shared *within the wheel-shaping stages only*, same "shared within this paradigm
-only, not generic enough for _shared/" placement convention CLAUDE.md documents for
-poisson_clicks_test/ itself.
+Live-updating matplotlib window for the wheel-shaping stages (training_protocol.md Stages 1-4) --
+originally scoped to what Stage 1/2 alone needed (no correct-side concept existed yet, so
+poisson_clicks_test/live_plots_lookback.py's side-bias/remedial/circuit-breaker panels were all
+irrelevant); Stage 3/4's own side-bias/debiasing panel (see "Extended for Stage 3/4" below) is the
+one of those that became relevant once a real correct-side debiasing rule existed here too --
+remedial/circuit-breaker panels are still Tests-only, no equivalent concept exists in Stage 3/4.
+Deliberately not placed under poisson_clicks_test/ or _shared/ -- this is shared *within the
+wheel-shaping stages only*, same "shared within this paradigm only, not generic enough for
+_shared/" placement convention CLAUDE.md documents for poisson_clicks_test/ itself.
 
-4-row mosaic: a movement raster (the doc's own advancement criterion is about the SHAPE of this
-distribution -- bimodal, velocity-separated -- so this is the panel actually worth eyeballing), a
-progress/staircase-state panel (persistent bars, same pattern as live_plots_lookback.py's
-disengagement panel, now also annotated with each value's PREVIOUS session's ending value so
-day-over-day movement is visible without cross-referencing), an outcome tally, (Stage 2 only) the
-rolling direction ratio with its 30-70% withhold band, a reward-aligned lick raster, and a
-session-wide lick timeline -- the last two mirror poisson_clicks_test/live_plots_lookback.py's own
-two lick panels exactly (adapted, not imported -- see below). Stage 1 has no direction-ratio panel
-(no reward-withholding exists at Stage 1 at all) -- that slot instead holds the outcome tally.
+**Deliberately pruned to only the panels worth eyeballing live** -- anything whose information is
+already inferable from another panel shown (or is more of a post-hoc/technical sanity check than a
+live training-progress signal) was cut; the full data is still in the session CSV/struct export
+either way, so nothing is lost, just not duplicated on screen. Panels: a movement raster (the doc's
+own advancement criterion is about the SHAPE of this distribution -- bimodal, velocity-separated --
+so this is the panel actually worth eyeballing, and its own outcome-colored dots already convey the
+outcome mix that a separate tally panel would only restate), a progress/staircase-state panel
+(persistent bars, same pattern as live_plots_lookback.py's disengagement panel, now also annotated
+with each value's PREVIOUS session's ending value so day-over-day movement is visible without
+cross-referencing -- state that's genuinely not visible anywhere else), (Stage 2 only) the rolling
+direction ratio with its 30-70% withhold band (the actual mechanism driving reward withholding,
+not otherwise visible), a reward-aligned lick raster, and a session-wide lick timeline -- the last
+two mirror poisson_clicks_test/live_plots_lookback.py's own two lick panels exactly (adapted, not
+imported -- see below), and are kept unconditionally regardless of the pruning above.
 
 Movement raster and both lick panels use persistent artists (set_offsets()/incremental
 eventplot+scatter), not clear-and-replot -- same "only touch what changed" principle CLAUDE.md
 flags for any panel that grows for a whole session (confirmed elsewhere in this project: cla()+
 replot every trial grows from ~0.8s to ~2.3s per redraw over 150 trials); the lick-panel persistent-
 artist pattern is copied directly from live_plots_lookback.py's own already-optimized
-`_redraw_reward_lick_raster()`/`_redraw_session_lick()`. The outcome tally and progress bars stay
-cheap cla()+redraw, matching how even the fully-optimized live_plots_lookback.py still does this for
-its own low-cardinality tally/bar panels -- not a bottleneck at that scale.
+`_redraw_reward_lick_raster()`/`_redraw_session_lick()`. The progress bars stay cheap cla()+redraw,
+matching how even the fully-optimized live_plots_lookback.py still does this for its own
+low-cardinality bar panels -- not a bottleneck at that scale.
 
 `_style_axes()`/`_capped_figsize()` below are deliberately local copies of the identically-named
 helpers in Tests/tasks/poisson_clicks_test/live_plots.py, not a cross-project import -- this is the
@@ -35,16 +42,23 @@ point of this whole module), and both helpers are small/stable enough that the d
 lower than that coupling.
 
 Extended for Stage 3/4 (training_protocol.md Revision 2) with panels those stages actually need
-that Stage 1/2 have no use for -- a click raster and abort-by-epoch tally (both new outcome/
-stimulus dimensions Stage 1/2 don't have at all), a response-time histogram split by correct/
-incorrect (no correct/incorrect concept exists before Stage 3), a rolling-accuracy line with
-warmup/repeat trials visually distinguished from the advancement-relevant 'main' subset, a
-session-engagement indicator (against the same consecutive-abort/no-initiation thresholds the
-task script itself uses to end a session), and -- Stage 4 only -- a dual-staircase progress panel
+that Stage 1/2 have no use for -- a rolling-accuracy line with warmup/repeat trials visually
+distinguished from the advancement-relevant 'main' subset (the primary "is it working" signal), a
+session-engagement indicator (against the same consecutive-abort/no-initiation thresholds the task
+script itself uses to end a session -- the live "should I keep this session running" signal), a
+side-bias/debiasing panel (this trial's own P(right) target from the task script's
+debiasing.next_side_after_error() rule, plus a rolling empirical R-fraction of the actual draws --
+adapted, not ported, from live_plots_lookback.py's own three-line "sidebias" panel, since Stage 3/4's
+debiasing mechanism computes a per-trial target rather than a continuous recency-weighted one, see
+add_trial()'s own p_right_target docstring), and -- Stage 4 only -- a dual-staircase progress panel
 highlighting which of response-threshold/quiescence is this session's Tag-B-selected active one.
-The click-raster/abort-tally panels are small local ports of Tests/tasks/poisson_clicks_test/
-live_plots.py's own drawing logic (duplicated, not imported -- same "shared within this paradigm
-only" placement convention already used for _style_axes()/_capped_figsize() above).
+A click raster, abort-by-epoch tally, and correct/incorrect response-time histogram were built and
+then deliberately pruned -- all three are lower-priority technical/post-hoc detail (click timing is
+audible live and fully logged per-trial in CLICK_TIMES_L/R regardless; abort epoch is logged in
+ABORT_EPOCH and the engagement panel already surfaces the coarser "is aborting a problem at all"
+signal via its consecutive-abort count; response latency distribution is a post-hoc analysis
+question, not something that should change what a bench tester does mid-session) rather than a
+live "is training going well" signal like the panels that remain.
 """
 import time
 
@@ -67,12 +81,15 @@ def _style_axes(ax):
     ax.set_axisbelow(True)
 
 
-def _capped_figsize(desired_w_in, desired_h_in, margin_px=80):
-    """ Scales (desired_w_in, desired_h_in) down, preserving aspect ratio, so the rendered figure
-    fits within the actual screen's available area (minus a small margin for window chrome/
-    taskbar) -- queried via a throwaway Tk root, works regardless of which matplotlib backend (Tk
-    or Qt) actually drives the persistent window. Falls back to the desired size unscaled if
-    screen geometry can't be determined (e.g. headless). """
+def _capped_figsize(desired_w_in, desired_h_in, margin_px=80, width_fraction=0.5):
+    """ Targets `width_fraction` (default half) of the actual screen's own width -- queried via a
+    throwaway Tk root, works regardless of which matplotlib backend (Tk or Qt) actually drives the
+    persistent window -- scaling height to match, via (desired_h_in/desired_w_in), the mosaic's own
+    natural aspect ratio (so panel proportions stay right at any width). If that height would still
+    overflow the screen's available height (minus a small margin for window chrome/taskbar), both
+    dimensions are shrunk further, preserving the same aspect ratio, until the whole figure fits
+    vertically too -- fitting on screen always wins over hitting the exact width target. Falls back
+    to the desired size unscaled if screen geometry can't be determined (e.g. headless). """
     try:
         import tkinter as tk
         root = tk.Tk()
@@ -84,8 +101,15 @@ def _capped_figsize(desired_w_in, desired_h_in, margin_px=80):
     dpi = plt.rcParams['figure.dpi']
     max_w_in = max((screen_w_px - margin_px) / dpi, 1.0)
     max_h_in = max((screen_h_px - margin_px) / dpi, 1.0)
-    scale = min(1.0, max_w_in / desired_w_in, max_h_in / desired_h_in)
-    return desired_w_in * scale, desired_h_in * scale
+
+    target_w_in = min((screen_w_px * width_fraction) / dpi, max_w_in)
+    aspect = desired_h_in / float(desired_w_in)
+    target_h_in = target_w_in * aspect
+    if target_h_in > max_h_in:
+        scale = max_h_in / target_h_in
+        target_w_in *= scale
+        target_h_in *= scale
+    return target_w_in, target_h_in
 
 
 OUTCOME_COLORS = {
@@ -101,15 +125,21 @@ OUTCOME_COLORS = {
 SIDE_COLORS = {'L': 'tab:blue', 'R': 'tab:red'}
 LICK_COLOR = 'tab:cyan'
 FIRST_LICK_COLOR = 'tab:pink'
-ABORT_EPOCH_COLORS = {'quiescence': 'tab:gray', 'cue': 'tab:purple', 'delay': 'tab:brown'}
 TRIAL_TYPE_MARKERS = {'main': 'o', 'warmup': '^', 'repeat': 's'}
+
+# Stage 3/4's whole-session outcome-percentage bars -- a fixed 4-category vocabulary (not the same
+# as OUTCOME_COLORS' raw per-protocol outcome strings above), one bar order/coloring used
+# consistently regardless of which of 'Reward'/'NoReward'/'NoResponse'/'Abort' produced it.
+_OUTCOME4_ORDER = ['correct', 'incorrect', 'no_response', 'abort']
+_OUTCOME4_LABELS = {'correct': 'Correct', 'incorrect': 'Incorrect', 'no_response': 'No resp.',
+                     'abort': 'Abort'}
+_OUTCOME4_COLORS = {'correct': 'tab:green', 'incorrect': 'tab:red', 'no_response': 'tab:gray',
+                     'abort': 'tab:purple'}
 
 # Display-only reference matching stage3/4's own VAR_CONSECUTIVE_ABORT_LIMIT -- not imported from
 # either task script (this module has no dependency on either), so kept as its own constant; if
 # that VAR_ is ever retuned, update this one too.
 _ENGAGEMENT_ABORT_LIMIT_DISPLAY = 20
-_CLICK_RASTER_MAX_TRIALS = 30   # trailing-window cap, same "bounded redraw cost" principle as
-                                 # wheel_position_plot.py's own MAX_PLOTTED_POINTS
 
 # Display-only reference for the Stage 1 gain-progress bar (see _redraw_progress()) -- matches
 # stage1_wheel_shaping.py's own VAR_GAIN_INITIAL_MULT (training_protocol.md's stated "~2x final").
@@ -119,7 +149,8 @@ GAIN_INITIAL_MULT_DISPLAY_REF = 2.0
 
 class WheelShapingPlots(object):
 
-    def __init__(self, stage, threshold_final_deg, prev_session_values=None, session_status=None):
+    def __init__(self, stage, threshold_final_deg, prev_session_values=None, session_status=None,
+                 reward_ul=None):
         """
         :param int stage: 1, 2, 3, or 4 -- controls which panels are meaningful. Stage 1 has no
             direction-ratio withholding and a fixed threshold/decaying gain instead of a staircase.
@@ -140,16 +171,21 @@ class WheelShapingPlots(object):
             {'in_trial_threshold_deg': 10.0} (Stage 3/4, the in-trial abort threshold in force),
             {'click_attenuated': True} (Stage 3 only, whether the click-level ramp is still active),
             {'staircase_active': 'response'} (Stage 4 only, this session's Tag-B selection).
+        :param float reward_ul: this session's own VAR_REWARD_UL (constant for the whole session,
+            same as threshold_final_deg) -- used only to show total CONSUMED water (reward_ul times
+            the count of rewarded trials with at least one lick registered, not merely delivered)
+            in the reward-aligned lick raster's own title. None (the default) just omits that part
+            of the title.
         """
         self._stage = stage
         self._threshold_final_deg = threshold_final_deg
         self._prev_session_values = prev_session_values or {}
         self._session_status = session_status or {}
+        self._reward_ul = reward_ul
 
         self._trial_idx = []
         self._magnitude_deg = []
         self._side_colors = []
-        self._outcome_counts = {}
         self._direction_ratio_series = []
 
         self._cur_threshold_deg = None
@@ -165,12 +201,6 @@ class WheelShapingPlots(object):
         self._lickraster_rendered_n = 0
 
         # --- Stage 3/4 only, from here down -----------------------------------------------------
-        self._click_trial_idx = []       # one row index per trial that had any clicks
-        self._click_times = []           # flat list of (trial_row, t, side) for the raster
-        self._click_rendered_n = 0
-        self._abort_epoch_counts = {}
-        self._response_times_correct = []
-        self._response_times_incorrect = []
         self._accuracy_trial_idx = []
         self._accuracy_values = []       # 1.0/0.0 per MAIN trial, for the rolling-mean line
         self._accuracy_rolling = []
@@ -181,56 +211,103 @@ class WheelShapingPlots(object):
         self._time_since_last_trial_s = None
         self._cur_in_trial_threshold_deg = self._session_status.get('in_trial_threshold_deg')
 
+        # Side-bias/debiasing panel -- the equivalent of poisson_clicks_test/live_plots_lookback.py's
+        # own "sidebias" panel, absent here until now (this module's own docstring used to call it
+        # "irrelevant... no correct-side concept until Stage 3" -- true when only Stage 1/2 existed,
+        # no longer true now that Stage 3/4 have a real correct-side debiasing rule). Adapted, not
+        # ported: Stage 3/4's actual mechanism (debiasing.next_side_after_error(), a binary
+        # repeat-after-error rule) computes a per-trial TARGET probability rather than
+        # live_plots_lookback.py's continuous recency-weighted one, so only two lines are plotted
+        # (target P(right) for the draw, and a rolling empirical R-fraction of the actual draws --
+        # computed here from `side`, not passed in) instead of that module's three.
+        self._sidebias_trial_idx = []
+        self._p_right_target_series = []
+        self._side_history = []          # raw 'L'/'R' per trial, for the rolling empirical fraction
+        self._recent_right_frac_series = []
+
+        # Whole-session outcome-percentage bars (correct/incorrect/no-response/abort) -- a coarser,
+        # whole-session-total complement to the accuracy panel's rolling-window trend (which only
+        # covers correct/incorrect and says nothing about no-response/abort rates).
+        self._outcome4_counts = {'correct': 0, 'incorrect': 0, 'no_response': 0, 'abort': 0}
+
+        # Psychometric curve: P(chose right) vs. signed click-count evidence (trial_clicks['
+        # realized_delta'], i.e. n_right-n_left) -- only for trials with a genuine L/R response
+        # (Reward/NoReward), not Abort/NoResponse. Stage 3/4 currently only ever presents 'AOS'
+        # (fully one-sided) trials, so the sign always matches the presented side and only the
+        # click COUNT varies trial-to-trial (Poisson) -- still a real, informative x-axis, and this
+        # panel is written difficulty-level-agnostic so it stays useful once later stages add
+        # graded difficulties.
+        self._psychometric_points = []   # list of (click_diff, chose_right) tuples
+
+        # Reaction time (go-cue to threshold-crossing), split by correct/incorrect -- restored per
+        # explicit request after an earlier pruning pass removed it; kept small/non-full-width now.
+        self._reaction_times_correct = []
+        self._reaction_times_incorrect = []
+
+        # Only the raster and the two lick panels grow/need to be read across a whole session's
+        # trial range -- everything else (bars, small tallies, per-trial-type rolling lines) is
+        # legible at half width, so only those three span both columns. height_ratios keeps small
+        # bar/text panels visually compact instead of stretching to match a full-width row's default
+        # height, which is what made the previous layout feel unaligned/oversized for its content.
         if stage in (3, 4):
-            mosaic = [['raster', 'raster', 'click_raster'],
-                      ['progress', 'abort_epoch', 'response_time'],
-                      ['accuracy', 'accuracy', 'engagement'],
-                      ['reward_licks', 'reward_licks', 'outcome'],
-                      ['lick_timeline', 'lick_timeline', 'lick_timeline']]
+            mosaic = [['raster', 'raster'],
+                      ['progress', 'engagement'],
+                      ['percent_outcome', 'psychometric'],
+                      ['accuracy', 'sidebias'],
+                      ['reaction_time', 'reward_licks'],
+                      ['lick_timeline', 'lick_timeline']]
+            height_ratios = [2.2, 0.8, 1.0, 1.1, 1.1, 0.9]
         elif stage == 2:
             # Each label's cells must form one contiguous rectangle (subplot_mosaic's own
             # requirement).
             mosaic = [['raster', 'raster'],
                       ['progress', 'direction_ratio'],
-                      ['reward_licks', 'outcome'],
-                      ['lick_timeline', 'lick_timeline']]
-        else:
-            mosaic = [['raster', 'raster'],
-                      ['progress', 'outcome'],
                       ['reward_licks', 'reward_licks'],
                       ['lick_timeline', 'lick_timeline']]
+            height_ratios = [2.2, 1.0, 1.3, 1.0]
+        else:
+            mosaic = [['raster', 'raster'],
+                      ['progress', 'progress'],
+                      ['reward_licks', 'reward_licks'],
+                      ['lick_timeline', 'lick_timeline']]
+            height_ratios = [2.2, 0.8, 1.3, 1.0]
 
         plt.ion()
-        figsize = (13, 13) if stage in (3, 4) else (11, 12)
-        self._fig, self._axes = plt.subplot_mosaic(mosaic, figsize=_capped_figsize(*figsize))
+        figsize = (11, 14) if stage in (3, 4) else (10, 11)
+        # constrained_layout instead of a one-time tight_layout() call -- handles the mixed
+        # panel sizes/legends/titles here far more robustly (recomputes automatically on every
+        # redraw as content changes, e.g. a legend appearing once data exists), which is what was
+        # actually causing the previous layout to look unaligned/inconsistently sized.
+        self._fig, self._axes = plt.subplot_mosaic(
+            mosaic, figsize=_capped_figsize(*figsize),
+            gridspec_kw={'height_ratios': height_ratios}, constrained_layout=True)
         try:
             self._fig.canvas.manager.set_window_title(
                 'Wheel shaping -- Stage {0} live plots'.format(stage))
         except Exception:
             pass
 
-        self._did_initial_layout = False
         self._setup_raster_axes()
         self._setup_progress_axes()
-        self._setup_outcome_axes()
         self._setup_reward_licks_axes()
         self._setup_lick_timeline_axes()
         if stage == 2:
             self._setup_direction_ratio_axes()
         if stage in (3, 4):
-            self._setup_click_raster_axes()
-            self._setup_abort_epoch_axes()
-            self._setup_response_time_axes()
             self._setup_accuracy_axes()
             self._setup_engagement_axes()
+            self._setup_sidebias_axes()
+            self._setup_percent_outcome_axes()
+            self._setup_psychometric_axes()
+            self._setup_reaction_time_axes()
         self._redraw()
 
     # --- data intake -------------------------------------------------------------------------------
 
     def add_trial(self, side, magnitude_deg, threshold_deg, outcome, gain_mult=None, iti_s=None,
                    direction_ratio=None, lick_times_abs=None, reward_time_abs=None,
-                   trial_type=None, abort_epoch=None, response_time_s=None,
-                   click_times_l=None, click_times_r=None, in_trial_threshold_deg=None):
+                   trial_type=None, in_trial_threshold_deg=None, p_right_target=None,
+                   response_time_s=None, click_diff=None):
         """ Call once per trial. side='L'/'R' (whichever direction the movement was, even if
         below threshold -- use the larger-magnitude direction for a NoMovement trial); magnitude_deg
         is the signed peak displacement that trial; outcome is 'Rewarded'/'Withheld'/'NoMovement'
@@ -247,19 +324,25 @@ class WheelShapingPlots(object):
         Stage 3/4 only, all optional: trial_type ('main'/'warmup'/'repeat') -- feeds the accuracy
         line's marker style and excludes non-'main' trials from the rolling-accuracy/advancement
         computation shown here (the task script's own advancement gate is the authority, this is
-        display only). abort_epoch ('cue'/'delay', only when outcome=='Abort') -- feeds the
-        abort-by-epoch tally. response_time_s (go-cue to threshold-crossing, only for a genuine
-        response) -- feeds the correct/incorrect response-time histogram. click_times_l/
-        click_times_r (this trial's own generator-relative click times, i.e. straight from
-        CLICK_TIMES_L/R) -- feeds the click raster. in_trial_threshold_deg -- if given (and
-        different from the previous call), redraws the raster's extra abort-threshold reference
-        lines. """
+        display only). in_trial_threshold_deg -- if given (and different from the previous call),
+        redraws the raster's extra abort-threshold reference lines. p_right_target -- this trial's
+        own P(right) the task script's side-draw actually used
+        (0.5 for a fresh coin flip, or debiasing.VAR_DEBIAS_REPEAT_PROB/its complement when biased
+        toward/away from repeating the previous error's side) -- feeds the side-bias panel, along
+        with `side` itself for the rolling empirical R-fraction. Called for EVERY trial including
+        Abort (an abort still had a side presented/drawn), unlike most other Stage 3/4-only
+        parameters above which only apply to trials that reach a real response. response_time_s
+        (go-cue to threshold-crossing, only for a genuine Reward/NoReward response) -- feeds the
+        correct/incorrect reaction-time panel. click_diff (signed click-count evidence for this
+        trial, e.g. trial_clicks['realized_delta'] = n_right-n_left, only for a genuine
+        Reward/NoReward response) -- feeds the psychometric curve, paired internally with whether
+        the response was actually to the right (derived from side+outcome, not a separate
+        parameter). """
         self._session_trial_count += 1
         self._trial_idx.append(self._session_trial_count)
         signed_mag = magnitude_deg if side == 'R' else -magnitude_deg
         self._magnitude_deg.append(signed_mag)
         self._side_colors.append(OUTCOME_COLORS.get(outcome, 'gray'))
-        self._outcome_counts[outcome] = self._outcome_counts.get(outcome, 0) + 1
 
         self._cur_threshold_deg = threshold_deg
         self._cur_gain_mult = gain_mult
@@ -279,27 +362,34 @@ class WheelShapingPlots(object):
 
         if self._stage in (3, 4):
             row = self._session_trial_count
-            # NOT `click_times_l or []` -- click_times_l/r are commonly numpy arrays straight from
-            # generate_trial_clicks() (see stage3_clicks_direction.py), and `array or []` raises
-            # ValueError ("truth value of an array with more than one element is ambiguous") for
-            # any array with 2+ elements. `is None` is the only safe emptiness check here.
-            for t in ([] if click_times_l is None else click_times_l):
-                self._click_times.append((row, t, 'L'))
-            for t in ([] if click_times_r is None else click_times_r):
-                self._click_times.append((row, t, 'R'))
 
             if outcome == 'Abort':
-                key = abort_epoch or 'unknown'
-                self._abort_epoch_counts[key] = self._abort_epoch_counts.get(key, 0) + 1
                 self._consecutive_aborts += 1
             else:
                 self._consecutive_aborts = 0
 
+            outcome4_key = {'Reward': 'correct', 'NoReward': 'incorrect',
+                             'NoResponse': 'no_response', 'Abort': 'abort'}.get(outcome)
+            if outcome4_key is not None:
+                self._outcome4_counts[outcome4_key] += 1
+
+            if p_right_target is not None:
+                self._sidebias_trial_idx.append(row)
+                self._p_right_target_series.append(p_right_target)
+                self._side_history.append(side)
+                window = self._side_history[-20:]
+                self._recent_right_frac_series.append(
+                    sum(1 for s in window if s == 'R') / float(len(window)))
+
             if response_time_s is not None:
-                if outcome in ('Reward',):
-                    self._response_times_correct.append(response_time_s)
-                elif outcome in ('NoReward',):
-                    self._response_times_incorrect.append(response_time_s)
+                if outcome == 'Reward':
+                    self._reaction_times_correct.append(response_time_s)
+                elif outcome == 'NoReward':
+                    self._reaction_times_incorrect.append(response_time_s)
+
+            if click_diff is not None and outcome in ('Reward', 'NoReward'):
+                chose_right = (side == 'R') if outcome == 'Reward' else (side == 'L')
+                self._psychometric_points.append((click_diff, chose_right))
 
             correct = 1.0 if outcome == 'Reward' else (0.0 if outcome == 'NoReward' else None)
             ttype = trial_type or 'main'
@@ -456,22 +546,6 @@ class WheelShapingPlots(object):
             text.set_position((frac + 0.02, i))
             text.set_text(label)
 
-    # --- outcome tally (cheap cla()+bar, matches existing convention for low-cardinality tallies) --
-
-    def _setup_outcome_axes(self):
-        _style_axes(self._axes['outcome'])
-
-    def _redraw_outcome(self, ax):
-        ax.cla()
-        labels = list(self._outcome_counts.keys())
-        counts = [self._outcome_counts[l] for l in labels]
-        colors = [OUTCOME_COLORS.get(l, 'gray') for l in labels]
-        if labels:
-            ax.bar(labels, counts, color=colors)
-        ax.set_ylabel('trial count')
-        ax.set_title('Outcome tally')
-        _style_axes(ax)
-
     # --- reward-aligned lick raster (persistent: incremental eventplot+scatter, copied from
     # live_plots_lookback.py's own already-optimized _redraw_reward_lick_raster()) ------------------
 
@@ -479,8 +553,9 @@ class WheelShapingPlots(object):
         ax = self._axes['reward_licks']
         ax.axvline(0.0, color='black', linestyle='-', linewidth=0.8)
         ax.set_ylim(1, -1)
-        ax.set_xlabel('time relative to reward delivery (s)')
-        ax.set_ylabel('rewarded trial (top = first)')
+        ax.set_xlabel('time rel. to reward (s)', fontsize=8)
+        ax.set_ylabel('rewarded trial', fontsize=8)
+        ax.tick_params(axis='both', labelsize=7)
         _style_axes(ax)
 
     def _redraw_reward_licks(self, ax):
@@ -494,7 +569,12 @@ class WheelShapingPlots(object):
         self._lickraster_rendered_n = n
         if n:
             ax.set_ylim(max(n, 1), -1)
-        ax.set_title('Lick raster -- rewarded trials (n={0})'.format(n))
+        n_consumed = sum(1 for row in self._reward_lick_rows if row)
+        if self._reward_ul is not None:
+            ax.set_title('Lick raster (n={0}, {1:.0f}uL consumed)'.format(
+                n, self._reward_ul * n_consumed), fontsize=8)
+        else:
+            ax.set_title('Lick raster (n={0})'.format(n), fontsize=8)
 
     # --- session-wide lick timeline (persistent: two scatter artists, offsets replaced each call,
     # copied from live_plots_lookback.py's own already-optimized _redraw_session_lick()) ------------
@@ -545,99 +625,27 @@ class WheelShapingPlots(object):
         self._direction_ratio_line.set_data(x, self._direction_ratio_series)
         ax.set_xlim(0, max(10, x[-1] + 1))
 
-    # --- click raster (Stage 3/4 only, persistent scatter, small local port of
-    # poisson_clicks_test/live_plots.py's own raster drawing -- duplicated, not imported, see
-    # module docstring) --------------------------------------------------------------------------
-
-    def _setup_click_raster_axes(self):
-        ax = self._axes['click_raster']
-        self._click_scatter_l = ax.scatter([], [], s=4, color='tab:blue', label='L', alpha=0.7)
-        self._click_scatter_r = ax.scatter([], [], s=4, color='tab:red', label='R', alpha=0.7)
-        ax.axvline(0.0, color='black', linewidth=0.6)
-        ax.set_xlabel('time from stimulus onset (s)')
-        ax.set_ylabel('trial')
-        ax.set_title('Click raster (last {0} trials)'.format(_CLICK_RASTER_MAX_TRIALS))
-        ax.legend(fontsize=7, loc='upper right', frameon=False)
-        _style_axes(ax)
-
-    def _redraw_click_raster(self, ax):
-        n = len(self._click_times)
-        if n == self._click_rendered_n:
-            return
-        self._click_rendered_n = n
-        if not self._click_times:
-            return
-        # Only the trailing window's own trials are kept on screen -- same "bounded redraw cost
-        # regardless of session length" principle as MAX_PLOTTED_POINTS elsewhere in this codebase.
-        min_row = max(1, self._session_trial_count - _CLICK_RASTER_MAX_TRIALS + 1)
-        visible = [(row, t, side) for row, t, side in self._click_times if row >= min_row]
-        left = [(t, row) for row, t, side in visible if side == 'L']
-        right = [(t, row) for row, t, side in visible if side == 'R']
-        if left:
-            self._click_scatter_l.set_offsets(left)
-        if right:
-            self._click_scatter_r.set_offsets(right)
-        ax.set_ylim(self._session_trial_count + 1, max(min_row - 1, 0))
-        ax.set_xlim(-0.05, 0.3)
-
-    # --- abort-by-epoch tally (Stage 3/4 only, cheap cla()+bar, same low-cardinality-tally
-    # convention as the outcome panel) -------------------------------------------------------------
-
-    def _setup_abort_epoch_axes(self):
-        _style_axes(self._axes['abort_epoch'])
-
-    def _redraw_abort_epoch(self, ax):
-        ax.cla()
-        labels = list(self._abort_epoch_counts.keys())
-        counts = [self._abort_epoch_counts[l] for l in labels]
-        colors = [ABORT_EPOCH_COLORS.get(l, 'gray') for l in labels]
-        if labels:
-            ax.bar(labels, counts, color=colors)
-        ax.set_ylabel('abort count')
-        ax.set_title('Aborts by epoch (consecutive: {0})'.format(self._consecutive_aborts))
-        _style_axes(ax)
-
-    # --- response-time histogram (Stage 3/4 only, cheap cla()+hist -- session-scale trial counts
-    # make a full rebuild cheap, same reasoning already used for the outcome tally) -----------------
-
-    def _setup_response_time_axes(self):
-        _style_axes(self._axes['response_time'])
-
-    def _redraw_response_time(self, ax):
-        ax.cla()
-        all_times = self._response_times_correct + self._response_times_incorrect
-        if all_times:
-            bins = min(20, max(5, len(all_times) // 2))
-            if self._response_times_correct:
-                ax.hist(self._response_times_correct, bins=bins, alpha=0.6, color='tab:green',
-                        label='correct')
-            if self._response_times_incorrect:
-                ax.hist(self._response_times_incorrect, bins=bins, alpha=0.6, color='tab:red',
-                        label='incorrect')
-            ax.legend(fontsize=7, loc='upper right', frameon=False)
-        ax.set_xlabel('go-cue to threshold-crossing (s)')
-        ax.set_ylabel('trial count')
-        ax.set_title('Response time by outcome')
-        _style_axes(ax)
-
     # --- rolling accuracy (Stage 3/4 only, persistent line + per-trial-type marker scatter) --------
 
     def _setup_accuracy_axes(self):
         ax = self._axes['accuracy']
-        self._accuracy_line, = ax.plot([], [], color='black', linewidth=1.2,
-                                        label='rolling accuracy (main, window=20)')
+        # Black rolling line + 70%/50% reference lines are self-explanatory from the title/axis
+        # alone -- only the trial-type marker colors are genuinely ambiguous without a legend, so
+        # that's all the legend shows now (was overlapping the plot area at half-width otherwise).
+        self._accuracy_line, = ax.plot([], [], color='black', linewidth=1.2)
         self._accuracy_scatters = {}
         for ttype, marker in TRIAL_TYPE_MARKERS.items():
             self._accuracy_scatters[ttype] = ax.scatter(
                 [], [], s=14, marker=marker, alpha=0.5,
                 color='tab:blue' if ttype == 'main' else 'tab:gray', label=ttype)
-        ax.axhline(0.70, color='gray', linestyle=':', linewidth=0.8, label='70% advancement gate')
+        ax.axhline(0.70, color='gray', linestyle=':', linewidth=0.8)
         ax.axhline(0.5, color='#cccccc', linewidth=0.6)
         ax.set_ylim(0, 1)
-        ax.set_xlabel('trial')
-        ax.set_ylabel('accuracy (gamma=+-1.0)')
-        ax.set_title('Accuracy -- warmup/repeat shown but excluded from the rolling line')
-        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=2)
+        ax.set_xlabel('trial', fontsize=8)
+        ax.set_ylabel('accuracy', fontsize=8)
+        ax.set_title('Rolling accuracy (main trials, w=20; dotted=70% gate)', fontsize=8)
+        ax.tick_params(axis='both', labelsize=7)
+        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=3)
         _style_axes(ax)
 
     def _redraw_accuracy(self, ax):
@@ -674,23 +682,131 @@ class WheelShapingPlots(object):
                 transform=ax.transAxes)
         ax.set_title('Session engagement')
 
+    # --- outcome percentage bars (Stage 3/4 only, cheap cla()+bar -- small panel, whole-session
+    # totals across all 4 trial-level outcomes including Abort/NoResponse, which the accuracy
+    # panel's rolling correct/incorrect line doesn't cover at all) -------------------------------
+
+    def _setup_percent_outcome_axes(self):
+        ax = self._axes['percent_outcome']
+        labels = [_OUTCOME4_LABELS[k] for k in _OUTCOME4_ORDER]
+        colors = [_OUTCOME4_COLORS[k] for k in _OUTCOME4_ORDER]
+        self._outcome4_bars = ax.bar(labels, [0] * len(labels), color=colors)
+        ax.set_ylim(0, 100)
+        ax.set_ylabel('% of trials', fontsize=8)
+        ax.set_title('Outcome breakdown', fontsize=9)
+        ax.tick_params(axis='both', labelsize=7)
+        _style_axes(ax)
+
+    def _redraw_percent_outcome(self, ax):
+        total = sum(self._outcome4_counts.values())
+        for key, bar in zip(_OUTCOME4_ORDER, self._outcome4_bars):
+            bar.set_height(100.0 * self._outcome4_counts[key] / total if total else 0.0)
+
+    # --- psychometric curve (Stage 3/4 only, small panel, cheap cla()+scatter -- P(chose right) vs.
+    # signed click-count evidence, binned; see add_trial()'s own click_diff docstring) --------------
+
+    def _setup_psychometric_axes(self):
+        ax = self._axes['psychometric']
+        self._psychometric_scatter = ax.scatter([], [], s=24, color='tab:blue', zorder=3)
+        ax.axhline(0.5, color='#cccccc', linewidth=0.6)
+        ax.axvline(0.0, color='#cccccc', linewidth=0.6)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlabel('click evidence (n_right-n_left)', fontsize=8)
+        ax.set_ylabel('P(chose right)', fontsize=8)
+        ax.set_title('Psychometric curve', fontsize=9)
+        ax.tick_params(axis='both', labelsize=7)
+        _style_axes(ax)
+
+    def _redraw_psychometric(self, ax):
+        points = self._psychometric_points
+        if not points:
+            return
+        diffs = [d for d, _ in points]
+        lo, hi = min(diffs), max(diffs)
+        if lo == hi:
+            # Only one evidence level seen so far (e.g. early in an AOS-only session) -- a single
+            # point, not a degenerate/zero-width binning range.
+            frac_right = sum(1 for _, cr in points if cr) / float(len(points))
+            self._psychometric_scatter.set_offsets([[lo, frac_right]])
+            ax.set_xlim(lo - 1, lo + 1)
+            return
+        n_bins = min(10, max(3, len(set(diffs))))
+        edges = [lo + i * (hi - lo) / n_bins for i in range(n_bins + 1)]
+        bin_x, bin_y = [], []
+        for i in range(n_bins):
+            lo_e, hi_e = edges[i], edges[i + 1]
+            in_bin = [(d, cr) for d, cr in points
+                      if d >= lo_e and (d < hi_e or i == n_bins - 1)]
+            if in_bin:
+                bin_x.append(sum(d for d, _ in in_bin) / len(in_bin))
+                bin_y.append(sum(1 for _, cr in in_bin if cr) / float(len(in_bin)))
+        self._psychometric_scatter.set_offsets(list(zip(bin_x, bin_y)))
+        margin = max(0.05 * (hi - lo), 1)
+        ax.set_xlim(lo - margin, hi + margin)
+
+    # --- reaction time, correct vs. incorrect (Stage 3/4 only, small panel, cheap cla()+hist) ------
+
+    def _setup_reaction_time_axes(self):
+        _style_axes(self._axes['reaction_time'])
+
+    def _redraw_reaction_time(self, ax):
+        ax.cla()
+        all_times = self._reaction_times_correct + self._reaction_times_incorrect
+        if all_times:
+            bins = min(15, max(5, len(all_times) // 2))
+            if self._reaction_times_correct:
+                ax.hist(self._reaction_times_correct, bins=bins, alpha=0.6, color='tab:green',
+                        label='correct')
+            if self._reaction_times_incorrect:
+                ax.hist(self._reaction_times_incorrect, bins=bins, alpha=0.6, color='tab:red',
+                        label='incorrect')
+            ax.legend(fontsize=6, loc='upper right', frameon=False)
+        ax.set_xlabel('go-cue to threshold-crossing (s)', fontsize=8)
+        ax.set_ylabel('count', fontsize=8)
+        ax.set_title('Reaction time', fontsize=9)
+        ax.tick_params(axis='both', labelsize=7)
+        _style_axes(ax)
+
+    # --- side-bias / debiasing (Stage 3/4 only) -- adapted from poisson_clicks_test/
+    # live_plots_lookback.py's own "sidebias" panel, see add_trial()'s own p_right_target docstring
+    # for how Stage 3/4's simpler (binary repeat-after-error) rule maps onto this ----------------------
+
+    def _setup_sidebias_axes(self):
+        ax = self._axes['sidebias']
+        self._sidebias_line_target, = ax.plot(
+            [], [], color='tab:purple', linewidth=1.2, label='target')
+        self._sidebias_line_recent, = ax.plot(
+            [], [], color='tab:blue', linewidth=1.0, alpha=0.8, label='empirical (w=20)')
+        ax.axhline(0.5, color='#cccccc', linewidth=0.6)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel('trial', fontsize=8)
+        ax.set_ylabel('P(right)', fontsize=8)
+        ax.set_title('Side bias / debiasing', fontsize=9)
+        ax.tick_params(axis='both', labelsize=7)
+        ax.legend(fontsize=6, loc='lower right', frameon=False)
+        _style_axes(ax)
+
+    def _redraw_sidebias(self, ax):
+        if self._sidebias_trial_idx:
+            self._sidebias_line_target.set_data(self._sidebias_trial_idx, self._p_right_target_series)
+            self._sidebias_line_recent.set_data(self._sidebias_trial_idx, self._recent_right_frac_series)
+        if self._trial_idx:
+            ax.set_xlim(0, max(10, self._trial_idx[-1] + 1))
+
     # --- unified redraw ------------------------------------------------------------------------------
 
     def _redraw(self):
         self._redraw_raster(self._axes['raster'])
         self._redraw_progress(self._axes['progress'])
-        self._redraw_outcome(self._axes['outcome'])
         self._redraw_reward_licks(self._axes['reward_licks'])
         self._redraw_lick_timeline(self._axes['lick_timeline'])
         if self._stage == 2:
             self._redraw_direction_ratio(self._axes['direction_ratio'])
         if self._stage in (3, 4):
-            self._redraw_click_raster(self._axes['click_raster'])
-            self._redraw_abort_epoch(self._axes['abort_epoch'])
-            self._redraw_response_time(self._axes['response_time'])
             self._redraw_accuracy(self._axes['accuracy'])
             self._redraw_engagement(self._axes['engagement'])
-        if not self._did_initial_layout:
-            self._fig.tight_layout()
-            self._did_initial_layout = True
+            self._redraw_sidebias(self._axes['sidebias'])
+            self._redraw_percent_outcome(self._axes['percent_outcome'])
+            self._redraw_psychometric(self._axes['psychometric'])
+            self._redraw_reaction_time(self._axes['reaction_time'])
         plt.pause(0.001)

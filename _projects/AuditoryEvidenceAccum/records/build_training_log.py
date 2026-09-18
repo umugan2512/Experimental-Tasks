@@ -203,6 +203,9 @@ def summarize_session(path):
     staircase_advanced_this_session = session_csv_parser.find_val_str_backward(
         trials, session_vals, 'STAIRCASE_ACTIVE_THIS_SESSION')
     git_commit = session_csv_parser.find_val_str_backward(trials, session_vals, 'GIT_COMMIT')
+    target_spl_db = session_csv_parser.find_val_backward(trials, session_vals, 'TARGET_SPL_DB')
+    left_freq_hz = session_csv_parser.find_val_backward(trials, session_vals, 'LEFT_FREQ_HZ')
+    right_freq_hz = session_csv_parser.find_val_backward(trials, session_vals, 'RIGHT_FREQ_HZ')
 
     # ITI is a native STATE (the 'ITI' state's own logged duration), not a custom VAL row --
     # constant within a session in both stages, so any visited trial's value works; take the last.
@@ -274,6 +277,9 @@ def summarize_session(path):
         'session_water_ul': session_water_ul,
         'staircase_advanced_this_session': staircase_advanced_this_session,
         'git_commit': git_commit,
+        'target_spl_db': target_spl_db,
+        'left_freq_hz': left_freq_hz,
+        'right_freq_hz': right_freq_hz,
         'session_csv_path': path,
         'session_struct_path': session_struct_path,
     }
@@ -419,6 +425,9 @@ def combine_group(group):
         'session_water_ul': sum(water_vals) if water_vals else None,
         'staircase_advanced_this_session': last['staircase_advanced_this_session'],
         'git_commit': last['git_commit'],
+        'target_spl_db': last['target_spl_db'],
+        'left_freq_hz': last['left_freq_hz'],
+        'right_freq_hz': last['right_freq_hz'],
         'session_csv_path': '; '.join(s['session_csv_path'] for s in group),
         'session_struct_path': None,   # filled in by the caller
     }
@@ -506,6 +515,9 @@ COLUMNS = [
     ('session_water_ul', 'Session Water (uL)'),
     ('staircase_advanced_this_session', 'Staircase Advanced (Stage 4)'),
     ('git_commit', 'Git Commit'),
+    ('target_spl_db', 'Target SPL (dB)'),
+    ('left_freq_hz', 'Left Freq (Hz)'),
+    ('right_freq_hz', 'Right Freq (Hz)'),
     ('num_sessions', 'Num. Sessions'),
     ('notes', 'Notes'),                       # MANUAL -- never written for an existing row
     ('session_started', 'Session started'),   # hidden key -- `; `-joined member timestamps

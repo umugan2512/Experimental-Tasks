@@ -71,7 +71,7 @@ import session_csv_parser
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
-from dot_display import DotDisplay
+import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
 
@@ -133,11 +133,13 @@ VAR_ITI_S = 0.5                     # doc: "short (~0.5s)"
 
 VAR_THRESHOLD_FINAL_DEG = 35        # matches this project's established final-task convention
                                      # (VAR_RIGHT_THRESHOLD_DEG elsewhere)
-VAR_THRESHOLD_STARTING_FRACTION = 0.05   # only used the very first time this subject runs Stage 1
+VAR_THRESHOLD_STARTING_FRACTION = 0.10   # only used the very first time this subject runs Stage 1
                                      # (StageState default) -- doc: "~15-25% of final" was the OLD
                                      # fixed-value design; per later instruction, the threshold now
                                      # GROWS across sessions instead (see staircase.
-                                     # grow_stage1_threshold()), starting small (~1.75deg) and
+                                     # grow_stage1_threshold()), starting at 10% (~3.5deg, raised
+                                     # from an original 5%/1.75deg after real bench testing showed
+                                     # 1.75deg was too easily crossed by incidental drift) and
                                      # reaching Stage 2's own 20% starting point by the time Stage 1
                                      # ends. Fixed for the whole SESSION (grows only between
                                      # sessions, not per-trial) -- read from persisted state below.
@@ -156,10 +158,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes (doc
 VAR_DOT_DISAPPEAR_MIN_S = 0.4       # crossing->offset relationships should never change during
 VAR_DOT_DISAPPEAR_MAX_S = 0.9       # training")
 
-VAR_DOT_SCREEN_INDEX = 1            # second monitor; falls back to 0 with a printed warning
-VAR_DOT_DIAMETER_PX = 60            # UNCONFIRMED against training_protocol.md SS1.2's 3-4 visual-
-                                     # deg spec -- same flag as every other dot-stimulus task in
-                                     # this codebase (needs monitor size + viewing distance)
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9         # SS1.3: place the threshold at ~90% of edge azimuth
@@ -221,8 +219,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
@@ -252,7 +249,8 @@ render_interval = 1.0 / VAR_RENDER_HZ
 
 bench_plots = WheelShapingPlots(
     stage=1, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
-    prev_session_values={'threshold_deg': cur_threshold_deg, 'gain_mult': cur_gain_mult})
+    prev_session_values={'threshold_deg': cur_threshold_deg, 'gain_mult': cur_gain_mult},
+    reward_ul=VAR_REWARD_UL)
 
 # --- trial loop -----------------------------------------------------------------------------------
 
@@ -293,16 +291,32 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
 
         sma = StateMachine(my_bpod)
 
+        # Split into PreDotDelay (LED/rotary arm here, but no neg_event/pos_event wired -- a
+        # crossing during this window is still logged by Bpod as a raw event, it just can't trigger
+        # a transition) + WheelPeriod (the real response-collection state, entered only once
+        # dot_onset_delay has actually elapsed) -- fixes a real bug where a brisk turn right as
+        # quiescence released could cross threshold and fire Reward before the dot had rendered at
+        # all, since thresholds were armed and Bpod was already listening within ms of send_epoch,
+        # well before the dot's own 100-200ms J1 onset delay. Both states are driven by the same
+        # dot_onset_delay value the render loop uses for dot_visible, and Bpod's own state timer is
+        # native/hardware-timed, so this keeps reward gating off a real event/state transition
+        # rather than a background-thread timer (this codebase's own established principle).
+        sma.add_state(
+            state_name='PreDotDelay',
+            state_timer=dot_onset_delay,
+            state_change_conditions={Bpod.Events.Tup: 'WheelPeriod'},
+            output_actions=[(rotary_channel, reset_positions_trigger_id),
+                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+
         sma.add_state(
             state_name='WheelPeriod',
-            state_timer=VAR_RESPONSE_TIMEOUT_S,
+            state_timer=VAR_RESPONSE_TIMEOUT_S - dot_onset_delay,
             state_change_conditions={
                 neg_event: 'Reward',
                 pos_event: 'Reward',
                 Bpod.Events.Tup: 'NoMovement',
             },
-            output_actions=[(rotary_channel, reset_positions_trigger_id),
-                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[])
 
         sma.add_state(
             state_name='Reward',
@@ -352,11 +366,12 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
                 pos = rotary.current_position()
 
             if dot_visible and not frozen:
+                dot.set_position_deg(pos)   # always render first, even on the frame threshold is
+                                             # already crossed -- otherwise the dot jumps straight
+                                             # from invisible to frozen with no travel shown.
                 if pos <= -cur_threshold_deg or pos >= cur_threshold_deg:
                     frozen = True
                     frozen_at = now
-                else:
-                    dot.set_position_deg(pos)   # live tracking, pre-threshold
 
             if frozen and (now - frozen_at) >= disappear_delay_s:
                 dot.clear()

@@ -1,0 +1,20 @@
+{
+    "__CREATED-ON__": "2026-09-18 11:08:47.756123",
+    "__DEF-TEXT__": "This file contains information about a PyBpod experiment setup.",
+    "__DEF-URL__": "http://pybpod.readthedocs.org",
+    "__EXTERNAL-REF__": [
+        "431035f3-072f-48f2-bb28-b84e277ea6ef",
+        "e8ad6561-0b64-48a6-b7fa-10f0543f7938"
+    ],
+    "__SOFTWARE__": "PyBpod GUI API v1.8.2",
+    "__UPDATED-ON__": "2026-09-18 11:08:47.756123",
+    "__UUID4__": "fb64feac-f2ae-47d1-8f21-f76542d24b7a",
+    "board": "Box3",
+    "detached": false,
+    "subjects": [
+        "test_stage2"
+    ],
+    "task": "stage2_threshold_staircase",
+    "update-variables": false,
+    "variables": []
+}

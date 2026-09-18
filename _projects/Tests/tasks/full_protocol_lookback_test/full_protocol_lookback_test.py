@@ -135,7 +135,7 @@ from live_plots_lookback import LookbackBenchPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
 import hifi_setup
-from dot_display import DotDisplay, MiddleScreenDotDisplay
+import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
 import session_struct_export
@@ -153,6 +153,12 @@ VAR_RIGHT_THRESHOLD_DEG = 35        # IBL convention
 VAR_CUE_ABORT_THRESHOLD_DEG = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10deg -- looser than quiescence,
                                                                  # still much tighter than a choice turn
 VAR_RESPONSE_TIMEOUT = 5
+
+VAR_TARGET_SPL_DB = 70.0            # not specified anywhere -- flagged/tunable. Waveform amplitude
+                                     # is derived from this via Calibration/sound_calibration.py's
+                                     # fitted curve (see VAR_LEFT_AMPLITUDE_SCALE/
+                                     # VAR_RIGHT_AMPLITUDE_SCALE below).
+
 VAR_REWARD_UL = 4.0                 # target reward volume -- valve open time is derived from this
                                      # via Calibration/liquid_calibration.py's own fitted curve
                                      # (falls back to a hardcoded 0.1s if no calibration data/fit
@@ -169,24 +175,6 @@ VAR_POLL_HZ = 100                    # that the poll thread keeps up without del
                                       # was actually used when reporting results from a real session.
 VAR_ROTARY_USB_PORT = None
 
-VAR_USE_MIDDLE_SCREEN_ONLY = True   # False = DotDisplay (full/spanned screen). True =
-                                     # MiddleScreenDotDisplay (confine the dot to one column of a
-                                     # multi-monitor-spanned Qt screen -- see dot_display.py and
-                                     # dot_wheel_midscreen_test.py's own docstrings for why this
-                                     # rig needs it).
-VAR_DOT_SCREEN_INDEX = 1             # second monitor (or the combined spanned screen when
-                                     # VAR_USE_MIDDLE_SCREEN_ONLY is True); falls back to 0 with a
-                                     # warning if not found.
-VAR_N_PHYSICAL_MONITORS_IN_SPAN = 3  # only used when VAR_USE_MIDDLE_SCREEN_ONLY is True -- see
-                                     # dot_wheel_midscreen_test.py (confirmed via screens(): the
-                                     # combined Qt screen on this rig is 6144px wide, 6144/3 =
-                                     # 2048px per physical panel).
-VAR_ACTIVE_MONITOR_INDEX = 1         # only used when VAR_USE_MIDDLE_SCREEN_ONLY is True -- 0=left,
-                                     # 1=middle, 2=right.
-VAR_DOT_DIAMETER_PX = 60             # UNCONFIRMED against training_protocol.md SS1.2's 3-4 visual-
-                                     # deg spec -- guessed pixel value, not derived from it (needs
-                                     # monitor size + viewing distance -- see dot_display.py's
-                                     # visual_deg_to_px() for the one-line fix once those exist).
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0                    # full black, per training_protocol.md SS1.2's default (doc also
                                      # floats a sub-maximal-contrast option -- flagged, not built here)
@@ -282,22 +270,20 @@ VAR_GO_CUE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, confirmed as the go-c
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
 
+VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibrated_amplitudes(
+    VAR_TARGET_SPL_DB, click_train.VAR_LEFT_FREQ_HZ, click_train.VAR_RIGHT_FREQ_HZ)
+
 my_bpod.register_value('LEFT_THRESHOLD_DEG', VAR_LEFT_THRESHOLD_DEG)
 my_bpod.register_value('RIGHT_THRESHOLD_DEG', VAR_RIGHT_THRESHOLD_DEG)
+my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
+my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-if VAR_USE_MIDDLE_SCREEN_ONLY:
-    dot = MiddleScreenDotDisplay(screen_index=VAR_DOT_SCREEN_INDEX,
-                                  n_segments=VAR_N_PHYSICAL_MONITORS_IN_SPAN,
-                                  active_segment_index=VAR_ACTIVE_MONITOR_INDEX,
-                                  diameter_px=VAR_DOT_DIAMETER_PX,
-                                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
-else:
-    dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                      background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
@@ -398,7 +384,10 @@ while trial < VAR_MAX_TRIALS:
         stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
         trial_clicks = click_train.generate_trial_clicks(
             difficulty, side, rng=np.random.RandomState(stim_seed))
-        left_wave, right_wave = click_train.build_waveform(trial_clicks, hifi.sampling_rate)
+        left_wave, right_wave = click_train.build_waveform(
+            trial_clicks, hifi.sampling_rate,
+            amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
+            amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 

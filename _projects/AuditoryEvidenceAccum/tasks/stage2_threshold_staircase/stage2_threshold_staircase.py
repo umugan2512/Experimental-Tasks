@@ -70,7 +70,7 @@ from direction_tracker import DirectionRatioTracker
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
 import rotary_setup
-from dot_display import DotDisplay
+import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
 
@@ -139,8 +139,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2
 VAR_DOT_DISAPPEAR_MIN_S = 0.4
 VAR_DOT_DISAPPEAR_MAX_S = 0.9
 
-VAR_DOT_SCREEN_INDEX = 1
-VAR_DOT_DIAMETER_PX = 60            # same unconfirmed-placeholder flag as every dot-stimulus task
 VAR_DOT_BACKGROUND_GRAY = 128
 VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9
@@ -204,8 +202,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = DotDisplay(screen_index=VAR_DOT_SCREEN_INDEX, diameter_px=VAR_DOT_DIAMETER_PX,
-                  background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
 dot.show()
 dot.clear()
 
@@ -238,7 +235,8 @@ print("Spout should be at approximately {0:.1f}mm retracted from Stage 1's posit
 bench_plots = WheelShapingPlots(
     stage=2, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG,
-                          'iti_s': cur_iti_s})
+                          'iti_s': cur_iti_s},
+    reward_ul=VAR_REWARD_UL)
 
 # --- trial loop -----------------------------------------------------------------------------------
 

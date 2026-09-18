@@ -131,8 +131,11 @@ class DotDisplay(object):
         self._deg_to_px_gain = deg_to_px_gain
 
     def clear(self):
-        """ Blank/neutral screen -- call between trials, before a decision period starts. """
+        """ Blank/neutral screen -- call between trials, before a decision period starts. Also
+        resets the x-offset back to center, so a reappearing dot never starts from a stale
+        off-center position left over from a previous trial's frozen spot. """
         self._widget.set_dot_visible(False)
+        self._widget.set_x_offset(0)
 
     def set_position_deg(self, wheel_position_deg):
         """ Repositions the (already-visible) dot from the current wheel position, using
@@ -186,7 +189,10 @@ class _MiddleOnlyDotWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(0, 0, 0))   # whole spanned window black by default
+        # Inactive segments solid black, per explicit instruction -- reversed back from an earlier
+        # mean-gray fix (also per explicit instruction at the time). Only the active column below
+        # gets the real mean-gray background; the two unused physical monitors stay black.
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
         x0, w = self._active_rect()
         bg = self._background_gray
         painter.fillRect(x0, 0, w, self.height(), QColor(bg, bg, bg))
@@ -256,8 +262,11 @@ class MiddleScreenDotDisplay(object):
 
     def clear(self):
         """ Blank/neutral active column (rest of the window stays black regardless) -- call
-        between trials, before a decision period starts. """
+        between trials, before a decision period starts. Also resets the x-offset back to center,
+        so a reappearing dot never starts from a stale off-center position left over from a
+        previous trial's frozen spot. """
         self._widget.set_dot_visible(False)
+        self._widget.set_x_offset(0)
 
     def set_position_deg(self, wheel_position_deg):
         """ Repositions the (already-visible) dot from the current wheel position, using
@@ -270,3 +279,62 @@ class MiddleScreenDotDisplay(object):
         """ Processes pending Qt events/repaints -- call repeatedly from an external polling loop
         instead of app.exec_() (which would block the calling thread). """
         self._app.processEvents()
+
+
+# --- rig-wide defaults + factory -------------------------------------------------------------------
+#
+# This rig's monitor geometry (three physical dot-stimulus monitors bonded into one combined Qt
+# screen, middle panel only actually used -- see MiddleScreenDotDisplay's own docstring) and dot
+# size are RIG properties, not per-experiment choices -- every dot-coupled task script across every
+# stage/project should show the dot on the same physical monitor at the same size. Before this,
+# each task script independently defined its own VAR_USE_MIDDLE_SCREEN_ONLY/VAR_DOT_SCREEN_INDEX/
+# VAR_N_PHYSICAL_MONITORS_IN_SPAN/VAR_ACTIVE_MONITOR_INDEX/VAR_DOT_DIAMETER_PX and its own
+# if/else DotDisplay-vs-MiddleScreenDotDisplay construction -- confirmed as a real, already-happened
+# drift risk: stage2_threshold_staircase.py, stage3_clicks_direction.py, stage4_resume_staircases.py,
+# and dot_wheel_test.py were all still constructing a plain, full-spanned DotDisplay (never updated
+# to match the middle-screen fix applied elsewhere), silently showing the dot smeared across all
+# three physical monitors on this rig instead of confined to the middle one. create_dot_display()
+# is the one place this rig's actual monitor/size configuration lives now -- a future
+# remounting/resizing only needs the DEFAULT_* constants below changed, not every task script
+# individually. Any script with a genuine reason to differ can still override any of the factory's
+# own parameters explicitly.
+DEFAULT_USE_MIDDLE_SCREEN_ONLY = True
+DEFAULT_DOT_SCREEN_INDEX = 1                  # the combined spanned Qt screen (or a genuine second
+                                               # monitor if DEFAULT_USE_MIDDLE_SCREEN_ONLY is ever
+                                               # flipped False); falls back to 0 with a warning if
+                                               # not found (see DotDisplay/MiddleScreenDotDisplay's
+                                               # own __init__).
+DEFAULT_N_PHYSICAL_MONITORS_IN_SPAN = 3       # confirmed via screens(): the combined Qt screen on
+                                               # this rig is 6144px wide, 6144/3 = 2048px/panel.
+DEFAULT_ACTIVE_MONITOR_INDEX = 1              # 0=left, 1=middle, 2=right -- middle panel only.
+DEFAULT_DOT_DIAMETER_PX = 60                  # UNCONFIRMED against training_protocol.md SS1.2's
+                                               # 3-4 visual-deg spec -- same flag every dot-stimulus
+                                               # script already carried locally.
+
+
+def create_dot_display(diameter_px=None, background_gray=128, dot_gray=0, screen_index=None,
+                        use_middle_screen_only=None, n_segments=None, active_segment_index=None):
+    """
+    The one place a task script should construct its dot display -- returns a MiddleScreenDotDisplay
+    or plain DotDisplay per this rig's own DEFAULT_* constants above (identical public method
+    surface either way, so callers never need to branch on which one they got). Every parameter
+    defaults to this module's own rig-wide constant; pass an explicit value only to deliberately
+    override it for one script. background_gray/dot_gray are NOT defaulted from a module-level
+    constant here (left as this function's own conventional 128/0, matching every existing caller)
+    since stimulus contrast is a per-experiment choice, not a rig property, unlike screen/size
+    selection.
+    """
+    diameter_px = DEFAULT_DOT_DIAMETER_PX if diameter_px is None else diameter_px
+    screen_index = DEFAULT_DOT_SCREEN_INDEX if screen_index is None else screen_index
+    use_middle_screen_only = (DEFAULT_USE_MIDDLE_SCREEN_ONLY if use_middle_screen_only is None
+                               else use_middle_screen_only)
+    n_segments = DEFAULT_N_PHYSICAL_MONITORS_IN_SPAN if n_segments is None else n_segments
+    active_segment_index = (DEFAULT_ACTIVE_MONITOR_INDEX if active_segment_index is None
+                             else active_segment_index)
+    if use_middle_screen_only:
+        return MiddleScreenDotDisplay(
+            screen_index=screen_index, n_segments=n_segments,
+            active_segment_index=active_segment_index, diameter_px=diameter_px,
+            background_gray=background_gray, dot_gray=dot_gray)
+    return DotDisplay(screen_index=screen_index, diameter_px=diameter_px,
+                       background_gray=background_gray, dot_gray=dot_gray)
