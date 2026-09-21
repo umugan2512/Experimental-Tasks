@@ -47,15 +47,26 @@ repeated-click-train playback shape `calibrate_sound.py` uses (not one continuou
 meter/the ear can't time-integrate a single 8ms click pip the way it does a sustained tone; see that
 file's own docstring), built from `click_train_v2.py`'s own click shape so it matches what a real
 task actually plays.
+
+**Camera check**: deliberately does NOT use `_shared/camera_recorder.py`'s `CameraRecorder` --
+that class always opens a `cv2.VideoWriter` and writes a real video file (plus a timestamps CSV on
+close) the moment its capture thread starts, with no preview-only mode; using it here would violate
+this whole tool's own "no data is ever saved" design just to look at a live feed. `CameraCheckThread`
+below is a small, local, preview-only capture loop (reuses `camera_recorder.discover_camera()` for
+the same handshake-probe camera discovery, but talks to `cv2.VideoCapture` directly and never opens
+a `VideoWriter` at all) -- opened lazily only while the preview is actually running, not held open
+for the tool's whole lifetime the way Bpod/rotary/HiFi are, since nothing else in this tool needs
+the camera connection to stay alive.
 """
 import os
 import sys
 import time
 import traceback
 
+import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtGui import QKeySequence, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QDoubleSpinBox,
     QPushButton, QLabel, QGroupBox, QMessageBox, QTextEdit, QShortcut)
@@ -67,6 +78,7 @@ sys.path.insert(0, os.path.join(_CALIBRATION_DIR, '..', '_projects', '_shared'))
 import rotary_setup
 import hifi_setup
 from bpod_trial_helpers import was_visited
+from camera_recorder import discover_camera
 from click_train_v2 import VAR_CLICK_DURATION_S, VAR_CLICK_RAMP_MS
 
 from pybpod_hifi_module.module_api import HiFiModule
@@ -87,6 +99,52 @@ VAR_CHECK_SPL_DB = 70.0          # reference target for the tone check -- matche
 VAR_DEFAULT_TONE_DURATION_S = 2.0
 VAR_TONE_ISI_S = 0.1             # fixed 10Hz click-train repeat rate, same as calibrate_sound.py's
                                   # own VAR_CALIBRATION_CLICK_ISI_S -- steady enough to judge by ear.
+VAR_CAMERA_FPS = 30.0            # preview-loop rate limit -- same "measure elapsed, sleep the
+                                  # remainder" throttle camera_recorder.py's own capture loop uses,
+                                  # for the same reason (cv2.VideoCapture.read() doesn't reliably
+                                  # block on every camera/backend combination).
+VAR_CAMERA_PREVIEW_WIDTH_PX = 400   # displayed preview width (aspect-preserved) -- caps the
+                                     # window's own size regardless of the camera's native
+                                     # resolution.
+
+
+class CameraCheckThread(QThread):
+    """ Continuously grabs frames from a USB camera and emits each one -- NO video file or
+    timestamps CSV is ever written (unlike `_shared/camera_recorder.py`'s `CameraRecorder`, which
+    always writes both; see module docstring for why that class isn't used here). Opens/releases
+    its own `cv2.VideoCapture` for the lifetime of one run() call only. """
+    frame_ready = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, camera_index, fps=VAR_CAMERA_FPS):
+        super(CameraCheckThread, self).__init__()
+        self.camera_index = camera_index
+        self.fps = fps
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        cap = cv2.VideoCapture(self.camera_index)
+        try:
+            if not cap.isOpened():
+                self.error.emit('Could not open camera index {0}'.format(self.camera_index))
+                return
+            frame_interval = (1.0 / self.fps) if self.fps > 0 else 0
+            while not self._stop_requested:
+                loop_start = time.time()
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    self.frame_ready.emit(frame)
+                sleep_time = frame_interval - (time.time() - loop_start)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        except Exception as err:
+            print(traceback.format_exc(), flush=True)
+            self.error.emit(str(err))
+        finally:
+            cap.release()
 
 
 class LickMonitorThread(QThread):
@@ -150,6 +208,7 @@ class RigCheckWindow(QWidget):
         self._valve_open = False
         self._led_on = False
         self._lick_thread = None
+        self._camera_thread = None
 
         self._connect_hardware()
         self._build_ui()
@@ -302,6 +361,21 @@ class RigCheckWindow(QWidget):
         tone_group.setLayout(tone_form)
         layout.addWidget(tone_group)
 
+        camera_group = QGroupBox('5. Camera check')
+        camera_form = QFormLayout()
+        self.camera_button = QPushButton('Start Camera Preview')
+        self.camera_button.clicked.connect(self._on_camera_toggle)
+        camera_form.addRow(self.camera_button)
+        self.camera_status_label = QLabel('Not running.')
+        camera_form.addRow(self.camera_status_label)
+        self.camera_label = QLabel()
+        self.camera_label.setAlignment(Qt.AlignCenter)
+        self.camera_label.setMinimumHeight(VAR_CAMERA_PREVIEW_WIDTH_PX * 3 // 4)
+        self.camera_label.setStyleSheet('background-color: #222;')
+        camera_form.addRow(self.camera_label)
+        camera_group.setLayout(camera_form)
+        layout.addWidget(camera_group)
+
         self.setLayout(layout)
 
     # --- hardware status / live position ------------------------------------------------------------
@@ -448,9 +522,59 @@ class RigCheckWindow(QWidget):
             return
         self.tone_status_label.setText('Stopped.')
 
+    # --- camera check ----------------------------------------------------------------------------
+
+    def _on_camera_toggle(self):
+        if self._camera_thread is not None and self._camera_thread.isRunning():
+            self._camera_thread.stop()
+            self.camera_button.setEnabled(False)
+            self.camera_status_label.setText('Stopping...')
+            return
+
+        try:
+            camera_index = discover_camera()
+        except Exception as err:
+            print(traceback.format_exc(), flush=True)
+            QMessageBox.critical(self, 'Camera not found', str(err))
+            return
+
+        self._camera_thread = CameraCheckThread(camera_index)
+        self._camera_thread.frame_ready.connect(self._on_camera_frame)
+        self._camera_thread.error.connect(self._on_camera_error)
+        self._camera_thread.finished.connect(self._on_camera_finished)
+        self._camera_thread.start()
+        self.camera_button.setText('Stop Camera Preview')
+        self.camera_status_label.setText('Camera index {0} -- previewing...'.format(camera_index))
+
+    def _on_camera_frame(self, frame_bgr):
+        """ frame_bgr is a raw cv2 frame (BGR, uint8, HxWx3) -- same conversion
+        camera_recorder.py's own _PreviewWidget.set_frame() uses (Qt has no native BGR888 format;
+        np.ascontiguousarray keeps the buffer alive/contiguous for as long as the QImage needs
+        it). Scaled to VAR_CAMERA_PREVIEW_WIDTH_PX so the window's own size doesn't depend on the
+        camera's native resolution. """
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb = np.ascontiguousarray(rgb)
+        h, w, _ch = rgb.shape
+        qimage = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage).scaledToWidth(
+            VAR_CAMERA_PREVIEW_WIDTH_PX, Qt.SmoothTransformation)
+        self.camera_label.setPixmap(pixmap)
+
+    def _on_camera_error(self, message):
+        QMessageBox.critical(self, 'Camera error', message)
+
+    def _on_camera_finished(self):
+        self.camera_button.setEnabled(True)
+        self.camera_button.setText('Start Camera Preview')
+        self.camera_status_label.setText('Stopped.')
+        self.camera_label.clear()
+
     # --- shutdown --------------------------------------------------------------------------------
 
     def closeEvent(self, event):
+        if self._camera_thread is not None and self._camera_thread.isRunning():
+            self._camera_thread.stop()
+            self._camera_thread.wait(2000)
         if self._lick_thread is not None and self._lick_thread.isRunning():
             self._lick_thread.stop()
             self._lick_thread.wait(int((VAR_LICK_LISTEN_WINDOW_S + 1.0) * 1000))
