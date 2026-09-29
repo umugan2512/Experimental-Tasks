@@ -139,8 +139,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2
 VAR_DOT_DISAPPEAR_MIN_S = 0.4
 VAR_DOT_DISAPPEAR_MAX_S = 0.9
 
-VAR_DOT_BACKGROUND_GRAY = 128
-VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9
 VAR_RENDER_HZ = 30
 
@@ -161,10 +159,13 @@ VAR_CAMERA_INDEX = None                      # None = auto-discover, see
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi' # relative to cwd -- lands in the real session
                                               # folder when run for real via the GUI's Run button.
 VAR_CAMERA_FPS = 30.0
-VAR_CAMERA_PREVIEW = True             # preview shown only in short snippets (see
-                                       # camera.show_snippet() calls below), never continuously --
-                                       # same low-overhead choice full_protocol_lookback_test.py
-                                       # already made (see camera_recorder.py's own docstring).
+VAR_CAMERA_PREVIEW = os.environ.get('RUN_SESSION_DASHBOARD') != '1'   # preview shown only in short
+                                       # snippets (see camera.show_snippet() calls below), never
+                                       # continuously -- same low-overhead choice
+                                       # full_protocol_lookback_test.py already made (see
+                                       # camera_recorder.py's own docstring). False when launched
+                                       # from run_session.py -- see stage1_wheel_shaping.py's own
+                                       # identical comment.
 VAR_CAMERA_SNIPPET_S = 1.0            # snippet duration for both preview windows below.
 
 # --- persisted cross-session state (shared file with Stage 1) ---------------------------------------
@@ -202,7 +203,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display()
 dot.show()
 dot.clear()
 
@@ -236,7 +237,10 @@ bench_plots = WheelShapingPlots(
     stage=2, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG,
                           'iti_s': cur_iti_s},
-    reward_ul=VAR_REWARD_UL)
+    reward_ul=VAR_REWARD_UL,
+    # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
+    # window only when launched from run_session.py, which shows the same data in its own window.
+    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
 
 # --- trial loop -----------------------------------------------------------------------------------
 

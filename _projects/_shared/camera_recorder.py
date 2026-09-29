@@ -56,6 +56,17 @@ hasn't been measured yet (see docs_local/CAMERA_TEST_PLAN.md's Stage 4). OpenCV 
 sometimes benefits from an explicit cv2.CAP_DSHOW backend hint for reliable/fast camera open --
 flagged, not applied here, same "UNCONFIRMED" convention used elsewhere in this codebase for
 anything not yet hardware-validated.
+
+**Live-frame JPEG export (`<output_stem>_latest.jpg`)**: added after confirming directly that
+`session_video.avi` cannot be read by any OTHER process/handle while this class's own
+`cv2.VideoWriter` still holds it open -- `cv2.VideoWriter` (XVID/.avi) doesn't flush anything to
+disk at all until `release()` is called (confirmed: the file stays literally 0 bytes for the whole
+session), so an external live-preview tool (`AuditoryEvidenceAccum/run_session.py`) reading the
+growing video file mid-session always saw nothing. The capture loop now additionally overwrites one
+small JPEG in place with the latest frame, throttled to ~5Hz independent of the camera's own
+recording fps (cheap relative to the full video write already happening every frame on this same
+thread) -- an external reader just needs to read whatever's the newest complete file, no video-
+container concerns at all. Automatic for every caller, no task script needs to change to get it.
 """
 import os
 import sys
@@ -142,6 +153,10 @@ class CameraRecorder(object):
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
         self._writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (width, height))
 
+        # See module docstring's "Live-frame JPEG export" section -- ~5Hz regardless of self.fps.
+        self._live_frame_path = os.path.splitext(self.output_path)[0] + '_latest.jpg'
+        self._live_frame_write_interval = max(1, int(round(self.fps / 5.0))) if self.fps > 0 else 1
+
         self._cap_lock = threading.Lock()
         self._latest_frame = None
         self._timestamps = []   # list of (frame_index, timestamp_s) -- see module docstring
@@ -221,6 +236,11 @@ class CameraRecorder(object):
                     continue
                 self._writer.write(frame)
                 self._timestamps.append((frame_index, t))
+                if frame_index % self._live_frame_write_interval == 0:
+                    try:
+                        cv2.imwrite(self._live_frame_path, frame)
+                    except Exception:
+                        pass   # best-effort -- never let a preview-file write disrupt recording
                 frame_index += 1
                 self._latest_frame = frame
             except Exception:

@@ -70,9 +70,6 @@ VAR_REQUIRE_NO_LICK = False        # no lick sensor assumed relevant to this ben
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, same convention as every other script
 
-VAR_DOT_BACKGROUND_GRAY = 128
-VAR_DOT_GRAY = 0                  # full black, per training_protocol.md SS1.2's default (doc also
-                                   # floats a sub-maximal-contrast option -- flagged, not built here)
 VAR_DOT_EDGE_FRACTION = 0.9        # training_protocol.md SS1.3: place the threshold at ~90% of edge
                                     # azimuth, so the dot freezes still visible ("push it off the
                                     # edge") -- gain is derived below from the ACTUAL resolved
@@ -109,7 +106,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display()
 dot.show()
 dot.clear()
 

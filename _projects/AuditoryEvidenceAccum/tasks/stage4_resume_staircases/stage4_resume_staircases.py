@@ -198,8 +198,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2
 VAR_DOT_DISAPPEAR_MIN_S = 0.4
 VAR_DOT_DISAPPEAR_MAX_S = 0.9
 
-VAR_DOT_BACKGROUND_GRAY = 128
-VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9
 VAR_RENDER_HZ = 30
 
@@ -222,7 +220,9 @@ VAR_GO_CUE_LED_CHANNEL = 'PWM1'
 VAR_CAMERA_INDEX = None
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi'
 VAR_CAMERA_FPS = 30.0
-VAR_CAMERA_PREVIEW = True
+VAR_CAMERA_PREVIEW = os.environ.get('RUN_SESSION_DASHBOARD') != '1'   # False when launched from
+                                       # run_session.py -- see stage1_wheel_shaping.py's own
+                                       # identical comment.
 VAR_CAMERA_SNIPPET_S = 1.0
 
 # --- persisted cross-session state (same file as Stage 1/2/3) ----------------------------------------
@@ -283,7 +283,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display()
 dot.show()
 dot.clear()
 
@@ -303,7 +303,10 @@ bench_plots = WheelShapingPlots(
     prev_session_values={'threshold_deg': threshold_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG},
     session_status={'staircase_active': active_staircase, 'quiescence_s': quiescence_obj.current_s,
                      'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
-    reward_ul=VAR_REWARD_UL)
+    reward_ul=VAR_REWARD_UL,
+    # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
+    # window only when launched from run_session.py, which shows the same data in its own window.
+    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
 
 print("Starting Stage 4 -- staircase active this session: {0} (response threshold {1:.1f}deg = "
       "{2:.0%} of final, quiescence scale {3:.3f}s)".format(
