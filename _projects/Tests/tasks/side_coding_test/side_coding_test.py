@@ -28,7 +28,7 @@ VAR_N_TRIALS = 20
 VAR_LEFT_FREQ_HZ = 1000        # left channel tone, starts at t=0
 VAR_RIGHT_FREQ_HZ = 4000       # right channel tone -- exactly 2 octaves above left (1000 * 2**2)
 VAR_TONE_DURATION = 0.5        # seconds -- long enough to clearly hear/differentiate both pitches
-VAR_LEFT_RIGHT_GAP_S = 1.0     # right tone starts this long after the left tone starts
+VAR_LEFT_RIGHT_GAP_S = 5.0     # right tone starts this long after the left tone starts
 VAR_RAMP_MS = 10               # cosine onset/offset ramp, avoids a click at tone start/end
 VAR_ITI = 2                    # seconds between trials
 
