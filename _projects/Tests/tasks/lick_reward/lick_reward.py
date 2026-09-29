@@ -25,17 +25,28 @@ triggers a reward. Fixed with a fixed-duration Refractory state after Reward, no
 CURRENT level, so a state trying to wait for a release that may have already happened (the common
 case for any lick shorter than the reward cycle) would hang forever. A timer-based lockout needs no
 level query, and doubles as the requested minimum time between separately-counted licks.
+
+**WaitForLick times out every VAR_WAIT_TIMEOUT_S** (Tup -> exit) instead of waiting forever, so the
+board console gets a line every few seconds even when nothing is detected -- listing every event
+Bpod actually saw that trial (any port/BNC, not just Port1). Before this, a sensor that never
+produced a Port1In left the first trial blocked silently until Stop, and the loop then printed a
+fake "reward delivered" line for every remaining trial (run_state_machine() returns False
+immediately once stopped, and its return value was ignored). Timed-out trials don't count toward
+VAR_N_TRIALS -- only rewarded ones do.
 """
 import os
 import sys
 
 _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
+sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 from liquid_calibration import get_reward_duration_s
+from bpod_trial_helpers import was_visited
 
 from pybpodapi.protocol import Bpod, StateMachine
 
-VAR_N_TRIALS = 30
+VAR_N_TRIALS = 30                # number of REWARDED trials before the session ends
+VAR_WAIT_TIMEOUT_S = 10.0        # WaitForLick gives up after this long and reports what it saw
 VAR_REWARD_UL = 4.0              # target reward volume -- valve open time is derived from this via
                                   # Calibration/liquid_calibration.py's own fitted curve (falls back
                                   # to a hardcoded 0.1s if no calibration data/fit exists yet on
@@ -50,15 +61,22 @@ VAR_LICK_REFRACTORY_S = 0.3      # minimum gap between separately-counted/reward
 my_bpod = Bpod()
 print("Connected to Bpod on {0}".format(my_bpod.serial_port), flush=True)
 
-print("Starting {0} trials -- break the Port1 beam to trigger a reward".format(VAR_N_TRIALS), flush=True)
+print("Starting: {0} rewards wanted -- break the Port1 beam to trigger a reward "
+      "(status line every {1:g}s while waiting)".format(VAR_N_TRIALS, VAR_WAIT_TIMEOUT_S), flush=True)
 
-for trial in range(VAR_N_TRIALS):
+n_rewarded = 0
+n_attempts = 0
+while n_rewarded < VAR_N_TRIALS:
+    n_attempts += 1
     sma = StateMachine(my_bpod)
 
     sma.add_state(
         state_name='WaitForLick',
-        state_timer=0,
-        state_change_conditions={Bpod.Events.Port1In: 'ConfirmLick'},
+        state_timer=VAR_WAIT_TIMEOUT_S,
+        state_change_conditions={
+            Bpod.Events.Port1In: 'ConfirmLick',
+            Bpod.Events.Tup: 'exit',              # nothing detected -- report and try again
+        },
         output_actions=[])
 
     sma.add_state(
@@ -87,10 +105,25 @@ for trial in range(VAR_N_TRIALS):
         output_actions=[])
 
     my_bpod.send_state_machine(sma)
-    my_bpod.run_state_machine(sma)
+    if not my_bpod.run_state_machine(sma):
+        print("Bpod stopped running trials (Stop/Kill) -- ending early after {0} rewards "
+              "({1} attempts).".format(n_rewarded, n_attempts), flush=True)
+        break
 
-    print("Trial {0}/{1}: beam broken, reward delivered".format(trial + 1, VAR_N_TRIALS), flush=True)
+    current_trial = my_bpod.session.current_trial
+    events = current_trial.get_all_timestamps_by_event()
+    seen = ', '.join('{0} x{1}'.format(name, len(ts)) for name, ts in sorted(events.items())) or 'none'
+
+    if was_visited(current_trial.states_durations, 'Reward'):
+        n_rewarded += 1
+        outcome = "reward delivered ({0}/{1})".format(n_rewarded, VAR_N_TRIALS)
+    elif 'Port1In' in events:
+        outcome = "Port1In seen but beam released before {0:g}s -- no reward".format(VAR_MIN_LICK_DURATION_S)
+    else:
+        outcome = "no Port1In in {0:g}s".format(VAR_WAIT_TIMEOUT_S)
+
+    print("Attempt {0}: {1} | events: {2}".format(n_attempts, outcome, seen), flush=True)
+else:
+    print("Done: {0} rewards delivered in {1} attempts".format(n_rewarded, n_attempts), flush=True)
 
 my_bpod.close()
-
-print("Done: {0} trials completed".format(VAR_N_TRIALS), flush=True)
