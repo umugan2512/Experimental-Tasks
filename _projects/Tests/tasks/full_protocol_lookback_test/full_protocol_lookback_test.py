@@ -175,9 +175,6 @@ VAR_POLL_HZ = 100                    # that the poll thread keeps up without del
                                       # was actually used when reporting results from a real session.
 VAR_ROTARY_USB_PORT = None
 
-VAR_DOT_BACKGROUND_GRAY = 128
-VAR_DOT_GRAY = 0                    # full black, per training_protocol.md SS1.2's default (doc also
-                                     # floats a sub-maximal-contrast option -- flagged, not built here)
 VAR_DOT_EDGE_FRACTION = 0.9          # training_protocol.md SS1.3: place the threshold at ~90% of
                                      # edge azimuth -- gain is derived below from the ACTUAL
                                      # resolved screen width, not a fixed guessed px/deg constant.
@@ -283,7 +280,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display()
 dot.show()
 dot.clear()
 
