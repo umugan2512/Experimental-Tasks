@@ -86,8 +86,6 @@ VAR_POLL_HZ = 10
 VAR_ROTARY_USB_PORT = None
 VAR_DIFFICULTY = 'AOS'              # fixed single-side stimulus, same convention as before
 
-VAR_DOT_BACKGROUND_GRAY = 128
-VAR_DOT_GRAY = 0                    # full black, per training_protocol.md SS1.2's default
 VAR_DOT_EDGE_FRACTION = 0.9         # place the choice threshold at ~90% of edge azimuth -- gain is
                                      # derived below from the ACTUAL resolved (active) screen width,
                                      # same convention as dot_wheel_test.py/dot_wheel_midscreen_test.py.
@@ -143,7 +141,7 @@ runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POL
 
 # The only branch in the whole script -- see module docstring. Both classes share the exact same
 # public method surface, so nothing below this needs to know which one got constructed.
-dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display()
 dot.show()
 dot.clear()
 

@@ -158,8 +158,6 @@ VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes (doc
 VAR_DOT_DISAPPEAR_MIN_S = 0.4       # crossing->offset relationships should never change during
 VAR_DOT_DISAPPEAR_MAX_S = 0.9       # training")
 
-VAR_DOT_BACKGROUND_GRAY = 128
-VAR_DOT_GRAY = 0
 VAR_DOT_EDGE_FRACTION = 0.9         # SS1.3: place the threshold at ~90% of edge azimuth
 VAR_GAIN_INITIAL_MULT = 3.0         # decays via staircase.decay_gain() (-0.1x/qualifying session,
                                      # floor 2.0x -- see staircase.py)
@@ -179,10 +177,16 @@ VAR_CAMERA_INDEX = None                      # None = auto-discover, see
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi' # relative to cwd -- lands in the real session
                                               # folder when run for real via the GUI's Run button.
 VAR_CAMERA_FPS = 30.0
-VAR_CAMERA_PREVIEW = True             # preview shown only in short snippets (see
-                                       # camera.show_snippet() calls below), never continuously --
-                                       # same low-overhead choice full_protocol_lookback_test.py
-                                       # already made (see camera_recorder.py's own docstring).
+VAR_CAMERA_PREVIEW = os.environ.get('RUN_SESSION_DASHBOARD') != '1'   # preview shown only in short
+                                       # snippets (see camera.show_snippet() calls below), never
+                                       # continuously -- same low-overhead choice
+                                       # full_protocol_lookback_test.py already made (see
+                                       # camera_recorder.py's own docstring). False when launched
+                                       # from run_session.py -- that dashboard's own embedded camera
+                                       # panel already shows this same feed (see its own
+                                       # RUN_SESSION_DASHBOARD env var docstring), so this script's
+                                       # own popup preview window would just be a redundant second
+                                       # one. True (unchanged) for a real PyBpod-GUI-launched session.
 VAR_CAMERA_SNIPPET_S = 1.0            # snippet duration for both preview windows below.
 
 # --- persisted cross-session state -------------------------------------------------------------------
@@ -219,7 +223,7 @@ log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
 
-dot = dot_display.create_dot_display(background_gray=VAR_DOT_BACKGROUND_GRAY, dot_gray=VAR_DOT_GRAY)
+dot = dot_display.create_dot_display()
 dot.show()
 dot.clear()
 
@@ -250,7 +254,12 @@ render_interval = 1.0 / VAR_RENDER_HZ
 bench_plots = WheelShapingPlots(
     stage=1, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': cur_threshold_deg, 'gain_mult': cur_gain_mult},
-    reward_ul=VAR_REWARD_UL)
+    reward_ul=VAR_REWARD_UL,
+    # When launched from run_session.py (its own dashboard already shows this same data,
+    # reconstructed from the session CSV, embedded in its own window), embed=True builds the
+    # figure without ever opening a separate top-level window -- see wheel_shaping_plots.py's own
+    # docstring. Absent (a real PyBpod-GUI-launched session), this is False, identical to before.
+    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
 
 # --- trial loop -----------------------------------------------------------------------------------
 

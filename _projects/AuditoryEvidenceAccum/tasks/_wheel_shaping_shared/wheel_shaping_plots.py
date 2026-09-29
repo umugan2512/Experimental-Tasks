@@ -150,7 +150,7 @@ GAIN_INITIAL_MULT_DISPLAY_REF = 2.0
 class WheelShapingPlots(object):
 
     def __init__(self, stage, threshold_final_deg, prev_session_values=None, session_status=None,
-                 reward_ul=None):
+                 reward_ul=None, embed=False):
         """
         :param int stage: 1, 2, 3, or 4 -- controls which panels are meaningful. Stage 1 has no
             direction-ratio withholding and a fixed threshold/decaying gain instead of a staircase.
@@ -176,6 +176,13 @@ class WheelShapingPlots(object):
             the count of rewarded trials with at least one lick registered, not merely delivered)
             in the reward-aligned lick raster's own title. None (the default) just omits that part
             of the title.
+        :param bool embed: False (default, used by every real stage script -- unchanged behavior)
+            builds the figure via plt.subplot_mosaic(), which always creates its own top-level
+            window via pyplot's global figure manager. True builds a bare matplotlib Figure
+            directly (never registered with pyplot at all, so no window is ever created) and
+            exposes it as `self.canvas` (a FigureCanvasQTAgg) for the caller to embed into its own
+            Qt layout -- used by run_session.py's own integrated live view instead of letting this
+            open as a separate popup window.
         """
         self._stage = stage
         self._threshold_final_deg = threshold_final_deg
@@ -272,20 +279,34 @@ class WheelShapingPlots(object):
                       ['lick_timeline', 'lick_timeline']]
             height_ratios = [2.2, 0.8, 1.3, 1.0]
 
-        plt.ion()
+        self._embed = embed
         figsize = (11, 14) if stage in (3, 4) else (10, 11)
         # constrained_layout instead of a one-time tight_layout() call -- handles the mixed
         # panel sizes/legends/titles here far more robustly (recomputes automatically on every
         # redraw as content changes, e.g. a legend appearing once data exists), which is what was
         # actually causing the previous layout to look unaligned/inconsistently sized.
-        self._fig, self._axes = plt.subplot_mosaic(
-            mosaic, figsize=_capped_figsize(*figsize),
-            gridspec_kw={'height_ratios': height_ratios}, constrained_layout=True)
-        try:
-            self._fig.canvas.manager.set_window_title(
-                'Wheel shaping -- Stage {0} live plots'.format(stage))
-        except Exception:
-            pass
+        if embed:
+            # A bare Figure + FigureCanvasQTAgg, built directly rather than via plt.subplot_mosaic()
+            # -- never registered with pyplot's own global figure manager, so pyplot never creates
+            # a top-level window for it at all (that window is what plt.subplot_mosaic() always
+            # creates, and is exactly what a real stage script wants -- just not this embedded
+            # caller). self.canvas is the caller's own hook to embed into its own Qt layout.
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+            self._fig = Figure(figsize=figsize, constrained_layout=True)
+            self._axes = self._fig.subplot_mosaic(mosaic, gridspec_kw={'height_ratios': height_ratios})
+            self.canvas = FigureCanvasQTAgg(self._fig)
+        else:
+            plt.ion()
+            self._fig, self._axes = plt.subplot_mosaic(
+                mosaic, figsize=_capped_figsize(*figsize),
+                gridspec_kw={'height_ratios': height_ratios}, constrained_layout=True)
+            try:
+                self._fig.canvas.manager.set_window_title(
+                    'Wheel shaping -- Stage {0} live plots'.format(stage))
+            except Exception:
+                pass
+            self.canvas = None
 
         self._setup_raster_axes()
         self._setup_progress_axes()
@@ -809,4 +830,10 @@ class WheelShapingPlots(object):
             self._redraw_percent_outcome(self._axes['percent_outcome'])
             self._redraw_psychometric(self._axes['psychometric'])
             self._redraw_reaction_time(self._axes['reaction_time'])
-        plt.pause(0.001)
+        if self._embed:
+            # draw_idle() -- the standard embedded-in-Qt redraw call. plt.pause() would do a full
+            # global pyplot event-loop pump across every pyplot-tracked figure, unneeded here since
+            # this figure was never registered with pyplot at all (see __init__).
+            self.canvas.draw_idle()
+        else:
+            plt.pause(0.001)

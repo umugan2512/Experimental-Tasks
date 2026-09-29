@@ -284,47 +284,55 @@ class MiddleScreenDotDisplay(object):
 # --- rig-wide defaults + factory -------------------------------------------------------------------
 #
 # This rig's monitor geometry (three physical dot-stimulus monitors bonded into one combined Qt
-# screen, middle panel only actually used -- see MiddleScreenDotDisplay's own docstring) and dot
-# size are RIG properties, not per-experiment choices -- every dot-coupled task script across every
-# stage/project should show the dot on the same physical monitor at the same size. Before this,
-# each task script independently defined its own VAR_USE_MIDDLE_SCREEN_ONLY/VAR_DOT_SCREEN_INDEX/
+# screen -- see MiddleScreenDotDisplay's own docstring for how that was confirmed), dot size, and
+# background/dot contrast are all RIG properties, not per-experiment choices -- every dot-coupled
+# task script across every stage/project should show the dot the same way. Before this, each task
+# script independently defined its own VAR_USE_MIDDLE_SCREEN_ONLY/VAR_DOT_SCREEN_INDEX/
 # VAR_N_PHYSICAL_MONITORS_IN_SPAN/VAR_ACTIVE_MONITOR_INDEX/VAR_DOT_DIAMETER_PX and its own
 # if/else DotDisplay-vs-MiddleScreenDotDisplay construction -- confirmed as a real, already-happened
 # drift risk: stage2_threshold_staircase.py, stage3_clicks_direction.py, stage4_resume_staircases.py,
 # and dot_wheel_test.py were all still constructing a plain, full-spanned DotDisplay (never updated
 # to match the middle-screen fix applied elsewhere), silently showing the dot smeared across all
 # three physical monitors on this rig instead of confined to the middle one. create_dot_display()
-# is the one place this rig's actual monitor/size configuration lives now -- a future
-# remounting/resizing only needs the DEFAULT_* constants below changed, not every task script
-# individually. Any script with a genuine reason to differ can still override any of the factory's
-# own parameters explicitly.
-DEFAULT_USE_MIDDLE_SCREEN_ONLY = True
+# is the one place this rig's actual monitor/size/contrast configuration lives now -- a future
+# remounting/resizing/recoloring only needs the DEFAULT_* constants below changed, not every task
+# script individually. Any script with a genuine reason to differ can still override any of the
+# factory's own parameters explicitly.
+DEFAULT_USE_MIDDLE_SCREEN_ONLY = False        # False = full combined-window span across all three
+                                               # physical monitors. True = confined to one column
+                                               # (MiddleScreenDotDisplay) -- see that class's own
+                                               # docstring; flip back if the dot should again be
+                                               # confined to the middle monitor only.
 DEFAULT_DOT_SCREEN_INDEX = 1                  # the combined spanned Qt screen (or a genuine second
                                                # monitor if DEFAULT_USE_MIDDLE_SCREEN_ONLY is ever
-                                               # flipped False); falls back to 0 with a warning if
+                                               # flipped True); falls back to 0 with a warning if
                                                # not found (see DotDisplay/MiddleScreenDotDisplay's
                                                # own __init__).
 DEFAULT_N_PHYSICAL_MONITORS_IN_SPAN = 3       # confirmed via screens(): the combined Qt screen on
                                                # this rig is 6144px wide, 6144/3 = 2048px/panel.
-DEFAULT_ACTIVE_MONITOR_INDEX = 1              # 0=left, 1=middle, 2=right -- middle panel only.
-DEFAULT_DOT_DIAMETER_PX = 60                  # UNCONFIRMED against training_protocol.md SS1.2's
+                                               # Only used when DEFAULT_USE_MIDDLE_SCREEN_ONLY=True.
+DEFAULT_ACTIVE_MONITOR_INDEX = 1              # 0=left, 1=middle, 2=right -- only used when
+                                               # DEFAULT_USE_MIDDLE_SCREEN_ONLY=True.
+DEFAULT_DOT_DIAMETER_PX = 480                 # UNCONFIRMED against training_protocol.md SS1.2's
                                                # 3-4 visual-deg spec -- same flag every dot-stimulus
-                                               # script already carried locally.
+                                               # script already carried locally. 3x the previous
+                                               # 60px default, per explicit instruction.
+DEFAULT_BACKGROUND_GRAY = 0                   # black background.
+DEFAULT_DOT_GRAY = 255                        # white dot.
 
 
-def create_dot_display(diameter_px=None, background_gray=128, dot_gray=0, screen_index=None,
+def create_dot_display(diameter_px=None, background_gray=None, dot_gray=None, screen_index=None,
                         use_middle_screen_only=None, n_segments=None, active_segment_index=None):
     """
     The one place a task script should construct its dot display -- returns a MiddleScreenDotDisplay
     or plain DotDisplay per this rig's own DEFAULT_* constants above (identical public method
     surface either way, so callers never need to branch on which one they got). Every parameter
     defaults to this module's own rig-wide constant; pass an explicit value only to deliberately
-    override it for one script. background_gray/dot_gray are NOT defaulted from a module-level
-    constant here (left as this function's own conventional 128/0, matching every existing caller)
-    since stimulus contrast is a per-experiment choice, not a rig property, unlike screen/size
-    selection.
+    override it for one script.
     """
     diameter_px = DEFAULT_DOT_DIAMETER_PX if diameter_px is None else diameter_px
+    background_gray = DEFAULT_BACKGROUND_GRAY if background_gray is None else background_gray
+    dot_gray = DEFAULT_DOT_GRAY if dot_gray is None else dot_gray
     screen_index = DEFAULT_DOT_SCREEN_INDEX if screen_index is None else screen_index
     use_middle_screen_only = (DEFAULT_USE_MIDDLE_SCREEN_ONLY if use_middle_screen_only is None
                                else use_middle_screen_only)
