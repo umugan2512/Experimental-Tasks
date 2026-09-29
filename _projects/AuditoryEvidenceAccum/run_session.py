@@ -130,6 +130,7 @@ VAR_PROJECT_NAME = 'AuditoryEvidenceAccum'
 _TASK_PYTHON_CANDIDATES = [
     r'C:\Users\2P-Behav\.conda\envs\pybpod-environment\python.exe',
     r'C:\Users\Gil\anaconda3\envs\UM-pybpod\python.exe',
+    r'C:\Users\Gil\.conda\envs\UM-pybpod\python.exe',    # training box 5
 ]
 VAR_TASK_PYTHON_EXE = next((p for p in _TASK_PYTHON_CANDIDATES if os.path.exists(p)), sys.executable)
 VAR_THRESHOLD_FINAL_DEG = 35.0     # matches every stage script's own VAR_THRESHOLD_FINAL_DEG /

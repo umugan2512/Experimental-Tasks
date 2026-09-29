@@ -8,6 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 set PY_EXE=C:\Users\2P-Behav\.conda\envs\pybpod-environment\python.exe
+if not exist "%PY_EXE%" set PY_EXE=C:\Users\Gil\.conda\envs\UM-pybpod\python.exe
 if exist "%PY_EXE%" (
     "%PY_EXE%" sync_training_log.py
 ) else (
