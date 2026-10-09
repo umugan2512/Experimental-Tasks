@@ -11,13 +11,18 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   6. Session merging: classify_trial()'s consumed-reward classification, group_sessions()'s
      merge-eligible-ending/same-protocol/gap-threshold rule, combine_group()'s field combination,
      and the stage-ordering helpers
-  7. QuiescenceStaircase (Stage 4): step-up/step-down, floor/ceiling, same shape as Section 1
-  8. stage3_gates_met()/stage4_gates_met()/select_stage4_staircase_to_tighten() (Tag B policy)
+  7. QuiescenceStaircase (Stage 5): step-up/step-down, floor/ceiling, same shape as Section 1
+  8. stage4_gates_met()/stage5_gates_met()/select_stage5_staircase_to_tighten() (Tag B policy)
   9. debiasing.next_side_after_error(): statistical repeat-rate check over many draws
   10. session_csv_parser.STREAM_KEYS fix: repeated VAL rows (e.g. WHEEL_POS) are retained as a
       list, not collapsed to the last value -- the additions.txt T3 regression this guards against
   11. derive_intrial_threshold.py: sliding-window excursion percentile against a synthetic trace
       with a known injected value
+  12. session_csv_parser._chain_already_used(): the live-session quota-reduction chaining logic
+      (same merge-eligibility shape as group_sessions() above, but keyed on actual absence of a
+      SESSION_END_REASON rather than the literal string 'completed')
+  13. BoundedStaircase (Stage 3/4's shared stimulus-duration/ITI ramps) + next_alternating_value()
+      (Stage 3's own same-day-unchanged/across-day-alternating tone-side rule)
 
 Run with the pybpod-environment interpreter:
     /c/Users/2P-Behav/.conda/envs/pybpod-environment/python.exe validate_wheel_shaping.py
@@ -345,7 +350,7 @@ def _fake_session(started, protocol, session_end_reason, trial_count=10, duratio
         'threshold_start_deg': 7.0, 'threshold_end_deg': 7.0, 'threshold_final_deg': 35.0,
         'iti_end_s': 0.5, 'gain_mult_end': 2.0, 'direction_ratio_end': None,
         'simple_gates_met': None,
-        # Stage 3/4 fields -- None here since this fixture models a Stage 1/2 session (matches
+        # Stage 4/5 fields -- None here since this fixture models a Stage 1/2 session (matches
         # what a real summarize_session() call returns for those protocols: the keys always
         # exist, populated only when the protocol's own PROTOCOL_CONFIG/VAL registrations apply).
         'response_threshold_start_deg': None, 'response_threshold_end_deg': None,
@@ -484,44 +489,46 @@ section7_pass = qs_below_step and qs_stepped_up and qs_ceiling_check and qs_floo
 print("Section 7 result: {0}".format("PASS" if section7_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 8: stage3_gates_met() / stage4_gates_met() / select_stage4_staircase_to_tighten()
+# Section 8: stage4_gates_met() / stage5_gates_met() / select_stage5_staircase_to_tighten()
+# (formerly stage3_gates_met()/stage4_gates_met()/select_stage4_staircase_to_tighten(), before a
+# new Stage 3 was inserted)
 # ==================================================================================================
 
 print()
 print("=" * 100)
-print("Section 8: Stage 3/4 gates + Tag B staircase selection")
+print("Section 8: Stage 4/5 gates + Tag B staircase selection")
 print("=" * 100)
 
-s3_pass = staircase.stage3_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
-s3_fail_acc = staircase.stage3_gates_met(accuracy_aos=0.60, abort_rate=0.10, trial_count=250)
-s3_fail_abort = staircase.stage3_gates_met(accuracy_aos=0.75, abort_rate=0.25, trial_count=250)
-s3_fail_trials = staircase.stage3_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=150)
-print("  Stage 3 gates: all met (75% acc, 10% abort, 250 trials) -> True: {0}".format(s3_pass))
-print("  Stage 3 gates: accuracy below 70% -> False: {0}".format(s3_fail_acc is False))
-print("  Stage 3 gates: abort rate above 20% -> False: {0}".format(s3_fail_abort is False))
-print("  Stage 3 gates: trial count below 200 -> False: {0}".format(s3_fail_trials is False))
+s3_pass = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+s3_fail_acc = staircase.stage4_gates_met(accuracy_aos=0.60, abort_rate=0.10, trial_count=250)
+s3_fail_abort = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.25, trial_count=250)
+s3_fail_trials = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=150)
+print("  Stage 4 gates: all met (75% acc, 10% abort, 250 trials) -> True: {0}".format(s3_pass))
+print("  Stage 4 gates: accuracy below 70% -> False: {0}".format(s3_fail_acc is False))
+print("  Stage 4 gates: abort rate above 20% -> False: {0}".format(s3_fail_abort is False))
+print("  Stage 4 gates: trial count below 200 -> False: {0}".format(s3_fail_trials is False))
 section8a_pass = s3_pass and s3_fail_acc is False and s3_fail_abort is False and s3_fail_trials is False
 
-s4_pass = staircase.stage4_gates_met(
+s4_pass = staircase.stage5_gates_met(
     response_threshold_fraction=0.95, quiescence_s=staircase.QUIESCENCE_CEILING_S,
     accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
-s4_fail_resp = staircase.stage4_gates_met(
+s4_fail_resp = staircase.stage5_gates_met(
     response_threshold_fraction=0.5, quiescence_s=staircase.QUIESCENCE_CEILING_S,
     accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
-s4_fail_quiescence = staircase.stage4_gates_met(
+s4_fail_quiescence = staircase.stage5_gates_met(
     response_threshold_fraction=0.95, quiescence_s=0.2,
     accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
-print("  Stage 4 gates: both staircases at target -> True: {0}".format(s4_pass))
-print("  Stage 4 gates: response threshold not at target -> False: {0}".format(
+print("  Stage 5 gates: both staircases at target -> True: {0}".format(s4_pass))
+print("  Stage 5 gates: response threshold not at target -> False: {0}".format(
     s4_fail_resp is False))
-print("  Stage 4 gates: quiescence not at ceiling -> False: {0}".format(
+print("  Stage 5 gates: quiescence not at ceiling -> False: {0}".format(
     s4_fail_quiescence is False))
 section8b_pass = s4_pass and s4_fail_resp is False and s4_fail_quiescence is False
 
 # Tag B: whichever parameter is furthest from its own final value wins; ties alternate.
-pick_response = staircase.select_stage4_staircase_to_tighten(
+pick_response = staircase.select_stage5_staircase_to_tighten(
     response_threshold_fraction=0.3, quiescence_s=0.45, last_advanced=None)
-pick_quiescence = staircase.select_stage4_staircase_to_tighten(
+pick_quiescence = staircase.select_stage5_staircase_to_tighten(
     response_threshold_fraction=0.85, quiescence_s=0.15, last_advanced=None)
 print("  Tag B: response furthest from target -> picks 'response': {0}".format(
     pick_response == 'response'))
@@ -530,12 +537,12 @@ print("  Tag B: quiescence furthest from target -> picks 'quiescence': {0}".form
 
 # A genuine tie (both staircases equally far from final, on the SAME normalized 0-1 scale this
 # function itself uses) -- tie-break alternates away from last_advanced.
-tie_resp_frac = 0.5 * staircase.STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION
+tie_resp_frac = 0.5 * staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
 tie_quiescence_s = staircase.QUIESCENCE_CEILING_S - 0.5 * (
     staircase.QUIESCENCE_CEILING_S - staircase.QUIESCENCE_FLOOR_S)
-tie_break_from_response = staircase.select_stage4_staircase_to_tighten(
+tie_break_from_response = staircase.select_stage5_staircase_to_tighten(
     tie_resp_frac, tie_quiescence_s, last_advanced='response')
-tie_break_from_quiescence = staircase.select_stage4_staircase_to_tighten(
+tie_break_from_quiescence = staircase.select_stage5_staircase_to_tighten(
     tie_resp_frac, tie_quiescence_s, last_advanced='quiescence')
 tie_break_correct = (tie_break_from_response == 'quiescence' and
                       tie_break_from_quiescence == 'response')
@@ -664,11 +671,167 @@ finally:
 print("Section 11 result: {0}".format("PASS" if section11_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
+# Section 12: session_csv_parser._chain_already_used() -- live-session quota-reduction chaining
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 12: _chain_already_used() quota-reduction chaining")
+print("=" * 100)
+
+
+def _lite(started, ended, trial_count, duration_s, session_end_reason):
+    return {'started_dt': started, 'ended_dt': ended, 'trial_count': trial_count,
+            'duration_s': duration_s, 'session_end_reason': session_end_reason}
+
+
+_t0 = datetime.datetime(2026, 1, 1, 12, 0, 0)
+
+# No prior sessions at all -> nothing to resume.
+used12a = session_csv_parser._chain_already_used([], _t0, 3600.0)
+print("  no prior sessions -> (0, 0.0): {0}".format(used12a == (0, 0.0)))
+
+# One prior session that ended DELIBERATELY (a real SESSION_END_REASON) -> never resumed,
+# regardless of how recently it ended.
+deliberate = [_lite(_t0 - datetime.timedelta(minutes=30), _t0 - datetime.timedelta(minutes=20),
+                     150, 1800.0, 'cap_90min')]
+used12b = session_csv_parser._chain_already_used(deliberate, _t0, 3600.0)
+print("  one deliberately-ended prior session -> (0, 0.0): {0}".format(used12b == (0, 0.0)))
+
+# One prior session with NO reason (Stop/Kill/crash), ended 10 minutes ago, well within the
+# 1-hour merge gap -> its own trial_count/duration_s are "already used".
+killed = [_lite(_t0 - datetime.timedelta(minutes=40), _t0 - datetime.timedelta(minutes=10),
+                80, 1200.0, None)]
+used12c = session_csv_parser._chain_already_used(killed, _t0, 3600.0)
+print("  one killed prior session, 10min ago (within gap) -> (80, 1200.0): {0}".format(
+    used12c == (80, 1200.0)))
+
+# Same killed session, but it ended 2 HOURS ago -- gap expired, treat as a fresh session.
+killed_stale = [_lite(_t0 - datetime.timedelta(hours=3), _t0 - datetime.timedelta(hours=2),
+                       80, 1200.0, None)]
+used12d = session_csv_parser._chain_already_used(killed_stale, _t0, 3600.0)
+print("  one killed prior session, 2h ago (gap expired) -> (0, 0.0): {0}".format(
+    used12d == (0, 0.0)))
+
+# A deliberate session followed (soon after) by a killed one -- only the killed one's own amount
+# counts; the deliberate one's ending closes its own bout even though the killed one starts
+# promptly after it.
+mixed = [
+    _lite(_t0 - datetime.timedelta(hours=2), _t0 - datetime.timedelta(minutes=70), 200, 2400.0,
+          'max_trials'),
+    _lite(_t0 - datetime.timedelta(minutes=65), _t0 - datetime.timedelta(minutes=20), 50, 600.0,
+          None),
+]
+used12e = session_csv_parser._chain_already_used(mixed, _t0, 3600.0)
+print("  deliberate session then a killed restart -> only the restart's own (50, 600.0): {0}".format(
+    used12e == (50, 600.0)))
+
+# Two chained killed sessions (each restarted soon after the previous one's own end) -> sums both.
+chained = [
+    _lite(_t0 - datetime.timedelta(minutes=90), _t0 - datetime.timedelta(minutes=50), 60, 900.0,
+          None),
+    _lite(_t0 - datetime.timedelta(minutes=45), _t0 - datetime.timedelta(minutes=10), 40, 600.0,
+          None),
+]
+used12f = session_csv_parser._chain_already_used(chained, _t0, 3600.0)
+print("  two chained killed restarts -> summed (100, 1500.0): {0}".format(
+    used12f == (100, 1500.0)))
+
+# compute_remaining_quota()'s own floor -- a long-interrupted bout never leaves literally nothing
+# to run.
+remaining_trials = max(1, 200 - 199)
+remaining_cap = max(60.0, 5400.0 - 5399.0)
+print("  floor: 1 trial min / 60s min: {0}".format(remaining_trials == 1 and remaining_cap == 60.0))
+
+section12_pass = (used12a == (0, 0.0) and used12b == (0, 0.0) and used12c == (80, 1200.0) and
+                   used12d == (0, 0.0) and used12e == (50, 600.0) and used12f == (100, 1500.0))
+print("Section 12 result: {0}".format("PASS" if section12_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 13: BoundedStaircase (Stage 3/4's shared stim-duration/ITI ramps) +
+# next_alternating_value() (Stage 3's own tone-side rule)
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 13: BoundedStaircase + next_alternating_value()")
+print("=" * 100)
+
+sd = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+for _ in range(staircase.STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP - 1):
+    sd.record_outcome(True)
+print("  19 consecutive correct: duration unchanged (0.25s): {0}".format(
+    sd.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+sd.record_outcome(True)
+print("  20th consecutive correct: duration steps UP by {0}s: {1}".format(
+    staircase.STAGE34_STIM_DURATION_STEP_S,
+    sd.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
+                          + staircase.STAGE34_STIM_DURATION_STEP_S)))
+
+sd2 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_FINAL_S)
+for _ in range(500):
+    sd2.record_outcome(True)
+print("  duration never exceeds the final ceiling after many correct: {0}".format(
+    sd2.current_value == staircase.STAGE34_STIM_DURATION_FINAL_S))
+
+sd3 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+for _ in range(500):
+    sd3.record_outcome(False)
+print("  duration never drops below the starting floor after many incorrect: {0}".format(
+    sd3.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+
+sd4 = staircase.new_stim_duration_staircase(
+    staircase.STAGE34_STIM_DURATION_STARTING_S + staircase.STAGE34_STIM_DURATION_STEP_S)
+for _ in range(staircase.STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN - 1):
+    sd4.record_outcome(False)
+print("  4 consecutive incorrect: duration unchanged: {0}".format(
+    sd4.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
+                           + staircase.STAGE34_STIM_DURATION_STEP_S)))
+sd4.record_outcome(False)
+print("  5th consecutive incorrect: duration steps back DOWN: {0}".format(
+    sd4.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+
+# A single incorrect after a long correct streak resets the success counter (no step), same
+# "streak resets on the opposite outcome" convention as ThresholdStaircase.
+sd5 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+for _ in range(19):
+    sd5.record_outcome(True)
+sd5.record_outcome(False)
+print("  a single incorrect after 19 correct resets the streak (no step, consecutive_successes="
+      "0): {0}".format(sd5.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+                        and sd5.consecutive_successes == 0))
+
+# next_alternating_value(): same-day unchanged, new-day alternates.
+same_day = staircase.next_alternating_value('R', '2026-01-01', '2026-01-01', ('L', 'R'))
+new_day_from_r = staircase.next_alternating_value('R', '2026-01-01', '2026-01-02', ('L', 'R'))
+new_day_from_l = staircase.next_alternating_value('L', '2026-01-01', '2026-01-02', ('L', 'R'))
+print("  same-day restart keeps the side unchanged ('R' -> 'R'): {0}".format(same_day == 'R'))
+print("  new day alternates 'R' -> 'L': {0}".format(new_day_from_r == 'L'))
+print("  new day alternates 'L' -> 'R': {0}".format(new_day_from_l == 'R'))
+# A multi-day GAP (subject skipped days) still just alternates from whatever was last used, not
+# based on elapsed day count.
+gap_day = staircase.next_alternating_value('R', '2026-01-01', '2026-01-10', ('L', 'R'))
+print("  a multi-day gap still just alternates once, from the last-used side: {0}".format(
+    gap_day == 'L'))
+
+section13_pass = (
+    sd.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
+                          + staircase.STAGE34_STIM_DURATION_STEP_S)
+    and sd2.current_value == staircase.STAGE34_STIM_DURATION_FINAL_S
+    and sd3.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+    and sd4.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+    and sd5.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+    and sd5.consecutive_successes == 0
+    and same_day == 'R' and new_day_from_r == 'L' and new_day_from_l == 'R' and gap_day == 'L')
+print("Section 13 result: {0}".format("PASS" if section13_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
 
 print()
 print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
-                 section9_pass and section10_pass and section11_pass)
+                 section9_pass and section10_pass and section11_pass and section12_pass and
+                 section13_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

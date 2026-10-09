@@ -66,6 +66,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -92,6 +93,11 @@ _RECORDS_DIR = os.path.join(_PROJECT_DIR, 'records')
 _TASKS_DIR = os.path.join(_PROJECT_DIR, 'tasks')
 _SHARED_DIR = os.path.join(_TASKS_DIR, '_wheel_shaping_shared')
 _OUTPUT_XLSX = os.path.join(_RECORDS_DIR, 'training_log.xlsx')
+# Calibration/ is a sibling of _projects/ (see CLAUDE.md), not nested under this project --
+# _PROJECT_DIR is _projects/AuditoryEvidenceAccum/, so two levels up reaches the repo root.
+_CALIBRATION_DIR = os.path.abspath(os.path.join(_PROJECT_DIR, '..', '..', 'Calibration'))
+VAR_RIG_CHECK_SCRIPT = os.path.join(_CALIBRATION_DIR, 'rig_check.py')
+VAR_FLUSH_VALVE_SCRIPT = os.path.join(_CALIBRATION_DIR, 'flush_valve.py')
 
 sys.path.insert(0, _SHARED_DIR)
 sys.path.insert(0, _RECORDS_DIR)   # build_training_log.py lives in records/, a sibling directory
@@ -134,6 +140,9 @@ _TASK_PYTHON_CANDIDATES = [
 VAR_TASK_PYTHON_EXE = next((p for p in _TASK_PYTHON_CANDIDATES if os.path.exists(p)), sys.executable)
 VAR_THRESHOLD_FINAL_DEG = 35.0     # matches every stage script's own VAR_THRESHOLD_FINAL_DEG /
                                     # build_training_log.py's own hardcoded threshold_final_deg.
+
+VAR_DEFAULT_REWARD_UL = 7.0    # default shown in the Launch Task reward field -- overridable per
+                                # launch; passed to the task subprocess via RUN_SESSION_REWARD_UL
 
 VAR_SESSION_POLL_MS = 1000    # how often to look for a newer session folder on disk
 VAR_PLOTS_POLL_MS = 2000      # how often to re-parse the watched CSV and feed new trials
@@ -182,7 +191,7 @@ _DASHBOARD_PROTOCOL_INFO = {
         'outcome_map': {'rewarded': 'Rewarded', 'withheld': 'Withheld', 'no_movement': 'NoMovement'},
         'crossed_outcomes': {'rewarded', 'withheld'},
     },
-    'stage3_clicks_direction': {
+    'stage3_tone_side_association': {
         'stage': 3,
         'anchor_key': 'SM_SEND_TIME',
         'threshold_key': 'RESPONSE_THRESHOLD_DEG',
@@ -190,8 +199,16 @@ _DASHBOARD_PROTOCOL_INFO = {
                          'aborted': 'Abort'},
         'crossed_outcomes': {'rewarded', 'incorrect'},
     },
-    'stage4_resume_staircases': {
+    'stage4_clicks_direction': {
         'stage': 4,
+        'anchor_key': 'SM_SEND_TIME',
+        'threshold_key': 'RESPONSE_THRESHOLD_DEG',
+        'outcome_map': {'rewarded': 'Reward', 'incorrect': 'NoReward', 'no_movement': 'NoResponse',
+                         'aborted': 'Abort'},
+        'crossed_outcomes': {'rewarded', 'incorrect'},
+    },
+    'stage5_resume_staircases': {
+        'stage': 5,
         'anchor_key': 'SM_SEND_TIME',
         'threshold_key': 'RESPONSE_THRESHOLD_DEG',
         'outcome_map': {'rewarded': 'Reward', 'incorrect': 'NoReward', 'no_movement': 'NoResponse',
@@ -204,8 +221,9 @@ _OUTCOME_STATE_NAME = {
     'stage1_wheel_shaping': {'rewarded': 'Reward'},
     'stage2_threshold_staircase': {'rewarded': ('RewardL', 'RewardR'),
                                     'withheld': ('NoRewardL', 'NoRewardR')},
-    'stage3_clicks_direction': {'rewarded': 'Reward', 'incorrect': 'ErrorConsumption'},
-    'stage4_resume_staircases': {'rewarded': 'Reward', 'incorrect': 'ErrorConsumption'},
+    'stage3_tone_side_association': {'rewarded': 'Reward', 'incorrect': 'ErrorConsumption'},
+    'stage4_clicks_direction': {'rewarded': 'Reward', 'incorrect': 'ErrorConsumption'},
+    'stage5_resume_staircases': {'rewarded': 'Reward', 'incorrect': 'ErrorConsumption'},
 }
 
 _USER_SETTINGS_TEMPLATE = """SETTINGS_PRIORITY = 0
@@ -308,30 +326,44 @@ def load_board_config(board_name):
 
 
 def discover_subjects():
-    """ Returns [{'name', 'uuid'}] for every subjects/*/*.json on disk, regardless of whether it's
+    """ Returns [{'name', 'uuid'}] for every real subject on disk, regardless of whether it's
     attached to a Setup yet -- used by the New Setup dialog's subject checklist (discover_stage_
-    configs()'s own per-stage subject lists only include already-attached subjects). """
+    configs()'s own per-stage subject lists only include already-attached subjects). Only the json
+    file whose own basename matches its PARENT directory name counts as the real subject
+    descriptor (same convention discover_all_tasks() already uses) -- a subject's own folder also
+    holds OTHER json files that happen to match a naive `subjects/*/*.json` glob (confirmed
+    directly: session_state.py's own wheel_shaping_state.json, the per-subject cross-session
+    training-state file, sits right next to e.g. test_stage1.json inside subjects/test_stage1/ --
+    without this filter it showed up as a bogus "wheel_shaping_state" subject, once per subject
+    folder that has one). """
     results = []
     for path in sorted(glob.glob(os.path.join(_PROJECT_DIR, 'subjects', '*', '*.json'))):
+        name = os.path.splitext(os.path.basename(path))[0]
+        if name != os.path.basename(os.path.dirname(path)):
+            continue
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except Exception:
             continue
-        name = os.path.splitext(os.path.basename(path))[0]
         results.append({'name': name, 'uuid': data.get('__UUID4__')})
     return results
 
 
 def discover_boards():
+    """ Same "basename must match parent directory name" filter as discover_subjects()/
+    discover_all_tasks() -- no board folder happens to have a stray extra json file today, but
+    this is the identical bug class pre-empted the same way rather than waiting for it to bite. """
     results = []
     for path in sorted(glob.glob(os.path.join(_PROJECT_DIR, 'boards', '*', '*.json'))):
+        name = os.path.splitext(os.path.basename(path))[0]
+        if name != os.path.basename(os.path.dirname(path)):
+            continue
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except Exception:
             continue
-        name = os.path.splitext(os.path.basename(path))[0]
         results.append({'name': name, 'uuid': data.get('__UUID4__')})
     return results
 
@@ -340,7 +372,7 @@ def discover_all_tasks():
     """ Every task script this project has under tasks/<name>/<name>.py -- for the New Setup
     dialog's Task dropdown (discover_stage_configs() only lists tasks an existing Setup already
     uses, not the raw set of available scripts, since a new Setup needs to be able to pick one that
-    isn't in use anywhere yet, e.g. stage4_resume_staircases before its first Setup exists). """
+    isn't in use anywhere yet, e.g. stage5_resume_staircases before its first Setup exists). """
     results = []
     for path in sorted(glob.glob(os.path.join(_TASKS_DIR, '*', '*.py'))):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -404,8 +436,14 @@ def create_setup(name, board_name, task_name, subject_names):
     UUID -- the two-way link the real PyBpod GUI itself maintains. """
     _validate_new_name(name)
     setup_dir = os.path.join(_PROJECT_DIR, 'experiments', name, 'setups', name)
-    if os.path.exists(setup_dir):
+    setup_json_path = os.path.join(setup_dir, name + '.json')
+    if os.path.exists(setup_json_path):
         raise ValueError('An experiment/setup named "{0}" already exists.'.format(name))
+    # setup_dir itself (NOT its own .json) can legitimately already exist here -- delete_setup()
+    # deliberately only removes the .json ("unregister only," per explicit instruction), leaving
+    # the directory (and any real recorded session data in its own sessions/ subfolder) in place.
+    # Re-registering the same name afterward must still succeed -- that's the whole point of
+    # "unregister" rather than "retire this name forever."
 
     board_cfg_path = os.path.join(_PROJECT_DIR, 'boards', board_name, board_name + '.json')
     with open(board_cfg_path, 'r', encoding='utf-8') as f:
@@ -417,7 +455,7 @@ def create_setup(name, board_name, task_name, subject_names):
         with open(subject_path, 'r', encoding='utf-8') as f:
             subject_uuids[subject_name] = json.load(f)['__UUID4__']
 
-    os.makedirs(setup_dir)
+    os.makedirs(setup_dir, exist_ok=True)   # exist_ok -- see the comment above
     data = _scadict_boilerplate(
         'This file contains information about a PyBpod experiment setup.')
     data['board'] = board_name
@@ -427,7 +465,7 @@ def create_setup(name, board_name, task_name, subject_names):
     data['variables'] = []
     data['update-variables'] = False
     data['__EXTERNAL-REF__'] = [board_uuid] + [subject_uuids[n] for n in subject_names]
-    _write_pybpod_json(os.path.join(setup_dir, name + '.json'), data)
+    _write_pybpod_json(setup_json_path, data)
 
     setup_uuid = data['__UUID4__']
     for subject_name, subject_path in subject_paths.items():
@@ -438,6 +476,134 @@ def create_setup(name, board_name, task_name, subject_names):
         _write_pybpod_json(subject_path, subject_data)
 
     return setup_uuid
+
+
+def attach_subject_to_setup(experiment, setup, subject_name):
+    """ Attaches an EXISTING subject to an EXISTING setup -- the operation create_setup() has no
+    equivalent for once a setup already exists (it only builds brand-new ones). Confirmed as a
+    real, already-hit gap: a subject created via "New Subject..." starts with no setup at all
+    (create_subject()'s own "setup": "None"), and a stage's own Subject dropdown in this dashboard
+    is populated entirely from its Setup JSON's own `subjects` list -- so a never-attached subject
+    is simply never selectable for any stage until this is called. Same two-way-link convention as
+    create_setup(): updates the setup's own `subjects`/`__EXTERNAL-REF__` (both no-ops if the
+    subject is already listed) and the subject's own `setup` field (a subject belongs to only one
+    setup at a time, matching the real PyBpod GUI's own model -- re-attaching an already-attached
+    subject to a different setup simply moves it, same as create_setup() already does
+    unconditionally). """
+    setup_path = os.path.join(_PROJECT_DIR, 'experiments', experiment, 'setups', setup,
+                               setup + '.json')
+    if not os.path.exists(setup_path):
+        raise ValueError('Setup "{0}/{1}" does not exist.'.format(experiment, setup))
+    subject_path = os.path.join(_PROJECT_DIR, 'subjects', subject_name, subject_name + '.json')
+    if not os.path.exists(subject_path):
+        raise ValueError('Subject "{0}" does not exist.'.format(subject_name))
+
+    with open(subject_path, 'r', encoding='utf-8') as f:
+        subject_data = json.load(f)
+    subject_uuid = subject_data['__UUID4__']
+
+    with open(setup_path, 'r', encoding='utf-8') as f:
+        setup_data = json.load(f)
+    if subject_name not in setup_data.get('subjects', []):
+        setup_data.setdefault('subjects', []).append(subject_name)
+    if subject_uuid not in setup_data.get('__EXTERNAL-REF__', []):
+        setup_data.setdefault('__EXTERNAL-REF__', []).append(subject_uuid)
+    setup_data['__UPDATED-ON__'] = datetime.datetime.now().isoformat(' ')
+    _write_pybpod_json(setup_path, setup_data)
+
+    setup_uuid = setup_data['__UUID4__']
+    subject_data['setup'] = setup_uuid
+    subject_data['__UPDATED-ON__'] = datetime.datetime.now().isoformat(' ')
+    _write_pybpod_json(subject_path, subject_data)
+    return setup_uuid
+
+
+def detach_subject_from_setup(experiment, setup, subject_name):
+    """ The reverse of attach_subject_to_setup() -- removes subject_name from the setup's own
+    `subjects` list (and its UUID from `__EXTERNAL-REF__`), and resets the subject's own `setup`
+    field back to "None" (ONLY if it currently points at THIS setup -- if the subject was already
+    reattached elsewhere since, leave that alone rather than clobbering a different, newer
+    assignment). This only changes the Setup's CURRENT subject roster -- which subject(s) are
+    offered to launch a NEW session -- it never touches any already-recorded session's own
+    historical SUBJECT-NAME (immutable, baked in at record time) or any other file. Used to fix a
+    Setup that was given a badly-named placeholder subject (e.g. "test_stage1", stage information
+    baked into what should be a plain mouse ID -- see subject_aliases.json's own docstring in
+    build_training_log.py) once the right one has been created/attached instead. """
+    setup_path = os.path.join(_PROJECT_DIR, 'experiments', experiment, 'setups', setup,
+                               setup + '.json')
+    if not os.path.exists(setup_path):
+        raise ValueError('Setup "{0}/{1}" does not exist.'.format(experiment, setup))
+    subject_path = os.path.join(_PROJECT_DIR, 'subjects', subject_name, subject_name + '.json')
+    if not os.path.exists(subject_path):
+        raise ValueError('Subject "{0}" does not exist.'.format(subject_name))
+
+    with open(setup_path, 'r', encoding='utf-8') as f:
+        setup_data = json.load(f)
+    with open(subject_path, 'r', encoding='utf-8') as f:
+        subject_data = json.load(f)
+    subject_uuid = subject_data['__UUID4__']
+
+    if subject_name in setup_data.get('subjects', []):
+        setup_data['subjects'].remove(subject_name)
+    if subject_uuid in setup_data.get('__EXTERNAL-REF__', []):
+        setup_data['__EXTERNAL-REF__'].remove(subject_uuid)
+    setup_data['__UPDATED-ON__'] = datetime.datetime.now().isoformat(' ')
+    _write_pybpod_json(setup_path, setup_data)
+
+    if subject_data.get('setup') == setup_data['__UUID4__']:
+        subject_data['setup'] = 'None'
+        subject_data['__UPDATED-ON__'] = datetime.datetime.now().isoformat(' ')
+        _write_pybpod_json(subject_path, subject_data)
+
+
+def delete_setup(experiment, setup):
+    """ Removes ONLY the Setup's own JSON descriptor (experiments/<experiment>/setups/<setup>/
+    <setup>.json) -- per explicit instruction, this "unregisters" the stage from this dashboard's
+    own Stage dropdown (discover_stage_configs() scans for *.json files under setups/*, so
+    removing this file alone is enough to make it disappear) WITHOUT touching any of its real
+    recorded session data (experiments/<experiment>/setups/<setup>/sessions/ and everything under
+    it), which is left on disk untouched in case it's needed later -- per explicit instruction,
+    NOT the same scope as deleting an animal's own training-log row or session files.
+    Detaches every subject still listed in it first (same reasoning as delete_subject() below --
+    a subject's own `setup` field left pointing at a now-unregistered setup would be a dangling
+    reference otherwise). Irreversible for the registration itself (recreating a Setup of the same
+    name via "New Setup..." gets a fresh UUID, not the original); the caller (GUI) is responsible
+    for confirming with the user first. """
+    setup_dir = os.path.join(_PROJECT_DIR, 'experiments', experiment, 'setups', setup)
+    setup_path = os.path.join(setup_dir, setup + '.json')
+    if not os.path.exists(setup_path):
+        raise ValueError('Setup "{0}/{1}" does not exist.'.format(experiment, setup))
+    with open(setup_path, 'r', encoding='utf-8') as f:
+        setup_data = json.load(f)
+    for subject_name in list(setup_data.get('subjects', [])):
+        detach_subject_from_setup(experiment, setup, subject_name)
+    os.remove(setup_path)
+
+
+def delete_subject(name):
+    """ Deletes subjects/<name>/ entirely (its own identity json AND any other per-subject file
+    living next to it, e.g. session_state.py's own persisted wheel_shaping_state.json) -- real
+    recorded session data is untouched (it lives under experiments/.../sessions/, keyed by Setup,
+    not by subject folder), so this only removes the subject's own identity/cross-session-state
+    record, never any animal's already-recorded history.
+
+    First auto-detaches it from EVERY setup that still lists it -- a subject can appear in more
+    than one setup's own `subjects` list even though its own `setup` field points at only the most
+    recently-attached one (attach_subject_to_setup() adds to a new setup's list without removing
+    it from any previous one), so checking only the "current" setup would miss older, stale
+    listings and leave them as dangling name/UUID references to something that no longer exists.
+    Uses the exact same detach_subject_from_setup() the "Detach Subject from Setup..." button
+    already calls.
+
+    Irreversible (a real shutil.rmtree()); the caller (GUI) is responsible for confirming with the
+    user first. """
+    subject_dir = os.path.join(_PROJECT_DIR, 'subjects', name)
+    if not os.path.exists(subject_dir):
+        raise ValueError('Subject "{0}" does not exist.'.format(name))
+    for cfg in discover_stage_configs():
+        if name in cfg['subjects']:
+            detach_subject_from_setup(cfg['experiment'], cfg['setup'], name)
+    shutil.rmtree(subject_dir)
 
 
 # --- session-folder creation + subprocess launch, mirroring board_com.py:run_task() exactly ----
@@ -479,7 +645,7 @@ class TaskLauncher(object):
     def is_running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, stage_config, subject_name, user):
+    def start(self, stage_config, subject_name, user, reward_ul=VAR_DEFAULT_REWARD_UL):
         if self.is_running:
             raise RuntimeError('A task launched from this dashboard is already running.')
 
@@ -520,6 +686,10 @@ class TaskLauncher(object):
         # session CSV. Absent entirely for a real PyBpod-GUI-launched session (board_com.py never
         # sets this), so that path is completely unaffected.
         env['RUN_SESSION_DASHBOARD'] = '1'
+        # Overrides each stage script's own hardcoded VAR_REWARD_UL default -- see this dashboard's
+        # own reward_ul_input field. Absent entirely for a real PyBpod-GUI-launched session (same
+        # reasoning as RUN_SESSION_DASHBOARD above), so that path keeps each script's own default.
+        env['RUN_SESSION_REWARD_UL'] = str(reward_ul)
 
         stdout_log = open(os.path.join(session_path, 'dashboard_launch_stdout.log'), 'w')
         stderr_log = open(os.path.join(session_path, 'dashboard_launch_stderr.log'), 'w')
@@ -608,6 +778,26 @@ class PlotFeeder(object):
                 session_status['in_trial_threshold_deg'] = float(cue_abort)
             except (TypeError, ValueError):
                 pass
+        # Stage 3 only -- SESSION_SIDE is a session-level VAL (registered once, before the first
+        # TRIAL marker, so it only ever lands in session_vals, never first_trial_vals -- but
+        # checking both mirrors every other lookup here and costs nothing). Missing this was
+        # exactly why the dashboard's own embedded progress panel showed "today's side: ?" even
+        # though the real task script's own separate live-plot window (which builds this same
+        # dict directly, not through a CSV round-trip) always showed the real side correctly.
+        session_side = first_trial_vals.get('SESSION_SIDE') or session_vals.get('SESSION_SIDE')
+        if session_side is not None:
+            session_status['session_side'] = session_side
+        # Stage 4 only -- CLICK_LEVEL_ATTENUATED is a per-trial VAL, logged as the string
+        # 'True'/'False' (see session_csv_parser's own str-vs-float VAL convention).
+        click_attenuated = first_trial_vals.get('CLICK_LEVEL_ATTENUATED')
+        if click_attenuated is not None:
+            session_status['click_attenuated'] = (click_attenuated == 'True')
+        # Stage 5 only -- STAIRCASE_ACTIVE is per-trial, STAIRCASE_ACTIVE_THIS_SESSION is the
+        # session-level fallback (see stage5_resume_staircases.py's own two registrations).
+        staircase_active = (first_trial_vals.get('STAIRCASE_ACTIVE')
+                             or session_vals.get('STAIRCASE_ACTIVE_THIS_SESSION'))
+        if staircase_active is not None:
+            session_status['staircase_active'] = staircase_active
         self.plots = wheel_shaping_plots.WheelShapingPlots(
             info['stage'], VAR_THRESHOLD_FINAL_DEG, prev_session_values=prev_session_values,
             session_status=session_status, embed=True)
@@ -785,20 +975,49 @@ def find_row_for_session(ws, table_start_row, col_map, session_started):
     return None
 
 
+def _write_header_fields(ws, header_fields):
+    """ DOB/Sex/Strain/Baseline weight, in that fixed row order (rows 2-5, column B -- matches
+    build_training_log.py's own _HEADER_FIELD_LABELS layout exactly). Only writes a field if
+    given (non-empty) -- never overwrites an existing value with blank, so a field pre-filled
+    from load_header_fields() and left untouched by the caller round-trips as a no-op. """
+    for i, value in enumerate(header_fields):
+        if value:
+            ws.cell(row=2 + i, column=2, value=value)
+
+
+def save_subject_header_fields(subject, header_fields):
+    """ Writes DOB/Sex/Strain/Baseline weight into training_log.xlsx's own per-subject sheet
+    header block, creating the sheet (and the workbook itself) if either doesn't exist yet --
+    used right at subject-creation time (see NewSubjectDialog) so these rarely-if-ever-changing
+    fields are asked ONCE, not re-prompted on every session's own weight/notes save. Deliberately
+    does NOT call build_training_log.build_workbook() first (unlike save_manual_fields()) -- that
+    only creates a sheet for a subject it already found a real session CSV for, which a
+    brand-new subject never has yet; this opens/creates the workbook directly instead, same
+    "load if present else start fresh, drop the default blank sheet" shape build_workbook()
+    itself uses. """
+    if os.path.exists(_OUTPUT_XLSX):
+        wb = openpyxl.load_workbook(_OUTPUT_XLSX)
+    else:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+    ws, _table_start_row = build_training_log._get_or_create_subject_sheet(wb, subject)
+    _write_header_fields(ws, header_fields)
+    wb.save(_OUTPUT_XLSX)
+
+
 def save_manual_fields(subject, session_started, weight_g, weight_after_g, hand_watered, notes,
                         header_fields):
     """ Regenerates training_log.xlsx first (so this session's own row definitely exists / is
     current -- same call "Update Training Log" already makes), then writes directly into the
-    manual cells for that row plus the subject's header block (DOB/Sex/Strain/Baseline weight).
+    manual cells for that row plus the subject's header block (DOB/Sex/Strain/Baseline weight --
+    see _write_header_fields()'s own docstring for why a blank field is always a safe no-op).
     Returns True if the session's own row was found and written. """
     build_training_log.build_workbook()
     wb = openpyxl.load_workbook(_OUTPUT_XLSX)
     ws, table_start_row = build_training_log._get_or_create_subject_sheet(wb, subject)
     col_map = build_training_log._scan_existing_column_labels(ws, table_start_row)
 
-    for i, value in enumerate(header_fields):
-        if value:
-            ws.cell(row=2 + i, column=2, value=value)
+    _write_header_fields(ws, header_fields)
 
     row = find_row_for_session(ws, table_start_row, col_map, session_started)
     found = row is not None
@@ -856,12 +1075,27 @@ def find_newest_session_csv():
 # would ask for -------------------------------------------------------------------------------
 
 class NewSubjectDialog(QDialog):
+    """ DOB/Sex/Strain/Baseline weight are asked HERE, once, at creation time -- not on every
+    session's own Weight/Notes save (see SessionRunnerWindow._on_save_weight()'s own docstring
+    for why re-asking rarely-if-ever-changing fields every session was the wrong design). All are
+    optional -- a mouse can be catalogued now and these filled in later directly in
+    training_log.xlsx or by re-running "New Subject..." is not possible (name must be unique), so
+    leaving them blank here just means the header cells stay blank until hand-edited. """
+
     def __init__(self, parent=None):
         super(NewSubjectDialog, self).__init__(parent)
         self.setWindowTitle('New Subject')
         layout = QFormLayout()
         self.name_input = QLineEdit()
         layout.addRow('Subject name:', self.name_input)
+        self.dob_input = QLineEdit()
+        layout.addRow('DOB (optional):', self.dob_input)
+        self.sex_input = QLineEdit()
+        layout.addRow('Sex (optional):', self.sex_input)
+        self.strain_input = QLineEdit()
+        layout.addRow('Strain (optional):', self.strain_input)
+        self.baseline_weight_input = QLineEdit()
+        layout.addRow('Baseline weight (g, optional):', self.baseline_weight_input)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -870,6 +1104,10 @@ class NewSubjectDialog(QDialog):
 
     def subject_name(self):
         return self.name_input.text().strip()
+
+    def header_fields(self):
+        return [self.dob_input.text().strip(), self.sex_input.text().strip(),
+                self.strain_input.text().strip(), self.baseline_weight_input.text().strip()]
 
 
 class NewSetupDialog(QDialog):
@@ -914,6 +1152,143 @@ class NewSetupDialog(QDialog):
                 if self.subject_list.item(i).checkState() == Qt.Checked]
 
 
+class AttachSubjectDialog(QDialog):
+    """ Attaches an EXISTING subject to an EXISTING setup -- see attach_subject_to_setup()'s own
+    docstring for why this is a genuinely separate action from "New Setup..." (which only ever
+    builds a brand-new setup, never adds a subject to one that already exists). """
+
+    def __init__(self, subjects, stage_configs, parent=None):
+        super(AttachSubjectDialog, self).__init__(parent)
+        self.setWindowTitle('Attach Subject to Setup')
+        layout = QFormLayout()
+        self.subject_combo = QComboBox()
+        for subject in subjects:
+            self.subject_combo.addItem(subject['name'])
+        layout.addRow('Subject:', self.subject_combo)
+        self.setup_combo = QComboBox()
+        for cfg in stage_configs:
+            label = '{0} ({1})'.format(cfg['experiment'], cfg['task_name'])
+            self.setup_combo.addItem(label, cfg)
+        layout.addRow('Setup:', self.setup_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setLayout(layout)
+
+    def subject_name(self):
+        return self.subject_combo.currentText()
+
+    def stage_config(self):
+        return self.setup_combo.currentData()
+
+
+class DetachSubjectDialog(QDialog):
+    """ The reverse of AttachSubjectDialog -- see detach_subject_from_setup()'s own docstring.
+    The Subject dropdown is scoped to whichever Setup is currently selected (only subjects
+    actually attached to it are valid things to detach), refreshed live as the Setup changes. """
+
+    def __init__(self, stage_configs, parent=None):
+        super(DetachSubjectDialog, self).__init__(parent)
+        self.setWindowTitle('Detach Subject from Setup')
+        self._stage_configs = stage_configs
+        layout = QFormLayout()
+        self.setup_combo = QComboBox()
+        for cfg in stage_configs:
+            label = '{0} ({1})'.format(cfg['experiment'], cfg['task_name'])
+            self.setup_combo.addItem(label, cfg)
+        self.setup_combo.currentIndexChanged.connect(self._on_setup_changed)
+        layout.addRow('Setup:', self.setup_combo)
+        self.subject_combo = QComboBox()
+        layout.addRow('Subject:', self.subject_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setLayout(layout)
+        self._on_setup_changed()
+
+    def _on_setup_changed(self):
+        self.subject_combo.clear()
+        cfg = self.setup_combo.currentData()
+        if cfg is None:
+            return
+        for subject_name in cfg['subjects']:
+            self.subject_combo.addItem(subject_name)
+
+    def subject_name(self):
+        return self.subject_combo.currentText()
+
+    def stage_config(self):
+        return self.setup_combo.currentData()
+
+
+class DeleteSetupDialog(QDialog):
+    """ Picks an existing Setup to unregister -- see delete_setup()'s own docstring for exactly
+    what this does and doesn't remove (the Setup's own JSON only, never its recorded session
+    data). """
+
+    def __init__(self, stage_configs, parent=None):
+        super(DeleteSetupDialog, self).__init__(parent)
+        self.setWindowTitle('Delete Stage')
+        layout = QFormLayout()
+        layout.addRow(QLabel(
+            'Only unregisters the stage from the dropdown above -- its recorded session data\n'
+            'stays on disk untouched. This cannot be undone (a new "New Setup..." of the same\n'
+            'name gets a fresh identity, not this one back).'))
+        self.setup_combo = QComboBox()
+        for cfg in stage_configs:
+            label = '{0} ({1})'.format(cfg['experiment'], cfg['task_name'])
+            self.setup_combo.addItem(label, cfg)
+        layout.addRow('Setup:', self.setup_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setLayout(layout)
+
+    def stage_config(self):
+        return self.setup_combo.currentData()
+
+
+class DeleteSubjectDialog(QDialog):
+    """ Picks an existing Subject to delete -- a real, irreversible shutil.rmtree() (see
+    delete_subject()'s own docstring), so this requires typing the subject's own name to confirm,
+    not just a combo-box pick -- the same "extra friction for a true directory removal" principle
+    CLAUDE.md's own git-safety guidance already applies to `rm -rf`. """
+
+    def __init__(self, subjects, parent=None):
+        super(DeleteSubjectDialog, self).__init__(parent)
+        self.setWindowTitle('Delete Subject')
+        layout = QFormLayout()
+        layout.addRow(QLabel(
+            'Permanently deletes this subject\'s own identity/cross-session training state.\n'
+            'Already-recorded session data is untouched (it lives under experiments/, keyed by\n'
+            'Setup, not by subject). This cannot be undone.'))
+        self.subject_combo = QComboBox()
+        for subject in subjects:
+            self.subject_combo.addItem(subject['name'])
+        self.subject_combo.currentIndexChanged.connect(self._on_subject_changed)
+        layout.addRow('Subject:', self.subject_combo)
+        self.confirm_input = QLineEdit()
+        layout.addRow('Type name to confirm:', self.confirm_input)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setLayout(layout)
+
+    def _on_subject_changed(self):
+        self.confirm_input.clear()
+
+    def subject_name(self):
+        return self.subject_combo.currentText()
+
+    def confirmed(self):
+        return (self.confirm_input.text().strip() == self.subject_name()
+                and bool(self.subject_name()))
+
+
 # --- main window ---------------------------------------------------------------------------------
 
 class SessionRunnerWindow(QWidget):
@@ -927,6 +1302,8 @@ class SessionRunnerWindow(QWidget):
         self._watched_csv_path = None
         self._feeder = None
         self._stop_deadline = None
+        self._flush_valve_proc = None
+        self._rig_check_proc = None
 
         self._build_ui()
         self._populate_stage_combo()
@@ -985,6 +1362,21 @@ class SessionRunnerWindow(QWidget):
         self.training_log_label = QLabel(_OUTPUT_XLSX)
         self.training_log_label.setWordWrap(True)
         log_row.addWidget(self.training_log_label, stretch=1)
+        self.flush_valve_button = QPushButton('Flush Valve')
+        self.flush_valve_button.setToolTip(
+            'Launches Calibration/flush_valve.py in its own window (Open/Close Valve buttons, '
+            'holds the valve open indefinitely for cleaning/priming, independent of calibration) '
+            '-- connects to the Bpod board directly, same as a launched task, so don\'t run this '
+            'while a task is running here or on another box sharing this rig.')
+        self.flush_valve_button.clicked.connect(self._on_flush_valve)
+        log_row.addWidget(self.flush_valve_button)
+        self.rig_check_button = QPushButton('Rig Check')
+        self.rig_check_button.setToolTip(
+            'Launches Calibration/rig_check.py in its own window for a quick hardware sanity '
+            'check -- connects to the Bpod board directly, same as a launched task, so don\'t run '
+            'this while a task is running here or on another box sharing this rig.')
+        self.rig_check_button.clicked.connect(self._on_rig_check)
+        log_row.addWidget(self.rig_check_button)
         self.update_log_button = QPushButton('Update Training Log')
         self.update_log_button.clicked.connect(self._on_update_training_log)
         log_row.addWidget(self.update_log_button)
@@ -1013,18 +1405,59 @@ class SessionRunnerWindow(QWidget):
         self.new_setup_button = QPushButton('New Setup...')
         self.new_setup_button.clicked.connect(self._on_new_setup)
         stage_row.addWidget(self.new_setup_button)
+        self.delete_setup_button = QPushButton('Delete Stage...')
+        self.delete_setup_button.setToolTip(
+            'Unregisters a stage from the dropdown above -- its recorded session data stays on '
+            'disk untouched. See the confirmation dialog for exactly what this does and doesn\'t '
+            'remove.')
+        self.delete_setup_button.clicked.connect(self._on_delete_setup)
+        stage_row.addWidget(self.delete_setup_button)
         launch_form.addRow('Stage:', stage_row)
         subject_row = QHBoxLayout()
         self.subject_combo = QComboBox()
+        self.subject_combo.currentIndexChanged.connect(self._on_subject_changed)
         subject_row.addWidget(self.subject_combo, stretch=1)
         self.new_subject_button = QPushButton('New Subject...')
         self.new_subject_button.clicked.connect(self._on_new_subject)
         subject_row.addWidget(self.new_subject_button)
+        self.delete_subject_button = QPushButton('Delete Subject...')
+        self.delete_subject_button.setToolTip(
+            'Permanently deletes a subject\'s own identity/cross-session training state (auto-'
+            'detaching it from any stage first). Already-recorded session data is untouched.')
+        self.delete_subject_button.clicked.connect(self._on_delete_subject)
+        subject_row.addWidget(self.delete_subject_button)
         launch_form.addRow('Subject:', subject_row)
+        attach_detach_row = QHBoxLayout()
+        self.attach_subject_button = QPushButton('Attach Subject to Setup...')
+        self.attach_subject_button.setToolTip(
+            'Attach an already-existing subject (e.g. one created via "New Subject...") to an '
+            'already-existing setup -- lets one real animal run every stage under the same '
+            'subject identity instead of being stuck unattached/unselectable.')
+        self.attach_subject_button.clicked.connect(self._on_attach_subject)
+        attach_detach_row.addWidget(self.attach_subject_button)
+        self.detach_subject_button = QPushButton('Detach Subject from Setup...')
+        self.detach_subject_button.setToolTip(
+            'Remove a subject from a setup\'s own roster -- e.g. to retire a badly-named '
+            'placeholder subject (stage info baked into the name) once the right one has been '
+            'attached instead. Only changes which subjects are offered for NEW sessions; never '
+            'touches any already-recorded session\'s own data.')
+        self.detach_subject_button.clicked.connect(self._on_detach_subject)
+        attach_detach_row.addWidget(self.detach_subject_button)
+        launch_form.addRow(attach_detach_row)
         self.user_combo = QComboBox()
         for user in self._users:
             self.user_combo.addItem(user['name'], user)
         launch_form.addRow('User:', self.user_combo)
+        self.reward_ul_input = QDoubleSpinBox()
+        self.reward_ul_input.setRange(0.1, 50.0)
+        self.reward_ul_input.setSingleStep(0.5)
+        self.reward_ul_input.setDecimals(1)
+        self.reward_ul_input.setValue(VAR_DEFAULT_REWARD_UL)
+        self.reward_ul_input.setToolTip(
+            'Target reward volume for this launch -- overrides the task script\'s own hardcoded '
+            'default via RUN_SESSION_REWARD_UL. Valve open time is still derived from this via '
+            'Calibration/liquid_calibration.py\'s own fitted curve, same as always.')
+        launch_form.addRow('Reward (uL):', self.reward_ul_input)
         buttons_row = QHBoxLayout()
         self.start_button = QPushButton('Start Task')
         self.start_button.clicked.connect(self._on_start_task)
@@ -1080,12 +1513,11 @@ class SessionRunnerWindow(QWidget):
 
         weight_group = QGroupBox('Weight / notes (writes to training_log.xlsx)')
         weight_form = QFormLayout()
-        self.dob_input = QLineEdit()
-        weight_form.addRow('DOB:', self.dob_input)
-        self.sex_input = QLineEdit()
-        weight_form.addRow('Sex:', self.sex_input)
-        self.strain_input = QLineEdit()
-        weight_form.addRow('Strain:', self.strain_input)
+        # DOB/Sex/Strain are deliberately NOT here -- asked once, at subject-creation time (see
+        # NewSubjectDialog), not re-prompted every session. Baseline weight stays here since it
+        # can occasionally need updating, but it's pre-filled with whatever's already on record
+        # (see _prefill_baseline_weight()) -- leaving it untouched round-trips as a no-op, only
+        # typing a new value actually changes it.
         self.baseline_weight_input = QLineEdit()
         weight_form.addRow('Baseline weight (g):', self.baseline_weight_input)
         self.weight_before_input = QDoubleSpinBox()
@@ -1161,6 +1593,19 @@ class SessionRunnerWindow(QWidget):
         for subject in cfg['subjects']:
             self.subject_combo.addItem(subject)
 
+    def _on_subject_changed(self):
+        subject = self.subject_combo.currentText()
+        if subject:
+            self._prefill_baseline_weight(subject)
+
+    def _prefill_baseline_weight(self, subject):
+        """ Pre-fills Baseline weight from whatever's already on record for this subject (DOB/
+        Sex/Strain are no longer part of this form at all -- see weight_group's own comment) --
+        called on a genuine subject CHANGE only (the Subject combo, or a newly-watched session
+        revealing its own subject), never on every ~2s plots-poll tick, so it can't clobber
+        whatever the user might currently be typing into the field. """
+        self.baseline_weight_input.setText(load_header_fields(subject)[3])
+
     # --- task-python self-check / training log / new subject+setup -----------------------------
 
     def _run_task_python_check(self):
@@ -1172,6 +1617,61 @@ class SessionRunnerWindow(QWidget):
             'VAR_TASK_PYTHON_EXE at the top of run_session.py to point at your pybpod-environment\'s'
             ' own python.exe.'.format(VAR_TASK_PYTHON_EXE))
         self.task_python_warning_label.show()
+
+    def _confirm_bpod_contention(self, tool_label):
+        """ Both flush_valve.py and rig_check.py connect to the Bpod board directly (their own
+        separate process, separate from this dashboard's own launched-task subprocess) -- running
+        either one concurrently with an actively-running task is genuine unsynchronized access to
+        the same physical COM port (see CLAUDE.md's documented Bpod-hardware-module hazards).
+        Returns True if it's safe to proceed (no task running here), or if the user explicitly
+        confirms anyway. """
+        if not self.launcher.is_running:
+            return True
+        return QMessageBox.question(
+            self, 'Task is running',
+            'A task launched from this dashboard is currently running, using the same Bpod COM '
+            'port {0} would need. Launch anyway?'.format(tool_label),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _on_flush_valve(self):
+        if self._flush_valve_proc is not None and self._flush_valve_proc.poll() is None:
+            QMessageBox.information(self, 'Already running',
+                                     'Flush Valve is already open in its own console window.')
+            return
+        if not os.path.exists(VAR_FLUSH_VALVE_SCRIPT):
+            QMessageBox.critical(self, 'Not found',
+                                  'Could not find {0}.'.format(VAR_FLUSH_VALVE_SCRIPT))
+            return
+        if not self._confirm_bpod_contention('Flush Valve'):
+            return
+        try:
+            # flush_valve.py builds its own QApplication/window (Open/Close Valve buttons) --
+            # launched as a fully separate process (not imported in-process) so its own Qt event
+            # loop and Bpod connection never collide with this dashboard's own, same convention as
+            # _on_rig_check() below.
+            self._flush_valve_proc = subprocess.Popen(
+                [VAR_TASK_PYTHON_EXE, VAR_FLUSH_VALVE_SCRIPT])
+        except Exception as err:
+            QMessageBox.critical(self, 'Launch failed', str(err))
+
+    def _on_rig_check(self):
+        if self._rig_check_proc is not None and self._rig_check_proc.poll() is None:
+            QMessageBox.information(self, 'Already running',
+                                     'Rig Check is already open in its own window.')
+            return
+        if not os.path.exists(VAR_RIG_CHECK_SCRIPT):
+            QMessageBox.critical(self, 'Not found',
+                                  'Could not find {0}.'.format(VAR_RIG_CHECK_SCRIPT))
+            return
+        if not self._confirm_bpod_contention('Rig Check'):
+            return
+        try:
+            # rig_check.py builds its own QApplication/window -- launched as a fully separate
+            # process (not imported in-process) so its own Qt event loop and Bpod connection never
+            # collide with this dashboard's own.
+            self._rig_check_proc = subprocess.Popen([VAR_TASK_PYTHON_EXE, VAR_RIG_CHECK_SCRIPT])
+        except Exception as err:
+            QMessageBox.critical(self, 'Launch failed', str(err))
 
     def _on_update_training_log(self):
         buf = io.StringIO()
@@ -1195,13 +1695,16 @@ class SessionRunnerWindow(QWidget):
         name = dialog.subject_name()
         try:
             create_subject(name)
+            save_subject_header_fields(name, dialog.header_fields())
         except Exception as err:
             QMessageBox.critical(self, 'Could not create subject', str(err))
             return
         QMessageBox.information(
             self, 'Subject created',
-            'Created subject "{0}". Attach it to a Setup via "New Setup..." (or an existing one) '
-            'to use it for a task.'.format(name))
+            'Created subject "{0}" -- not attached to any Setup yet, so it won\'t appear in the '
+            'Subject dropdown until you attach it. Use "Attach Subject to Setup..." to add it to '
+            'an existing one (e.g. Stage1), or "New Setup..." to build a brand-new one with it '
+            'already included.'.format(name))
 
     def _on_new_setup(self):
         boards = discover_boards()
@@ -1224,6 +1727,119 @@ class SessionRunnerWindow(QWidget):
         QMessageBox.information(self, 'Setup created',
                                  'Created experiment/setup "{0}".'.format(name))
 
+    def _on_attach_subject(self):
+        subjects = discover_subjects()
+        if not subjects:
+            QMessageBox.warning(self, 'No subjects',
+                                 'No subjects found under subjects/ -- create one via '
+                                 '"New Subject..." first.')
+            return
+        if not self._stage_configs:
+            QMessageBox.warning(self, 'No setups',
+                                 'No setups found under experiments/ -- create one via '
+                                 '"New Setup..." first.')
+            return
+        dialog = AttachSubjectDialog(subjects, self._stage_configs, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        subject_name = dialog.subject_name()
+        cfg = dialog.stage_config()
+        try:
+            attach_subject_to_setup(cfg['experiment'], cfg['setup'], subject_name)
+        except Exception as err:
+            QMessageBox.critical(self, 'Could not attach subject', str(err))
+            return
+        self._stage_configs = discover_stage_configs()
+        self._populate_stage_combo()
+        QMessageBox.information(
+            self, 'Subject attached',
+            'Attached "{0}" to {1} ({2}) -- it will now appear in the Subject dropdown for that '
+            'stage.'.format(subject_name, cfg['experiment'], cfg['task_name']))
+
+    def _on_detach_subject(self):
+        if not self._stage_configs:
+            QMessageBox.warning(self, 'No setups',
+                                 'No setups found under experiments/ -- nothing to detach from.')
+            return
+        if not any(cfg['subjects'] for cfg in self._stage_configs):
+            QMessageBox.information(self, 'Nothing to detach',
+                                     'No setup currently has any subject attached.')
+            return
+        dialog = DetachSubjectDialog(self._stage_configs, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        subject_name = dialog.subject_name()
+        cfg = dialog.stage_config()
+        if not subject_name:
+            return
+        try:
+            detach_subject_from_setup(cfg['experiment'], cfg['setup'], subject_name)
+        except Exception as err:
+            QMessageBox.critical(self, 'Could not detach subject', str(err))
+            return
+        self._stage_configs = discover_stage_configs()
+        self._populate_stage_combo()
+        QMessageBox.information(
+            self, 'Subject detached',
+            'Detached "{0}" from {1} ({2}).'.format(subject_name, cfg['experiment'],
+                                                       cfg['task_name']))
+
+    def _on_delete_setup(self):
+        if not self._stage_configs:
+            QMessageBox.warning(self, 'No setups',
+                                 'No setups found under experiments/ -- nothing to delete.')
+            return
+        dialog = DeleteSetupDialog(self._stage_configs, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        cfg = dialog.stage_config()
+        if cfg is None:
+            return
+        if QMessageBox.question(
+                self, 'Delete stage?',
+                'Unregister {0} ({1}) from the Stage dropdown? Its recorded session data stays '
+                'on disk untouched. This cannot be undone.'.format(
+                    cfg['experiment'], cfg['task_name']),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            delete_setup(cfg['experiment'], cfg['setup'])
+        except Exception as err:
+            QMessageBox.critical(self, 'Could not delete setup', str(err))
+            return
+        self._stage_configs = discover_stage_configs()
+        self._populate_stage_combo()
+        QMessageBox.information(self, 'Setup deleted',
+                                 'Unregistered {0} ({1}).'.format(cfg['experiment'],
+                                                                   cfg['task_name']))
+
+    def _on_delete_subject(self):
+        subjects = discover_subjects()
+        if not subjects:
+            QMessageBox.warning(self, 'No subjects',
+                                 'No subjects found under subjects/ -- nothing to delete.')
+            return
+        dialog = DeleteSubjectDialog(subjects, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        subject_name = dialog.subject_name()
+        if not subject_name:
+            return
+        if not dialog.confirmed():
+            QMessageBox.warning(self, 'Not confirmed',
+                                 'Typed name didn\'t match "{0}" -- nothing deleted.'.format(
+                                     subject_name))
+            return
+        try:
+            delete_subject(subject_name)
+        except Exception as err:
+            QMessageBox.critical(self, 'Could not delete subject', str(err))
+            return
+        self._stage_configs = discover_stage_configs()
+        self._populate_stage_combo()
+        QMessageBox.information(self, 'Subject deleted',
+                                 'Deleted subject "{0}".'.format(subject_name))
+
     # --- launch / stop ---------------------------------------------------------------------------
 
     def _on_start_task(self):
@@ -1235,7 +1851,8 @@ class SessionRunnerWindow(QWidget):
                                  'Choose a stage, subject, and user first.')
             return
         try:
-            session_path = self.launcher.start(cfg, subject, user)
+            session_path = self.launcher.start(cfg, subject, user,
+                                                reward_ul=self.reward_ul_input.value())
         except Exception as err:
             print(traceback.format_exc(), flush=True)
             QMessageBox.critical(self, 'Launch failed', str(err))
@@ -1354,6 +1971,10 @@ class SessionRunnerWindow(QWidget):
             self.summary_label.setText(
                 'Subject: {subject}  |  Protocol: {protocol}  |  Trials: {trial_count}  |  '
                 'Rewarded: {reward_count}  |  Licks: {lick_count}'.format(**summary))
+            if summary['subject'] != getattr(self, '_current_subject', None):
+                # Only on a genuine CHANGE -- this poll fires every ~2s, and re-prefilling on
+                # every tick would clobber whatever the user might be actively typing.
+                self._prefill_baseline_weight(summary['subject'])
             self._current_subject = summary['subject']
             self._current_session_started = summary['session_started']
 
@@ -1440,8 +2061,10 @@ class SessionRunnerWindow(QWidget):
             QMessageBox.warning(self, 'No session', 'No watched session to attach this entry to '
                                                       'yet -- start or wait for a session first.')
             return
-        header_fields = [self.dob_input.text().strip(), self.sex_input.text().strip(),
-                          self.strain_input.text().strip(), self.baseline_weight_input.text().strip()]
+        # DOB/Sex/Strain are blank here on purpose -- see weight_group's own comment in
+        # _build_ui(); _write_header_fields() never overwrites an existing value with blank, so
+        # this never touches those cells. Baseline weight is the only one this form can change.
+        header_fields = ['', '', '', self.baseline_weight_input.text().strip()]
         try:
             found = save_manual_fields(
                 subject, session_started,

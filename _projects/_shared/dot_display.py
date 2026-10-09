@@ -290,8 +290,9 @@ class MiddleScreenDotDisplay(object):
 # script independently defined its own VAR_USE_MIDDLE_SCREEN_ONLY/VAR_DOT_SCREEN_INDEX/
 # VAR_N_PHYSICAL_MONITORS_IN_SPAN/VAR_ACTIVE_MONITOR_INDEX/VAR_DOT_DIAMETER_PX and its own
 # if/else DotDisplay-vs-MiddleScreenDotDisplay construction -- confirmed as a real, already-happened
-# drift risk: stage2_threshold_staircase.py, stage3_clicks_direction.py, stage4_resume_staircases.py,
-# and dot_wheel_test.py were all still constructing a plain, full-spanned DotDisplay (never updated
+# drift risk: stage2_threshold_staircase.py, stage4_clicks_direction.py, stage5_resume_staircases.py
+# (formerly stage3_clicks_direction.py/stage4_resume_staircases.py, before a new Stage 3 was
+# inserted), and dot_wheel_test.py were all still constructing a plain, full-spanned DotDisplay (never updated
 # to match the middle-screen fix applied elsewhere), silently showing the dot smeared across all
 # three physical monitors on this rig instead of confined to the middle one. create_dot_display()
 # is the one place this rig's actual monitor/size/contrast configuration lives now -- a future

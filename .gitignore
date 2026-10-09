@@ -1,6 +1,5 @@
 _projects/docs_local/
-_projects/AuditoryEvidenceAccum/experiments/**/session_video.avi
-_projects/AuditoryEvidenceAccum/experiments/**/user_settings.py
+_projects/AuditoryEvidenceAccum/experiments/
 _projects/AuditoryEvidenceAccum/subjects/
 _projects/AuditoryEvidenceAccum/boards/
 _projects/AuditoryEvidenceAccum/users/
@@ -16,4 +15,5 @@ _projects/Tests/tasks/**/*.png
 Calibration/liquid_calibration.json
 Calibration/sound_calibration.json
 Calibration/sound_calibration_report.txt
+**/~$*.xlsx
 **/__pycache__/

@@ -4,8 +4,8 @@
     "__DEF-URL__": "http://pybpod.readthedocs.org",
     "__SOFTWARE__": "PyBpod GUI API v1.8.2",
     "__UPDATED-ON__": "2026-09-17 00:00:00.000000",
-    "__UUID4__": "21e0bb8e-0432-4023-8255-a22d539147ce",
+    "__UUID4__": "e24e049e-3bf5-496a-9c2c-93016c9cf031",
     "commands": [],
-    "name": "stage3_clicks_direction",
+    "name": "stage5_resume_staircases",
     "trigger-softcodes": false
 }

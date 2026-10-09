@@ -1,20 +1,22 @@
 # !/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-training_protocol.md Revision 2, Stage 4 -- "resume threshold and quiescence staircases".
+training_protocol.md Revision 2, Stage 5 (formerly "Stage 4" before a new Stage 3 -- tone-side
+association -- was inserted, pushing this and the old Stage 3 each up by one) -- "resume
+threshold and quiescence staircases".
 
-Structural twin of stage3_clicks_direction.py (same 0.25s cue, same 100-200ms delay range --
-Stage 4 doesn't extend either, that's Stages 5/6; same warm-up block, debiasing rule, abort
+Structural twin of stage4_clicks_direction.py (same 0.25s cue, same 100-200ms delay range --
+Stage 5 doesn't extend either, that's Stages 6/7; same warm-up block, debiasing rule, abort
 re-offer, and engagement-based session-end triggers) with the two staircases that were frozen
-since Stage 2/3 now resumed: response threshold (staircase.ThresholdStaircase, the SAME class
-Stage 2 uses, continuing from wherever Stage 2/3 left its persisted counters) toward
-STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION (90% of edge azimuth, not ThresholdStaircase's own 1.0
+since Stage 2/4 now resumed: response threshold (staircase.ThresholdStaircase, the SAME class
+Stage 2 uses, continuing from wherever Stage 2/4 left its persisted counters) toward
+STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION (90% of edge azimuth, not ThresholdStaircase's own 1.0
 ceiling) -- +10%/20 successes, -10%/5 failures; quiescence (staircase.QuiescenceStaircase, new)
 toward a 0.1-0.5s exponential -- +25ms/20 successful initiations, -25ms/5 resets.
 
 Tag B (training_protocol.md Revision 2 Appendix A): at most ONE of the two staircases may tighten
 in any given SESSION -- selected once, at session start, via
-staircase.select_stage4_staircase_to_tighten() (policy: prioritize whichever is furthest from its
+staircase.select_stage5_staircase_to_tighten() (policy: prioritize whichever is furthest from its
 own final value, tie-break by alternating from the previous session's choice). Implementation
 choice made here: the INACTIVE staircase is fully frozen for the whole session -- its
 record_outcome() is simply never called, so neither its current value NOR its internal
@@ -23,21 +25,21 @@ consecutive-success/failure counters move until a future session selects it. (A 
 QuiescenceStaircase's own record_outcome() has no way to separate "count this" from "apply the
 resulting step" without changing those classes, and full-freeze is what "the other holds" most
 unambiguously means.) Which staircase was active is registered every trial (STAIRCASE_ACTIVE) and
-persisted as 'stage4_last_staircase_advanced' for next session's tie-break.
+persisted as 'stage5_last_staircase_advanced' for next session's tie-break.
 
-No click-level attenuation here -- Stage 3's own countdown (click_attenuation_sessions_remaining)
-should already have reached 0 by the time a subject advances to Stage 4; this script always plays
-at full click level. Still single-evidence-level (gamma=+-1.0/AOS) -- Stage 4's own advancement
-criterion is stated in terms of "accuracy at gamma=+-1.0", same as Stage 3, so the evidence grid
+No click-level attenuation here -- Stage 4's own countdown (click_attenuation_sessions_remaining)
+should already have reached 0 by the time a subject advances to Stage 5; this script always plays
+at full click level. Still single-evidence-level (gamma=+-1.0/AOS) -- Stage 5's own advancement
+criterion is stated in terms of "accuracy at gamma=+-1.0", same as Stage 4, so the evidence grid
 does not expand until a later stage.
 
 At the end of the FINAL qualifying session, run `_wheel_shaping_shared/derive_intrial_threshold.py`
-manually (not from this script -- Stage 5 doesn't exist yet in this codebase to consume the
+manually (not from this script -- Stage 6 doesn't exist yet in this codebase to consume the
 result automatically) against that session's own CSV to derive a new in-trial threshold for
 whatever comes next; hand-enter the result into the persisted 'in_trial_threshold_deg' (or a
-future Stage 5 script's own starting config) once available.
+future Stage 6 script's own starting config) once available.
 
-See stage3_clicks_direction.py's own docstring for everything else this file shares with it
+See stage4_clicks_direction.py's own docstring for everything else this file shares with it
 unchanged (hardware/module connection plumbing, additions.txt instrumentation conventions, the
 T9 monotonic-clock/CSV-flush scope notes).
 """
@@ -91,7 +93,7 @@ def _export_session_struct(csv_path):
 
 
 def _cleanup_and_export():
-    """ Shared teardown, called from every exit path -- see stage3_clicks_direction.py's own
+    """ Shared teardown, called from every exit path -- see stage4_clicks_direction.py's own
     identical helper for the fixed exception-path gap this pattern avoids. """
     try:
         runner.register('SESSION_WATER_UL', session_reward_count * VAR_REWARD_UL)
@@ -110,7 +112,7 @@ def _cleanup_and_export():
 def _git_commit():
     """ additions.txt T9: best-effort git commit hash (+dirty flag) for provenance. Runs the git
     calls on a background daemon thread and bounds the MAIN thread with thread.join(timeout=...)
-    instead of relying on subprocess's own timeout= -- confirmed on real hardware (Stage 3, same
+    instead of relying on subprocess's own timeout= -- confirmed on real hardware (Stage 4, same
     _git_commit() copy, log-stage3.txt) that subprocess.check_output(..., timeout=3) alone is NOT
     reliably enforced on Windows here: it still stalled ~84s despite the timeout, a known CPython
     Windows quirk where Popen.communicate(timeout=...), on timing out, kills the immediate child
@@ -119,7 +121,7 @@ def _git_commit():
     Bounding the join instead means the main thread is never blocked past the join timeout
     regardless of what the underlying subprocess does; the daemon thread is simply abandoned.
 
-    Timeout is 15s, not the original 5s -- confirmed on real hardware (Stage 3) that even 'git
+    Timeout is 15s, not the original 5s -- confirmed on real hardware (Stage 4) that even 'git
     rev-parse HEAD' alone was still regularly taking longer than 5s on this rig even after this
     threading fix went in, so 5s was cutting it off before it could ever actually succeed. The
     underlying git slowness on this rig is unexplained and NOT fixed by this -- 15s just gives it
@@ -158,7 +160,7 @@ if not _raw_subjects:
 VAR_SUBJECT_ID = session_csv_parser.parse_subject_name(_raw_subjects[0])
 VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
-# --- stage parameters (training_protocol.md Revision 2, Stage 4) -------------------------------------
+# --- stage parameters (training_protocol.md Revision 2, Stage 5) -------------------------------------
 
 VAR_MAX_TRIALS = 1000
 VAR_STEADY_THRESHOLD_DEG = 4
@@ -167,30 +169,32 @@ VAR_RESPONSE_TIMEOUT_S = 5.0
 VAR_THRESHOLD_FINAL_DEG = 35
 VAR_TRIAL_COUNT_ADVANCE = 200        # doc: ">=200 trials/session" (MAIN trials only)
 
-VAR_STIM_DURATION_S = 0.25           # unchanged from Stage 3 -- extended only from Stage 5 onward
-VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 3 -- extended only from Stage 6 onward
+VAR_STIM_DURATION_S = 0.25           # unchanged from Stage 4 -- extended only from Stage 6 onward
+VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
 VAR_DELAY_DURATION_MAX_S = 0.2
 VAR_ABORT_TIMEOUT_MIN_S = 1.0
 VAR_ABORT_TIMEOUT_MAX_S = 2.0
 
 VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same default
-                                      # as Stage 3. Waveform amplitude is derived from this via
+                                      # as Stage 4. Waveform amplitude is derived from this via
                                       # Calibration/sound_calibration.py's fitted curve (see
                                       # VAR_LEFT_AMPLITUDE_SCALE/VAR_RIGHT_AMPLITUDE_SCALE below) --
-                                      # Stage 4 has no warmup-attenuation mechanism, so this applies
-                                      # directly/unconditionally, unlike Stage 3.
+                                      # Stage 5 has no warmup-attenuation mechanism, so this applies
+                                      # directly/unconditionally, unlike Stage 4.
 
 VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # see
-                                      # stage3_clicks_direction.py's own identical constant --
-                                      # still a placeholder through Stage 4's own trials; only
+                                      # stage4_clicks_direction.py's own identical constant --
+                                      # still a placeholder through Stage 5's own trials; only
                                       # RE-DERIVED (via derive_intrial_threshold.py, manually, by
-                                      # the experimenter) at the end of Stage 4, for a future stage.
+                                      # the experimenter) at the end of Stage 5, for a future stage.
 
 VAR_ITI_S = 1.5
 VAR_INCORRECT_ITI_S = 4.0
 VAR_CONSUMPTION_WINDOW_S = 3.0
 
-VAR_REWARD_UL = 4.0
+VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # env var lets
+                       # run_session.py's own launch-time reward field override this default;
+                       # absent (real PyBpod-GUI launch) -> falls back to the hardcoded default.
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1
@@ -205,6 +209,16 @@ VAR_WARMUP_TRIAL_MIN = 20
 VAR_WARMUP_TRIAL_MAX = 40
 
 VAR_SESSION_CAP_S = 90 * 60
+# If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
+# registered) and this one is starting soon enough to count as its own continuation (same
+# merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own
+# time cap by however long that interrupted bout already ran -- so a restart doesn't hand the
+# animal a full fresh 90 minutes on top of what it already did. Resets back to the full value
+# automatically once a session reaches its own deliberate end (see
+# session_csv_parser.compute_remaining_quota()'s own docstring).
+_, VAR_SESSION_CAP_S = session_csv_parser.compute_remaining_quota(
+    os.path.dirname(os.path.abspath(os.getcwd())), os.path.basename(os.path.abspath(os.getcwd())),
+    os.path.splitext(os.path.basename(__file__))[0], VAR_SUBJECT_ID, full_cap_s=VAR_SESSION_CAP_S)
 VAR_NO_INIT_TIMEOUT_S = 3 * 60
 VAR_CONSECUTIVE_ABORT_LIMIT = 20
 VAR_SUBCHANCE_BLOCK_SIZE = 20
@@ -228,7 +242,7 @@ VAR_CAMERA_SNIPPET_S = 1.0
 # --- persisted cross-session state (same file as Stage 1/2/3) ----------------------------------------
 
 state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
-    'threshold_fraction': staircase.STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION * 0.5,   # sensible
+    'threshold_fraction': staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION * 0.5,   # sensible
                                        # fallback only -- normally already set by Stage 2/3.
     'consecutive_successes': 0,
     'consecutive_failures': 0,
@@ -236,9 +250,9 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
     'quiescence_consecutive_successes': 0,
     'quiescence_consecutive_failures': 0,
-    'stage4_last_staircase_advanced': None,   # 'response' / 'quiescence' / None -- Tag B tie-break
-    'stage4_sessions_history': [],            # bools: did each past session meet
-                                               # staircase.stage4_gates_met()? (2-consecutive check)
+    'stage5_last_staircase_advanced': None,   # 'response' / 'quiescence' / None -- Tag B tie-break
+    'stage5_sessions_history': [],            # bools: did each past session meet
+                                               # staircase.stage5_gates_met()? (2-consecutive check)
 })
 
 threshold_obj = staircase.ThresholdStaircase(
@@ -254,9 +268,9 @@ VAR_CUE_ABORT_THRESHOLD_DEG = state.get('in_trial_threshold_deg')
 
 # Tag B: decided ONCE, for the whole session -- only this staircase's record_outcome() is ever
 # called below; the other is fully frozen this session (see module docstring).
-active_staircase = staircase.select_stage4_staircase_to_tighten(
+active_staircase = staircase.select_stage5_staircase_to_tighten(
     threshold_obj.current_fraction, quiescence_obj.current_s,
-    state.get('stage4_last_staircase_advanced'))
+    state.get('stage5_last_staircase_advanced'))
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -299,7 +313,7 @@ my_bpod.register_value('CAMERA_FPS', camera.fps)
 render_interval = 1.0 / VAR_RENDER_HZ
 
 bench_plots = WheelShapingPlots(
-    stage=4, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
+    stage=5, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': threshold_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG},
     session_status={'staircase_active': active_staircase, 'quiescence_s': quiescence_obj.current_s,
                      'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
@@ -308,7 +322,7 @@ bench_plots = WheelShapingPlots(
     # window only when launched from run_session.py, which shows the same data in its own window.
     embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
 
-print("Starting Stage 4 -- staircase active this session: {0} (response threshold {1:.1f}deg = "
+print("Starting Stage 5 -- staircase active this session: {0} (response threshold {1:.1f}deg = "
       "{2:.0%} of final, quiescence scale {3:.3f}s)".format(
           active_staircase, threshold_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG,
           threshold_obj.current_fraction, quiescence_obj.current_s), flush=True)
@@ -694,7 +708,7 @@ while True:
         prev_side = side
 
         # accuracy_aos (session end) is conditional on a genuine L/R response -- see
-        # stage3_clicks_direction.py's own identical comment for why NoResponse is excluded.
+        # stage4_clicks_direction.py's own identical comment for why NoResponse is excluded.
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
@@ -769,18 +783,18 @@ state.set('consecutive_failures', threshold_obj.consecutive_failures)
 state.set('quiescence_s', quiescence_obj.current_s)
 state.set('quiescence_consecutive_successes', quiescence_obj.consecutive_successes)
 state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
-state.set('stage4_last_staircase_advanced', active_staircase)
+state.set('stage5_last_staircase_advanced', active_staircase)
 
 accuracy_aos = (sum(main_trial_correct) / float(len(main_trial_correct))
                 if main_trial_correct else 0.0)
 abort_rate = (total_aborts / float(total_attempts)) if total_attempts else 0.0
 
-this_session_gates_met = staircase.stage4_gates_met(
+this_session_gates_met = staircase.stage5_gates_met(
     threshold_obj.current_fraction, quiescence_obj.current_s, accuracy_aos, abort_rate,
     session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE)
-history = state.get('stage4_sessions_history')
+history = state.get('stage5_sessions_history')
 history.append(this_session_gates_met)
-state.set('stage4_sessions_history', history[-2:])
+state.set('stage5_sessions_history', history[-2:])
 advance_ready = len(history) >= 2 and all(history[-2:])
 
 state.save()
@@ -790,7 +804,7 @@ print("Session: {0} main trials, accuracy(AOS)={1:.1%}, abort_rate={2:.1%}, gate
 print("Response threshold now {0:.1f}deg ({1:.0%} of final, target {2:.0%}), quiescence scale "
       "now {3:.3f}s (target {4:.1f}s)".format(
           threshold_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG, threshold_obj.current_fraction,
-          staircase.STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION, quiescence_obj.current_s,
+          staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION, quiescence_obj.current_s,
           staircase.QUIESCENCE_CEILING_S), flush=True)
 print("ADVANCE-READY (2 consecutive qualifying sessions): {0}".format(
     "yes" if advance_ready else "no"), flush=True)

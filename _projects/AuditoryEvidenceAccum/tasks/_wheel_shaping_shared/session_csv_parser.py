@@ -13,7 +13,9 @@ doesn't need its own copy.
 import ast
 import csv
 import datetime
+import glob
 import math
+import os
 
 # VAL keys that get registered repeatedly WITHIN a single trial (e.g. once per wheel-position
 # sample, once per quiescence reset) rather than once -- the generic VAL branch below used to keep
@@ -62,14 +64,16 @@ PROTOCOL_CONFIG = {
         'left_event': 'RotaryEncoder1_3',    # ALL_THRESHOLDS_DEG's 3rd entry (LEFT_THRESHOLD_DEG)
         'right_event': 'RotaryEncoder1_4',   # ALL_THRESHOLDS_DEG's 4th entry (RIGHT_THRESHOLD_DEG)
     },
-    # Stage 3 ("clicks and direction") and Stage 4 ("resume threshold and quiescence staircases")
-    # -- training_protocol.md Revision 2. Same real-2AFC-choice shape as full_protocol_lookback_test
-    # above (a genuine incorrect/aborted outcome exists, unlike Stage 1/2's shaping-only outcomes),
-    # and deliberately the SAME state names (CuePeriod/DelayPeriod/WheelAbort/WheelDotPeriod/Reward/
-    # ErrorConsumption/NoResponse) and event-index convention (ALL_THRESHOLDS_DEG's 3rd/4th entries
-    # for left/right) as that already-validated script, since stage3_clicks_direction.py/
-    # stage4_resume_staircases.py's own state machines were built as direct structural copies of it.
-    'stage3_clicks_direction': {
+    # Stage 3 ("tone-side association"), Stage 4 ("clicks and direction") and Stage 5 ("resume
+    # threshold and quiescence staircases") -- training_protocol.md Revision 2 (Stage 3 is a new
+    # stage inserted ahead of what used to be Stage 3/Stage 4, pushing those up to 4/5). Same
+    # real-2AFC-choice shape as full_protocol_lookback_test above (a genuine incorrect/aborted
+    # outcome exists, unlike Stage 1/2's shaping-only outcomes), and deliberately the SAME state
+    # names (CuePeriod/DelayPeriod/WheelAbort/WheelDotPeriod/Reward/ErrorConsumption/NoResponse)
+    # and event-index convention (ALL_THRESHOLDS_DEG's 3rd/4th entries for left/right) as that
+    # already-validated script, since stage3_tone_side_association.py/stage4_clicks_direction.py/
+    # stage5_resume_staircases.py's own state machines were built as direct structural copies of it.
+    'stage3_tone_side_association': {
         'rewarded_states': ['Reward'],
         'incorrect_states': ['ErrorConsumption'],
         'no_movement_states': ['NoResponse'],
@@ -79,7 +83,17 @@ PROTOCOL_CONFIG = {
         'left_event': 'RotaryEncoder1_3',
         'right_event': 'RotaryEncoder1_4',
     },
-    'stage4_resume_staircases': {
+    'stage4_clicks_direction': {
+        'rewarded_states': ['Reward'],
+        'incorrect_states': ['ErrorConsumption'],
+        'no_movement_states': ['NoResponse'],
+        'aborted_states': ['WheelAbort'],
+        'withheld_states': [],
+        'side_from': 'event',
+        'left_event': 'RotaryEncoder1_3',
+        'right_event': 'RotaryEncoder1_4',
+    },
+    'stage5_resume_staircases': {
         'rewarded_states': ['Reward'],
         'incorrect_states': ['ErrorConsumption'],
         'no_movement_states': ['NoResponse'],
@@ -315,3 +329,113 @@ def real_trials(trials):
     before that trial's Bpod machine ever ran (confirmed on a real bench-test log) -- not a
     genuine attempted trial. """
     return [t for t in trials if t['states']]
+
+
+# --- live-session quota reduction after an interrupted (Stop/Kill/crash) restart -----------------
+# A stage script calls compute_remaining_quota() at its own startup, right after its full
+# VAR_MAX_TRIALS/VAR_SESSION_CAP_S are defined, to shrink whichever of those this session is
+# really a CONTINUATION of an interrupted bout for (same protocol+subject, restarted soon after an
+# abnormal end) -- so the animal isn't given a full fresh quota on top of what it already did in
+# the part that got cut short. A session that reaches its own deliberate end (any registered
+# SESSION_END_REASON at all -- "absence signals an abnormal/early end", same convention as
+# elsewhere in this codebase) always resets the next session back to the FULL quota, matching
+# build_training_log.py's own group_sessions() merge-eligibility rule but keyed on actual absence
+# of a reason rather than the literal string 'completed' (stage3/4/5 scripts never register that
+# exact value for their own deliberate endings, unlike stage1/2's for...else branch).
+
+def session_lite_summary(path, protocol_name_filter=None, subject_id_filter=None):
+    """ Minimal per-session summary for compute_remaining_quota() below -- deliberately NOT
+    build_training_log.py's own summarize_session() (no openpyxl dependency, so a live task
+    script can import this at launch without pulling that in). Returns None if the file isn't
+    parseable, has no real trials, or doesn't match protocol_name_filter/subject_id_filter (either
+    may be left None to skip that check). """
+    try:
+        info, session_vals, trials = parse_session_csv(path)
+    except (IOError, OSError):
+        return None
+    if protocol_name_filter is not None and info.get('PROTOCOL-NAME') != protocol_name_filter:
+        return None
+    if subject_id_filter is not None:
+        if parse_subject_name(info.get('SUBJECT-NAME')) != subject_id_filter:
+            return None
+    trials = real_trials(trials)
+    if not trials:
+        return None
+    all_event_times = [t for trial in trials for times in trial['events'].values() for t in times]
+    duration_s = (max(all_event_times) - min(all_event_times)) if all_event_times else None
+    started_dt = parse_datetime(info.get('SESSION-STARTED'))
+    return {
+        'trial_count': len(trials),
+        'duration_s': duration_s,
+        'started_dt': started_dt,
+        'ended_dt': session_end_datetime(info, started_dt, duration_s),
+        'session_end_reason': find_val_str_backward(trials, session_vals, 'SESSION_END_REASON'),
+    }
+
+
+def _chain_already_used(sorted_summaries, now_dt, merge_gap_s):
+    """ Pure chaining logic (unit-testable without real files -- see validate_wheel_shaping.py) --
+    given lite summaries for ONE protocol+subject, chronologically sorted, returns (trial_count,
+    duration_s) already consumed by the still-open bout (if any) that a session starting at
+    now_dt would be continuing. A bout stays "open" across successive summaries only while each
+    one's own session_end_reason is absent (Stop/Kill/crash) and it started within merge_gap_s of
+    the previous one's own end; any registered reason closes the bout right there, even if the
+    NEXT summary in the list starts promptly after it (that one starts a fresh bout of its own
+    instead). Returns (0, 0.0) if the list is empty, the most recent summary's bout isn't open, or
+    the gap from its end to now_dt has already expired. """
+    chain_trials = 0
+    chain_duration_s = 0.0
+    open_since_dt = None   # None means "no open bout right now"
+    for summary in sorted_summaries:
+        started_dt = summary['started_dt']
+        continues_open_bout = (open_since_dt is not None and started_dt is not None
+                                and (started_dt - open_since_dt).total_seconds() <= merge_gap_s)
+        if continues_open_bout:
+            chain_trials += summary['trial_count']
+            chain_duration_s += (summary['duration_s'] or 0.0)
+        else:
+            chain_trials = summary['trial_count']
+            chain_duration_s = (summary['duration_s'] or 0.0)
+        open_since_dt = None if summary['session_end_reason'] is not None else summary['ended_dt']
+
+    if open_since_dt is None:
+        return 0, 0.0
+    if (now_dt - open_since_dt).total_seconds() > merge_gap_s:
+        return 0, 0.0
+    return chain_trials, chain_duration_s
+
+
+def compute_remaining_quota(sessions_dir, this_session_name, protocol_name, subject_id,
+                             full_max_trials=None, full_cap_s=None, merge_gap_s=3600.0):
+    """ Scans sibling session folders under sessions_dir (same setup, i.e. same task) older than
+    this_session_name, and reduces whichever of full_max_trials/full_cap_s the caller passed by
+    however much of it the still-open interrupted bout (see _chain_already_used() above) already
+    used -- floored at 1 trial / 60s so a long-interrupted bout never leaves literally nothing to
+    run. Returns (remaining_max_trials, remaining_cap_s); either is None if the caller didn't pass
+    that quota at all (e.g. stage1/2 only ever pass full_max_trials, stage3/4/5 only full_cap_s).
+    Never raises on a bad/unreadable sibling file -- this is a best-effort welfare nicety, not
+    something that should ever block a session from starting. """
+    summaries = []
+    for folder in sorted(glob.glob(os.path.join(sessions_dir, '*'))):
+        name = os.path.basename(folder)
+        if name >= this_session_name:
+            continue
+        csv_paths = glob.glob(os.path.join(folder, '*.csv'))
+        if not csv_paths:
+            continue
+        try:
+            summary = session_lite_summary(csv_paths[0], protocol_name_filter=protocol_name,
+                                            subject_id_filter=subject_id)
+        except Exception:
+            continue
+        if summary is not None:
+            summaries.append(summary)
+
+    used_trials, used_duration_s = _chain_already_used(
+        summaries, datetime.datetime.now(), merge_gap_s)
+
+    remaining_max_trials = (max(1, full_max_trials - used_trials)
+                             if full_max_trials is not None else None)
+    remaining_cap_s = (max(60.0, full_cap_s - used_duration_s)
+                        if full_cap_s is not None else None)
+    return remaining_max_trials, remaining_cap_s

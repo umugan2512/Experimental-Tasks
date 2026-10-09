@@ -121,6 +121,16 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 # --- stage parameters (training_protocol.md Part 4, Stage 1's table) --------------------------------
 
 VAR_MAX_TRIALS = 400                # hard-ceiling safety backstop, well above the 200-trial goal
+# If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
+# registered) and this one is starting soon enough to count as its own continuation (same
+# merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own
+# trial quota by however many trials that interrupted bout already ran -- so a restart doesn't
+# hand the animal a full fresh 400 trials on top of what it already did. Resets back to the full
+# value automatically once a session reaches its own deliberate end (see
+# session_csv_parser.compute_remaining_quota()'s own docstring).
+VAR_MAX_TRIALS, _ = session_csv_parser.compute_remaining_quota(
+    os.path.dirname(os.path.abspath(os.getcwd())), os.path.basename(os.path.abspath(os.getcwd())),
+    os.path.splitext(os.path.basename(__file__))[0], VAR_SUBJECT_ID, full_max_trials=VAR_MAX_TRIALS)
 VAR_QUIESCENCE_S = 0.1              # fixed 100ms -- doc: "trivially short, but present from the
                                      # very first operant trial"
 VAR_STEADY_THRESHOLD_DEG = 4        # IBL convention, same as every other task -- the HOLD-STILL
@@ -147,8 +157,12 @@ VAR_THRESHOLD_STARTING_FRACTION = 0.10   # only used the very first time this su
 VAR_TRIAL_COUNT_ADVANCE = 200       # doc: ">200 completed trials/session on two consecutive
                                      # sessions"
 
-VAR_REWARD_UL = 4.0                 # target reward volume -- valve open time is derived from this
-                                     # via Calibration/liquid_calibration.py's own fitted curve
+VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
+                                     # valve open time is derived from this via
+                                     # Calibration/liquid_calibration.py's own fitted curve. The
+                                     # env var lets run_session.py's own launch-time reward field
+                                     # override this default; absent (real PyBpod-GUI launch) ->
+                                     # falls back to the hardcoded default, unchanged behavior.
                                      # (falls back to a hardcoded 0.1s if no calibration data/fit
                                      # exists yet on this machine -- see get_reward_duration_s()).
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)

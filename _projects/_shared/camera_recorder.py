@@ -93,15 +93,31 @@ def discover_camera(max_index=5):
     :param int max_index: highest index to probe (exclusive)
     :raises RuntimeError: if no index in range opens and yields a real frame
     """
+    index, cap = _discover_camera_capture(max_index)
+    cap.release()
+    return index
+
+
+def _discover_camera_capture(max_index=5):
+    """ Same probe as discover_camera(), but returns (index, open_capture) instead of releasing
+    the capture it just verified works -- CameraRecorder.__init__() reuses it directly rather than
+    closing it and immediately reopening the same index from scratch. Confirmed as a real,
+    already-hit cost on real hardware: opening this rig's own camera via cv2.VideoCapture is slow
+    enough that doing it twice in a row (once to probe here, once more to actually use it) added a
+    whole extra ~17s to Stage 3's own startup with zero console output in between to explain the
+    wait (traced directly from a real session's own dashboard_launch_stdout.log timestamps -- the
+    entire gap sat between "Connected to HiFi module" and CameraRecorder's own first print, with
+    nothing else running in between). All 4 real stage scripts hit this same path (every one of
+    them passes VAR_CAMERA_INDEX=None). Callers that only need the index and don't need to keep a
+    capture open (e.g. Calibration/rig_check.py, which opens its own separate preview-only capture
+    later) should keep using discover_camera(). """
     for index in range(max_index):
         cap = cv2.VideoCapture(index)
-        try:
-            if cap.isOpened():
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    return index
-        finally:
-            cap.release()
+        if cap.isOpened():
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return index, cap
+        cap.release()
     raise RuntimeError("No working camera found in indices 0..{0}".format(max_index - 1))
 
 
@@ -138,11 +154,17 @@ class CameraRecorder(object):
     def __init__(self, log_python_t0, camera_index=None, output_path='session_video.avi',
                  fps=30.0, preview=True):
         self._log_python_t0 = log_python_t0
-        self.camera_index = camera_index if camera_index is not None else discover_camera()
+        if camera_index is not None:
+            self.camera_index = camera_index
+            self._cap = cv2.VideoCapture(self.camera_index)
+        else:
+            # Reuses the already-open capture _discover_camera_capture() just verified works --
+            # see its own docstring for why opening this a SECOND time (the old behavior: discover
+            # the index, release it, then open it again here) cost a real, confirmed extra ~17s.
+            self.camera_index, self._cap = _discover_camera_capture()
         self.output_path = output_path
         self.fps = fps
 
-        self._cap = cv2.VideoCapture(self.camera_index)
         if not self._cap.isOpened():
             raise RuntimeError("Could not open camera index {0}".format(self.camera_index))
 

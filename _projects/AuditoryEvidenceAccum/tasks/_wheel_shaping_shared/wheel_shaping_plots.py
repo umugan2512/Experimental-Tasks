@@ -152,11 +152,13 @@ class WheelShapingPlots(object):
     def __init__(self, stage, threshold_final_deg, prev_session_values=None, session_status=None,
                  reward_ul=None, embed=False):
         """
-        :param int stage: 1, 2, 3, or 4 -- controls which panels are meaningful. Stage 1 has no
+        :param int stage: 1, 2, 3, 4, or 5 -- controls which panels are meaningful. Stage 1 has no
             direction-ratio withholding and a fixed threshold/decaying gain instead of a staircase.
-            Stage 3/4 are a real 2AFC choice (correct/incorrect/abort exist) with clicks -- a
+            Stage 3/4/5 are a real 2AFC choice (correct/incorrect/abort exist) with clicks -- a
             structurally different panel set from Stage 1/2's shaping-only one, see the new
-            mosaic below.
+            mosaic below. Stage 3 (tone-side association) fixes the side for the whole session;
+            Stage 4 (formerly "Stage 3") ramps click level then runs per-trial sides; Stage 5
+            (formerly "Stage 4") resumes the response-threshold/quiescence staircases.
         :param float threshold_final_deg: the FINAL (Stage 3+) movement threshold, used to draw the
             raster's y-axis in real degrees and to express the progress panel's threshold bar as a
             fraction of this value.
@@ -166,11 +168,12 @@ class WheelShapingPlots(object):
             change them. Shown as an annotation on the progress panel so day-over-day movement is
             visible without cross-referencing the state file. Keys not present are simply not
             annotated (e.g. Stage 1 has no 'iti_s').
-        :param dict session_status: Stage 3/4 only -- static-for-the-whole-session display info the
-            progress panel can't derive from prev_session_values/add_trial() alone:
-            {'in_trial_threshold_deg': 10.0} (Stage 3/4, the in-trial abort threshold in force),
-            {'click_attenuated': True} (Stage 3 only, whether the click-level ramp is still active),
-            {'staircase_active': 'response'} (Stage 4 only, this session's Tag-B selection).
+        :param dict session_status: Stage 3/4/5 only -- static-for-the-whole-session display info
+            the progress panel can't derive from prev_session_values/add_trial() alone:
+            {'in_trial_threshold_deg': 10.0} (Stage 4/5, the in-trial abort threshold in force),
+            {'session_side': 'R'} (Stage 3 only, today's fixed side),
+            {'click_attenuated': True} (Stage 4 only, whether the click-level ramp is still active),
+            {'staircase_active': 'response'} (Stage 5 only, this session's Tag-B selection).
         :param float reward_ul: this session's own VAR_REWARD_UL (constant for the whole session,
             same as threshold_final_deg) -- used only to show total CONSUMED water (reward_ul times
             the count of rewarded trials with at least one lick registered, not merely delivered)
@@ -207,7 +210,7 @@ class WheelShapingPlots(object):
                                           # rewarded trial so far -- mirrors live_plots.py's own
         self._lickraster_rendered_n = 0
 
-        # --- Stage 3/4 only, from here down -----------------------------------------------------
+        # --- Stage 3/4/5 only, from here down -----------------------------------------------------
         self._accuracy_trial_idx = []
         self._accuracy_values = []       # 1.0/0.0 per MAIN trial, for the rolling-mean line
         self._accuracy_rolling = []
@@ -256,7 +259,7 @@ class WheelShapingPlots(object):
         # legible at half width, so only those three span both columns. height_ratios keeps small
         # bar/text panels visually compact instead of stretching to match a full-width row's default
         # height, which is what made the previous layout feel unaligned/oversized for its content.
-        if stage in (3, 4):
+        if stage in (3, 4, 5):
             mosaic = [['raster', 'raster'],
                       ['progress', 'engagement'],
                       ['percent_outcome', 'psychometric'],
@@ -280,7 +283,7 @@ class WheelShapingPlots(object):
             height_ratios = [2.2, 0.8, 1.3, 1.0]
 
         self._embed = embed
-        figsize = (11, 14) if stage in (3, 4) else (10, 11)
+        figsize = (11, 14) if stage in (3, 4, 5) else (10, 11)
         # constrained_layout instead of a one-time tight_layout() call -- handles the mixed
         # panel sizes/legends/titles here far more robustly (recomputes automatically on every
         # redraw as content changes, e.g. a legend appearing once data exists), which is what was
@@ -314,7 +317,7 @@ class WheelShapingPlots(object):
         self._setup_lick_timeline_axes()
         if stage == 2:
             self._setup_direction_ratio_axes()
-        if stage in (3, 4):
+        if stage in (3, 4, 5):
             self._setup_accuracy_axes()
             self._setup_engagement_axes()
             self._setup_sidebias_axes()
@@ -381,7 +384,7 @@ class WheelShapingPlots(object):
         if outcome in ('Rewarded', 'Reward') and reward_time_abs is not None:
             self._reward_lick_rows.append([t - reward_time_abs for t in lick_times_abs])
 
-        if self._stage in (3, 4):
+        if self._stage in (3, 4, 5):
             row = self._session_trial_count
 
             if outcome == 'Abort':
@@ -439,8 +442,8 @@ class WheelShapingPlots(object):
         self._raster_threshold_pos = ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         self._raster_threshold_neg = ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.axhline(0, color='#888888', linewidth=0.6)
-        if self._stage in (3, 4):
-            # Stage 3/4 only: a second, TIGHTER pair of reference lines for the in-trial
+        if self._stage in (3, 4, 5):
+            # Stage 3/4/5 only: a second, TIGHTER pair of reference lines for the in-trial
             # (cue-abort) threshold, distinct from the (looser) response/choice threshold the
             # first pair above already draws -- so it's visible at a glance how close excursions
             # are running to the abort boundary vs. the actual choice boundary.
@@ -462,7 +465,7 @@ class WheelShapingPlots(object):
         if self._cur_threshold_deg is not None:
             self._raster_threshold_pos.set_ydata([self._cur_threshold_deg] * 2)
             self._raster_threshold_neg.set_ydata([-self._cur_threshold_deg] * 2)
-        if self._stage in (3, 4) and self._cur_in_trial_threshold_deg is not None:
+        if self._stage in (3, 4, 5) and self._cur_in_trial_threshold_deg is not None:
             self._raster_intrial_pos.set_ydata([self._cur_in_trial_threshold_deg] * 2)
             self._raster_intrial_neg.set_ydata([-self._cur_in_trial_threshold_deg] * 2)
         ax.set_xlim(0, max(10, self._trial_idx[-1] + 1))
@@ -478,8 +481,10 @@ class WheelShapingPlots(object):
         elif self._stage == 2:
             labels = ['trials/200', 'threshold/final', 'ITI/1.5s']
         elif self._stage == 3:
+            labels = ['main trials', 'response thresh (frozen)', "today's side"]
+        elif self._stage == 4:
             labels = ['main trials', 'response thresh (frozen)', 'click level']
-        else:   # stage 4
+        else:   # stage 5
             labels = ['main trials', 'response thresh/target', 'quiescence/target']
         self._progress_bars = ax.barh(labels, [0] * len(labels), color='tab:blue')
         self._progress_texts = [ax.text(0.02, i, '', va='center', fontsize=8)
@@ -529,6 +534,13 @@ class WheelShapingPlots(object):
                      '{0:.2f}/1.50s{1}'.format(
                          self._cur_iti_s or 0, self._prev_session_suffix('iti_s', '{0:.2f}s'))]
         elif self._stage == 3:
+            session_side = self._session_status.get('session_side')
+            fracs = [trial_frac, threshold_frac, 1.0]
+            texts = ['{0} (this session)'.format(self._session_trial_count),
+                     '{0:.1f}deg (frozen from Stage 2)'.format(self._cur_threshold_deg or 0),
+                     "today's side: {0}".format(session_side or '?')]
+            colors = ['tab:blue', 'tab:blue', SIDE_COLORS.get(session_side, 'tab:blue')]
+        elif self._stage == 4:
             attenuated = bool(self._session_status.get('click_attenuated'))
             click_frac = 0.5 if attenuated else 1.0
             fracs = [trial_frac, threshold_frac, click_frac]
@@ -536,9 +548,9 @@ class WheelShapingPlots(object):
                      '{0:.1f}deg (frozen from Stage 2)'.format(self._cur_threshold_deg or 0),
                      'ATTENUATED (-6dB)' if attenuated else 'FULL LEVEL']
             colors = ['tab:blue', 'tab:blue', 'tab:orange' if attenuated else 'tab:green']
-        else:   # stage 4
+        else:   # stage 5
             active = self._session_status.get('staircase_active')
-            resp_target = staircase.STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION
+            resp_target = staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
             resp_frac = min((self._cur_threshold_deg or 0)
                              / (resp_target * self._threshold_final_deg), 1.3)
             quiescence_s = self._session_status.get('quiescence_s')
@@ -823,7 +835,7 @@ class WheelShapingPlots(object):
         self._redraw_lick_timeline(self._axes['lick_timeline'])
         if self._stage == 2:
             self._redraw_direction_ratio(self._axes['direction_ratio'])
-        if self._stage in (3, 4):
+        if self._stage in (3, 4, 5):
             self._redraw_accuracy(self._axes['accuracy'])
             self._redraw_engagement(self._axes['engagement'])
             self._redraw_sidebias(self._axes['sidebias'])

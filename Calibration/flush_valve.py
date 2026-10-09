@@ -15,59 +15,109 @@ concurrent thread/process is genuinely unsynchronized access -- not a concern fo
 never has a state machine running at all).
 
 Run directly: `python flush_valve.py` (needs the Bpod board and valve physically connected). Same
-"connects directly, skips all PyBpod project/task scaffolding" convention as `calibrate_liquid.py`
--- see that file's own module docstring for why `Bpod(serial_port=VAR_BPOD_SERIAL_PORT)` is required
-here too, not a bare `Bpod()`.
+"connects directly, skips all PyBpod project/task scaffolding" convention as `calibrate_liquid.py`/
+`rig_check.py` -- see those files' own module docstrings for why `Bpod(serial_port=
+VAR_BPOD_SERIAL_PORT)` is required here too, not a bare `Bpod()`.
 
-Interactive terminal loop -- no GUI needed for a two-state (open/closed) maintenance tool:
-    Enter    -> toggle the valve open/closed
-    q, Enter -> close the valve (if open) and quit
-
-The valve is always closed on exit (normal quit, Ctrl+C, or any error) -- never left open
-unattended.
+**Small standalone GUI** (per explicit request -- launched from a button in `run_session.py`'s own
+dashboard, so a separate "type into a console" interactive loop was a worse fit than a couple of
+buttons): one status label plus explicit, SEPARATE "Open Valve" / "Close Valve" buttons -- not one
+toggle button, so there's never any ambiguity about which state a click will produce, and the
+layout stays uncrowded for a tool this small. `closeEvent()` force-closes the valve (and the Bpod
+connection) if the window is closed while the valve is still open, same guaranteed-close-on-exit
+safety net the original terminal version's own `finally:` block provided -- the valve, and the
+whole tool's hardware connection, is always returned to its original (closed/disconnected) state
+no matter how the window is dismissed.
 """
+import sys
+
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+
 from pybpodapi.protocol import Bpod
 
-VAR_VALVE_IDS = [1]   # this rig's single valve (see CLAUDE.md: "wheel-turn choice + single valve")
+VAR_VALVE_ID = 1   # this rig's single valve (see CLAUDE.md: "wheel-turn choice + single valve")
 VAR_BPOD_SERIAL_PORT = 'COM10'   # MACHINE-SPECIFIC -- this rig's own confirmed Bpod COM port, same
-                                  # constant/convention as calibrate_liquid.py's own
+                                  # constant/convention as calibrate_liquid.py/rig_check.py's own
                                   # VAR_BPOD_SERIAL_PORT. Update per box.
 
 
-def _set_valve(my_bpod, valve_id, is_open):
-    my_bpod.manual_override(Bpod.ChannelTypes.OUTPUT, Bpod.ChannelNames.VALVE,
-                             channel_number=valve_id, value=1 if is_open else 0)
+class FlushValveWindow(QWidget):
+    def __init__(self):
+        super(FlushValveWindow, self).__init__()
+        self.setWindowTitle('Flush Valve')
 
+        self.my_bpod = None
+        self._valve_open = False
 
-def main():
-    valve_id = VAR_VALVE_IDS[0]
-    if len(VAR_VALVE_IDS) > 1:
-        raw = input('Valve id {0}: '.format(VAR_VALVE_IDS)).strip()
-        if raw:
-            valve_id = int(raw)
+        self._connect_hardware()
+        self._build_ui()
 
-    my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT)
-    print("Connected to Bpod on {0}".format(my_bpod.serial_port), flush=True)
+    def _connect_hardware(self):
+        try:
+            self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT)
+            self.bpod_status = 'Connected on {0}'.format(self.my_bpod.serial_port)
+            print("Connected to Bpod on {0}".format(self.my_bpod.serial_port), flush=True)
+        except Exception as err:
+            self.my_bpod = None
+            self.bpod_status = 'FAILED: {0}'.format(err)
 
-    is_open = False
-    try:
-        print("Valve {0} flush -- press Enter to toggle open/closed, 'q' + Enter to quit.".format(
-            valve_id))
-        while True:
-            cmd = input('[{0}] > '.format('OPEN' if is_open else 'closed')).strip().lower()
-            if cmd == 'q':
-                break
-            is_open = not is_open
-            _set_valve(my_bpod, valve_id, is_open)
-            print('Valve {0} is now {1}.'.format(valve_id, 'OPEN' if is_open else 'CLOSED'))
-    except KeyboardInterrupt:
-        print()
-    finally:
-        if is_open:
-            _set_valve(my_bpod, valve_id, False)
-            print('Valve {0} closed on exit.'.format(valve_id))
-        my_bpod.close()
+    def _build_ui(self):
+        layout = QVBoxLayout()
+
+        layout.addWidget(QLabel('Bpod: {0}'.format(self.bpod_status)))
+
+        self.status_label = QLabel('Valve {0}: CLOSED'.format(VAR_VALVE_ID))
+        self.status_label.setStyleSheet('font-weight: bold; padding: 6px;')
+        layout.addWidget(self.status_label)
+
+        buttons_row = QHBoxLayout()
+        self.open_button = QPushButton('Open Valve')
+        self.open_button.clicked.connect(self._on_open)
+        buttons_row.addWidget(self.open_button)
+        self.close_button = QPushButton('Close Valve')
+        self.close_button.clicked.connect(self._on_close)
+        self.close_button.setEnabled(False)
+        buttons_row.addWidget(self.close_button)
+        layout.addLayout(buttons_row)
+
+        self.setLayout(layout)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.open_button.setEnabled(self.my_bpod is not None and not self._valve_open)
+        self.close_button.setEnabled(self.my_bpod is not None and self._valve_open)
+        self.status_label.setText('Valve {0}: {1}'.format(
+            VAR_VALVE_ID, 'OPEN -- dispensing' if self._valve_open else 'CLOSED'))
+        self.status_label.setStyleSheet(
+            'font-weight: bold; padding: 6px; background-color: {0};'.format(
+                '#ffdddd' if self._valve_open else '#ddffdd'))
+
+    def _set_valve(self, is_open):
+        self.my_bpod.manual_override(Bpod.ChannelTypes.OUTPUT, Bpod.ChannelNames.VALVE,
+                                      channel_number=VAR_VALVE_ID, value=1 if is_open else 0)
+        self._valve_open = is_open
+        self._update_buttons()
+
+    def _on_open(self):
+        self._set_valve(True)
+
+    def _on_close(self):
+        self._set_valve(False)
+
+    def closeEvent(self, event):
+        """ Guaranteed close-on-exit, regardless of how the window is dismissed -- the valve (and
+        the Bpod connection itself) is always returned to its original state, same safety net the
+        original terminal version's own `finally:` block provided. """
+        if self.my_bpod is not None:
+            if self._valve_open:
+                self._set_valve(False)
+            self.my_bpod.close()
+        event.accept()
 
 
 if __name__ == '__main__':
-    main()
+    app = QApplication(sys.argv)
+    window = FlushValveWindow()
+    window.resize(320, 140)
+    window.show()
+    sys.exit(app.exec_())

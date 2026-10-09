@@ -39,6 +39,7 @@ Run with the pybpod-environment interpreter:
     /c/Users/2P-Behav/.conda/envs/pybpod-environment/python.exe build_training_log.py
 """
 import glob
+import json
 import math
 import os
 import re
@@ -52,19 +53,35 @@ _RECORDS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.abspath(os.path.join(_RECORDS_DIR, '..'))
 _OUTPUT_PATH = os.path.join(_RECORDS_DIR, 'training_log.xlsx')
 
+# {raw PyBpod subject name: canonical animal ID} -- lets several raw subject identities display/
+# group as ONE sheet without ever touching the underlying session CSVs' own historical SUBJECT-NAME
+# record (editing already-recorded raw data would be data falsification, not a fix). Deliberately
+# COMMITTED (unlike most of records/, which is machine-specific/gitignored) -- training_log.xlsx
+# itself is the one shared/synced file across boxes, so how its rows get grouped needs to be
+# consistent everywhere it's regenerated, not a local per-machine choice. Missing file/key is a
+# plain no-op (every raw subject name maps to itself, today's behavior for everyone until an alias
+# is actually added).
+_SUBJECT_ALIASES_PATH = os.path.join(_RECORDS_DIR, 'subject_aliases.json')
+
+
+def _load_subject_aliases():
+    try:
+        with open(_SUBJECT_ALIASES_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (IOError, OSError, ValueError):
+        return {}
+
 sys.path.insert(0, os.path.join(_PROJECT_DIR, 'tasks', '_wheel_shaping_shared'))
 import session_csv_parser     # noqa: E402 -- same-project import (records/ -> tasks/_wheel_shaping_shared/)
 import session_struct_export  # noqa: E402
 import staircase               # noqa: E402
 
-_SIMPLE_GATES_PROTOCOLS = ('stage2_threshold_staircase', 'stage3_clicks_direction',
-                            'stage4_resume_staircases')   # which protocols have an
-                                                           # auto-checkable advancement-gate
-                                                           # function worth computing -- see
-                                                           # _compute_simple_gates_met()'s own
-                                                           # per-protocol dispatch (each of these
-                                                           # three uses a DIFFERENT staircase.py
-                                                           # function/signature).
+_SIMPLE_GATES_PROTOCOLS = ('stage2_threshold_staircase', 'stage3_tone_side_association',
+                            'stage4_clicks_direction', 'stage5_resume_staircases')
+                           # which protocols have an auto-checkable advancement-gate function
+                           # worth computing -- see _compute_simple_gates_met()'s own per-protocol
+                           # dispatch (each of these uses a DIFFERENT staircase.py
+                           # function/signature).
 
 _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed' session's own end
                        # are combined into one row/struct with it (same protocol only)
@@ -75,9 +92,9 @@ def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_r
                                threshold_final_deg, quiescence_end_s):
     """ Dispatches to whichever staircase.py gate-check function matches this protocol -- each of
     _SIMPLE_GATES_PROTOCOLS uses a genuinely different function/signature (Stage 2's is
-    deliberately partial, deferring to a human for its real statistical criterion; Stage 3/4's
+    deliberately partial, deferring to a human for its real statistical criterion; Stage 3/4/5's
     each cover their WHOLE doc-specified criterion). Returns None if the protocol isn't one of
-    these three, or if a required input is missing (e.g. no ITI-bearing trial found yet). """
+    these four, or if a required input is missing (e.g. no ITI-bearing trial found yet). """
     if protocol_name == 'stage2_threshold_staircase':
         if iti_end_s is None:
             return None
@@ -85,13 +102,15 @@ def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_r
             trial_count=trial_count, iti_s=iti_end_s,
             direction_ratio_in_band=(direction_ratio_end is not None
                                       and 0.30 <= direction_ratio_end <= 0.70))
-    if protocol_name == 'stage3_clicks_direction':
+    if protocol_name == 'stage3_tone_side_association':
         return staircase.stage3_gates_met(accuracy_aos or 0.0, abort_rate or 0.0, trial_count)
-    if protocol_name == 'stage4_resume_staircases':
+    if protocol_name == 'stage4_clicks_direction':
+        return staircase.stage4_gates_met(accuracy_aos or 0.0, abort_rate or 0.0, trial_count)
+    if protocol_name == 'stage5_resume_staircases':
         if response_threshold_end_deg is None or quiescence_end_s is None:
             return None
         response_frac = response_threshold_end_deg / threshold_final_deg
-        return staircase.stage4_gates_met(response_frac, quiescence_end_s, accuracy_aos or 0.0,
+        return staircase.stage5_gates_met(response_frac, quiescence_end_s, accuracy_aos or 0.0,
                                            abort_rate or 0.0, trial_count)
     return None
 
@@ -102,7 +121,7 @@ def summarize_session(path):
     PROTOCOL_CONFIG entry. The latter matters now that scan_all_sessions() also scans the Tests
     project (see its own docstring) -- that folder has many bench-test protocols (dot_wheel_test,
     camera_test, lick_reward, ...) with no meaningful outcome taxonomy to report; only protocols
-    explicitly configured (currently: stage1/2 and full_protocol_lookback_test) generate a row, so
+    explicitly configured (currently: stage1-5 and full_protocol_lookback_test) generate a row, so
     the log doesn't fill up with all-'unknown'-outcome noise from every bench script ever run. """
     info, session_vals, trials = session_csv_parser.parse_session_csv(path)
     protocol_name = info.get('PROTOCOL-NAME')
@@ -111,6 +130,8 @@ def summarize_session(path):
     config = session_csv_parser.PROTOCOL_CONFIG[protocol_name]
 
     subject = session_csv_parser.parse_subject_name(info.get('SUBJECT-NAME', ''))
+    subject = _load_subject_aliases().get(subject, subject)   # see _SUBJECT_ALIASES_PATH's own
+                                                                 # docstring above
     session_started = info.get('SESSION-STARTED', '')
     date = session_started.split(' ')[0] if session_started else ''
 
@@ -120,7 +141,7 @@ def summarize_session(path):
     incorrect_count = wheel_abort_count = 0
     l_count = r_count = lick_count = consumed_reward_count = 0
 
-    # Stage 3/4 only -- their own PROTOCOL_CONFIG entries produce 'incorrect'/'aborted' outcomes
+    # Stage 3/4/5 only -- their own PROTOCOL_CONFIG entries produce 'incorrect'/'aborted' outcomes
     # (see session_csv_parser.PROTOCOL_CONFIG), so these stay 0 for Stage 1/2's rows, same as
     # incorrect_count/wheel_abort_count above already do.
     warmup_trial_count = repeat_trial_count = 0
@@ -129,7 +150,7 @@ def summarize_session(path):
 
     for trial in trials:
         outcome, side, _reward_duration, consumed = session_csv_parser.classify_trial(trial, config)
-        trial_type = trial['vals'].get('TRIAL_TYPE')   # Stage 3/4's own custom VAL -- absent (None)
+        trial_type = trial['vals'].get('TRIAL_TYPE')   # Stage 3/4/5's own custom VAL -- absent (None)
                                                           # for Stage 1/2 and full_protocol_lookback_test
         if outcome == 'rewarded':
             reward_count += 1
@@ -185,7 +206,7 @@ def summarize_session(path):
     session_end_reason = session_csv_parser.find_val_str_backward(trials, session_vals,
                                                                     'SESSION_END_REASON')
 
-    # Stage 3/4 only -- all from custom VALs those two protocols' own task scripts register;
+    # Stage 3/4/5 only -- all from custom VALs those protocols' own task scripts register;
     # simply absent (None) for every other protocol.
     response_threshold_start_deg = session_csv_parser.find_val_forward(
         trials, session_vals, 'RESPONSE_THRESHOLD_DEG')
@@ -494,16 +515,16 @@ COLUMNS = [
     ('iti_end_s', 'ITI (s)'),
     ('gain_mult_end', 'Gain mult (Stage 1)'),
     ('direction_ratio_end', 'Direction ratio (Stage 2)'),
-    ('simple_gates_met', 'Simple gates met'),   # covers Stage 2 (partial) and Stage 3/4 (whole
+    ('simple_gates_met', 'Simple gates met'),   # covers Stage 2 (partial) and Stage 3/4/5 (whole
                                                  # criterion) -- see _compute_simple_gates_met()
-    # Stage 3/4 only, below -- every cross-session-varying value those two protocols' own task
+    # Stage 3/4/5 only, below -- every cross-session-varying value those protocols' own task
     # scripts track, so the training log has a column for each without opening a session struct.
     ('response_threshold_start_deg', 'Response Thresh Start (deg)'),
     ('response_threshold_end_deg', 'Response Thresh End (deg)'),
     ('quiescence_start_s', 'Quiescence Start (s)'),
     ('quiescence_end_s', 'Quiescence End (s)'),
     ('cue_abort_threshold_deg', 'In-trial Threshold (deg)'),
-    ('click_level_attenuated', 'Click Attenuated (Stage 3)'),
+    ('click_level_attenuated', 'Click Attenuated (Stage 4)'),
     ('accuracy_aos', 'Accuracy (gamma=1.0)'),
     ('abort_rate', 'Abort Rate'),
     ('aborts_quiescence', 'Aborts: Quiescence'),
@@ -513,7 +534,7 @@ COLUMNS = [
     ('warmup_trial_count', 'Warmup Trials'),
     ('repeat_trial_count', 'Repeat Trials'),
     ('session_water_ul', 'Session Water (uL)'),
-    ('staircase_advanced_this_session', 'Staircase Advanced (Stage 4)'),
+    ('staircase_advanced_this_session', 'Staircase Advanced (Stage 5)'),
     ('git_commit', 'Git Commit'),
     ('target_spl_db', 'Target SPL (dB)'),
     ('left_freq_hz', 'Left Freq (Hz)'),

@@ -1,60 +1,78 @@
 # !/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-training_protocol.md Revision 2, Stage 3 -- "clicks and direction".
+training_protocol.md Revision 2, Stage 3 -- "tone-side association" (new stage, inserted ahead of
+what used to be Stage 3 -- see stage4_clicks_direction.py, pushed up to Stage 4 to make room, and
+stage5_resume_staircases.py, pushed up to Stage 5).
 
-Aim: the click-side association -- the first moment clicks and direction both appear together.
-0.25s Poisson clicks at gamma=+-1.0 (all clicks on the rewarded side, i.e. click_train_v2's 'AOS'
-grid entry) -> a short fixed 100-200ms cue-to-go delay (Tag A) -> LED + dot (centred, appears after
-a further J1 jitter) -> turn toward the click side for reward (ITI 1.5s), away for no reward (ITI
-4.0s). Quiescence (100ms) and response threshold (frozen at whatever fraction Stage 2 ended on) do
-NOT restaircase here -- both resume at Stage 4. An in-trial wheel-excursion threshold is enforced
-for the FIRST time, monitored through CuePeriod+DelayPeriod (mirrors
-Tests/tasks/full_protocol_lookback_test/full_protocol_lookback_test.py's existing wheel-abort
-pattern exactly, including its two-state-machine/thread-inversion structure) -- crossing it aborts
-the trial, which is then automatically RE-OFFERED (same side, TRIAL_TYPE='repeat', after a 1-2s
-timeout) rather than simply dropped, per SS3.3.
+Aim: the click-side association, in its easiest possible form -- the first moment clicks and
+direction appear together, now with the side held FIXED for the whole session (drawn once, L or
+R, at session start) rather than varying per trial. Every trial for the whole session plays clicks
+ONLY for that one session's chosen side (click_train_v2's 'AOS' grid entry already guarantees the
+non-chosen channel gets exactly zero clicks, not just fewer -- the same mechanism Stage 4 uses per
+trial, just held constant here for a whole session instead), so there's nothing to disambiguate
+trial-to-trial: hearing a click train at all means it's this session's side. Stage 4 is where the
+side starts varying per trial again, once the tone-side association itself is established here.
 
-Click level starts ~6dB below final for this subject's first VAR_CLICK_ATTENUATION_SESSIONS
-sessions (persisted counter, decremented once per session run regardless of trial count), then
-switches to full level -- an additive amplitude_scale on click_train_v2.build_waveform(), not a
-change to its ISI/generation math. The in-trial threshold itself starts at a PLACEHOLDER value
-(see VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER below) since the doc's own empirical-derivation
-procedure (derive_intrial_threshold.py) only runs at the END of Stage 4 -- replace the persisted
-'in_trial_threshold_deg' once that has run at least once for this subject.
+Every other mechanic is a direct, unmodified carryover from Stage 4 (formerly Stage 3) -- the
+quiescence hold, the in-trial wheel-excursion abort threshold (monitored through
+CuePeriod+DelayPeriod, aborting into a short timeout), the delay period (Tag A, 100-200ms fixed),
+LED+dot choice period, reward/error/no-response handling, the click-level attenuation ramp (~6dB
+below final for the first VAR_CLICK_ATTENUATION_SESSIONS session runs), HiFi output calibrated via
+Calibration/sound_calibration.py, camera recording, GIT_COMMIT/REWARD_UL provenance registration,
+and session-struct export -- none of that depends on whether the side is drawn per-trial or held
+fixed for the session, so it's reused here exactly as-is.
 
-Every session opens with a warm-up block (20-40 trials, drawn fresh each session, TRIAL_TYPE=
-'warmup') excluded from the accuracy/abort-rate stats that feed advancement. After an error, the
-SAME side is re-presented with high probability (debiasing.next_side_after_error(), a small
-literal implementation of the doc's own rule -- deliberately NOT trial_scheduler.py's more
-elaborate lookback machinery, which implements a different policy). A session ends at the first
-of: the 90-minute cap, 3 continuous minutes with no trial initiated, 20 consecutive aborts, or
-sub-chance accuracy across 3 consecutive 20-trial blocks (SS3.2) -- SESSION_END_REASON records
-which. Advance after three consecutive sessions meeting staircase.stage3_gates_met() (>70% correct
-at gamma=+-1.0, abort rate <20%, >200 main trials) -- unlike Stage 2's gate, this covers the WHOLE
-doc-specified criterion, no deferred statistical test.
+What's genuinely different from Stage 4:
+  - VAR_SESSION_SIDE: per explicit instruction, this is NOT a fresh random draw every session.
+    The very FIRST time this subject ever runs this stage, it's a coin flip (np.random.choice(
+    ['L', 'R']) -- so different subjects don't all start on the same side). After that, it
+    deterministically ALTERNATES ('R' <-> 'L') once a new CALENDAR DAY starts, but stays
+    UNCHANGED across a same-day Stop/Kill/crash restart (re-running the task again today must
+    not re-randomize or re-alternate, only a genuinely new day does). Persisted as
+    'stage3_last_side'/'stage3_last_side_date' and saved IMMEDIATELY (not just at session end,
+    unlike every other persisted key in this file) so a near-instant crash still leaves the
+    decision durable for a same-day restart to see -- see the state.save() call right after this
+    decision for why that's a safe, deliberate exception to StageState's own "save once at the
+    end" convention. Registered as a session-level VAL (SESSION_SIDE) for training-log visibility
+    and used for every trial this session -- no per-trial draw.
+  - No debiasing at all (debiasing.next_side_after_error() is Stage 4's own mechanism for choosing
+    the NEXT trial's side after an error; moot here since the side never changes within a day).
+  - No post-abort "repeat" re-offer either -- Stage 4 deterministically re-presents the SAME side
+    after an abort (TRIAL_TYPE='repeat') specifically because its side otherwise varies freely;
+    here the next trial already uses the same (fixed) side regardless, so there's nothing to
+    re-offer. An aborted trial simply counts as a normal attempt and the next trial proceeds
+    through the ordinary warmup/main sequence. trial_type is therefore only 'warmup'/'main', never
+    'repeat'.
+  - p_right_target is a single constant for the whole session (1.0 if the fixed side is 'R', else
+    0.0), not something that varies trial-to-trial off debiasing history.
+  - Advancement gate is a new staircase.stage3_gates_met() (the doc doesn't specify this new
+    stage's own numeric criterion yet -- reusing Stage 4's own values as a placeholder pending real
+    empirical tuning, same "flagged placeholder" convention already used elsewhere in this
+    codebase): >70% correct at gamma=+-1.0 (AOS), abort rate <20%, >200 main trials/session, three
+    consecutive qualifying sessions.
 
-Tag H (day-5 triage) and Tag J (non-learner checklist: per-rig speaker SPL calibration, ear
-inspection, supra-threshold click-train response check) are human judgment calls printed as
-reminders at session end, same as Stage 2's own deferred-statistical-test reminder -- see
-STAGE3_TEST_PLAN.md for the full manual checklist. Stage 3.5 (asymmetric response thresholds,
-"held in reserve, deployed only by Stage-3 triage") is NOT built here -- see
-VAR_ASYMMETRIC_THRESHOLD_ENABLED below, an unused hook for a future toggle.
+Shared with Stage 4 (new in both, per explicit instruction -- "similar to [the response threshold]
+degree or ISI[/ITI] ramp"): the click-train stimulus duration and the correct-trial ITI are now
+each a within-session, performance-gated staircase.BoundedStaircase (same step-up-after-N-
+consecutive-correct/step-down-after-N-consecutive-incorrect shape as the existing movement-
+threshold ThresholdStaircase), growing toward a longer/easier final value and shrinking back
+toward the doc's own original fixed value on a bad streak -- never below it. Each is ONE
+continuous value shared across Stage 3 and Stage 4 (persisted as 'stim_duration_s'/'iti_s' plus
+their own consecutive-count keys, not reset when a subject advances from Stage 3 to Stage 4).
+'iti_s' is in fact the SAME key Stage 1/2 already persist (Stage 1 starts it at 0.5s, Stage 2
+grows it once per qualifying session to a 1.5s ceiling) -- Stage 3/4 simply take over that same
+value with a finer, within-session staircase instead of Stage 2's once-per-session step, so the
+whole curriculum's ITI is one continuously-evolving number from Stage 1 onward. See
+staircase.py's own STAGE34_STIM_DURATION_*/STAGE34_ITI_* constants for the actual numbers (both
+doc-unspecified -- flagged/tunable placeholders).
 
 Hardware/module connection plumbing, thread-inversion render loop, and camera integration are all
 reused as-is from _shared/ and mirror full_protocol_lookback_test.py's already-hardware-validated
-patterns exactly (including that file's own additions.txt instrumentation pass) -- see this
-project's stage1_wheel_shaping.py/stage2_threshold_staircase.py for the same conventions applied
-to this project's own persisted-state/subject-derivation machinery.
-
-Deliberately NOT touched/reimplemented here: click_train_v2.py's ISI floor, rate calibration, or
-Poisson generation math (only its new, additive stim_duration_s/amplitude_scale parameters are
-used); trial_scheduler.py's lookback machinery. additions.txt's T9 monotonic-clock item is
-deliberately NOT applied -- every timestamp in this file uses the same time.time() - log_python_t0
-convention as the rest of the codebase, for consistency; its CSV-flush-per-trial item needs no
-action here -- pybpodapi's own Session.write() already flushes on every row (confirmed by reading
-pybpod/base/pybpod-api/pybpodapi/session.py), so no submodule change was needed.
+patterns exactly -- see this project's stage1_wheel_shaping.py/stage2_threshold_staircase.py for
+the same conventions applied to this project's own persisted-state/subject-derivation machinery.
 """
+import datetime
 import os
 import random
 import subprocess
@@ -77,7 +95,6 @@ import staircase
 import session_state
 import session_struct_export
 import session_csv_parser
-import debiasing
 import click_train_v2 as click_train
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited
@@ -187,38 +204,49 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
 VAR_MAX_TRIALS = 1000                # hard-ceiling safety backstop, well above what a 90-min
                                       # session at this stage's pace should ever reach
-VAR_QUIESCENCE_S = 0.1               # frozen through Stage 3 (doc: resumes staircasing at Stage 4)
+VAR_QUIESCENCE_S = 0.1               # frozen through Stage 4 (doc: resumes staircasing at Stage 5)
 VAR_STEADY_THRESHOLD_DEG = 4         # IBL convention, same as every other task -- hold-still deadzone
 VAR_RESPONSE_TIMEOUT_S = 5.0         # doc's own epoch table: response window <=5s
 
 VAR_THRESHOLD_FINAL_DEG = 35         # matches this project's established final-task convention
-VAR_TRIAL_COUNT_ADVANCE = 200        # doc: ">200 trials/session" (MAIN trials only -- warmup/
-                                      # repeat excluded, see session_trial_count below)
+VAR_TRIAL_COUNT_ADVANCE = 200        # >200 trials/session (MAIN trials only -- warmup excluded,
+                                      # see session_trial_count below), same convention as Stage 4
 
-VAR_STIM_DURATION_S = 0.25           # doc: "0.25s Poisson clicks" -- overrides click_train_v2's
-                                      # own 2.0s module default via its additive stim_duration_s
-                                      # parameter (generation/ISI math itself untouched).
-VAR_DELAY_DURATION_MIN_S = 0.1       # Tag A: cue-to-go gap, 100-200ms FIXED range at Stage 3
-VAR_DELAY_DURATION_MAX_S = 0.2       # (staircased 0-750ms only from Stage 6 onward, not built here)
-VAR_ABORT_TIMEOUT_MIN_S = 1.0        # SS3.3: abort re-offer timeout before the same trial repeats
+# Stimulus duration is no longer a fixed VAR_ constant -- it's now a within-session
+# staircase.BoundedStaircase (see stim_duration_staircase below, constructed once persisted state
+# is loaded), starting from the doc's own original 0.25s and growing/shrinking per trial. Its
+# per-trial CURRENT value overrides click_train_v2's own 2.0s module default via its additive
+# stim_duration_s parameter (generation/ISI math itself untouched), same mechanism the old fixed
+# constant used.
+VAR_DELAY_DURATION_MIN_S = 0.1       # Tag A: cue-to-go gap, 100-200ms FIXED range at this stage
+VAR_DELAY_DURATION_MAX_S = 0.2       # (staircased 0-750ms only from Stage 7 onward, not built here)
+VAR_ABORT_TIMEOUT_MIN_S = 1.0        # SS3.3: abort timeout before the next trial starts
 VAR_ABORT_TIMEOUT_MAX_S = 2.0
 
 VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10deg -- PLACEHOLDER
                                       # only. Reused from full_protocol_lookback_test.py's own
                                       # hardware-precedented value since the doc's real derivation
                                       # procedure (derive_intrial_threshold.py) only runs at the
-                                      # END of Stage 4. Replace the persisted 'in_trial_threshold_deg'
+                                      # END of Stage 5. Replace the persisted 'in_trial_threshold_deg'
                                       # once that has run at least once for this subject.
 
-VAR_ITI_S = 1.5                      # correct-trial ITI
-VAR_INCORRECT_ITI_S = 4.0            # error-trial ITI -- longer, per the doc's epoch table
+# Correct-trial ITI is also no longer a fixed VAR_ constant -- see iti_staircase below, the SAME
+# persisted 'iti_s' value Stage 1/2 already grow toward their own 1.5s ceiling, now continued as
+# a within-session staircase instead of a once-per-session step.
+VAR_INCORRECT_ITI_S = 4.0            # error-trial ITI -- longer, per the doc's epoch table. NOT
+                                      # staircased -- only the one continuous ITI dimension
+                                      # Stage 1/2 already established gets this treatment.
 VAR_CONSUMPTION_WINDOW_S = 3.0       # not doc-specified for this stage -- same flagged/tunable
                                       # placeholder convention as every other unspecified duration
                                       # in this codebase; matches full_protocol_lookback_test.py's
                                       # own value.
 
-VAR_REWARD_UL = 4.0                  # target reward volume -- valve open time is derived from this
-                                      # via Calibration/liquid_calibration.py's own fitted curve
+VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
+                                      # valve open time is derived from this via
+                                      # Calibration/liquid_calibration.py's own fitted curve. The
+                                      # env var lets run_session.py's own launch-time reward field
+                                      # override this default; absent (real PyBpod-GUI launch) ->
+                                      # falls back to the hardcoded default, unchanged behavior.
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1     # J1 -- unchanged from every earlier stage
@@ -246,15 +274,20 @@ VAR_WARMUP_TRIAL_MIN = 20            # doc SS3.1 (Tag D): 20-40 trials at the ea
 VAR_WARMUP_TRIAL_MAX = 40            # drawn fresh each session, excluded from advancement stats
 
 VAR_SESSION_CAP_S = 90 * 60          # doc SS3.2 (Tag E): 90-minute cap
+# If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
+# registered) and this one is starting soon enough to count as its own continuation (same
+# merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own
+# time cap by however long that interrupted bout already ran -- so a restart doesn't hand the
+# animal a full fresh 90 minutes on top of what it already did. Resets back to the full value
+# automatically once a session reaches its own deliberate end (see
+# session_csv_parser.compute_remaining_quota()'s own docstring).
+_, VAR_SESSION_CAP_S = session_csv_parser.compute_remaining_quota(
+    os.path.dirname(os.path.abspath(os.getcwd())), os.path.basename(os.path.abspath(os.getcwd())),
+    os.path.splitext(os.path.basename(__file__))[0], VAR_SUBJECT_ID, full_cap_s=VAR_SESSION_CAP_S)
 VAR_NO_INIT_TIMEOUT_S = 3 * 60       # ...or 3 continuous minutes with no trial initiated
 VAR_CONSECUTIVE_ABORT_LIMIT = 20     # ...or 20 consecutive aborts
 VAR_SUBCHANCE_BLOCK_SIZE = 20        # ...or sub-chance accuracy across 3 consecutive 20-trial
-VAR_SUBCHANCE_BLOCKS = 3             # blocks at the easiest level (every Stage-3 trial, here)
-
-VAR_ASYMMETRIC_THRESHOLD_ENABLED = False   # Stage 3.5 scaffold hook ("held in reserve, deployed
-                                      # only by Stage-3 triage") -- NOT built, per the doc's own
-                                      # framing; this flag exists only so a future implementation
-                                      # has an obvious place to hook in, not as a working feature.
+VAR_SUBCHANCE_BLOCKS = 3             # blocks at the easiest level (every trial, here)
 
 VAR_ROTARY_USB_PORT = None
 VAR_STILL_POLL_HZ = 100              # additions.txt T4: NEEDS ON-RIG CONFIRMATION that the poll
@@ -284,11 +317,56 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
                                            # this stage's own advancement gate (stage3_sessions_history)
     'stage3_sessions_history': [],        # bools: did each past Stage-3 session meet
                                            # staircase.stage3_gates_met()? (3-consecutive check)
+    'stage3_last_side': None,             # None only before this subject's very first Stage 3
+                                           # session ever -- see the side-decision block below.
+    'stage3_last_side_date': None,
+    'iti_s': staircase.STAGE34_ITI_STARTING_S,   # same key Stage 1/2 already persist (Stage 2's
+                                           # own ceiling), in case this subject somehow never ran
+                                           # Stage 2 -- normally already at/near this value.
+    'iti_consecutive_successes': 0,
+    'iti_consecutive_failures': 0,
+    'stim_duration_s': staircase.STAGE34_STIM_DURATION_STARTING_S,
+    'stim_duration_consecutive_successes': 0,
+    'stim_duration_consecutive_failures': 0,
 })
 
 VAR_RESPONSE_THRESHOLD_DEG = state.get('threshold_fraction') * VAR_THRESHOLD_FINAL_DEG
 VAR_CUE_ABORT_THRESHOLD_DEG = state.get('in_trial_threshold_deg')
 _click_attenuation_remaining = state.get('click_attenuation_sessions_remaining')
+
+stim_duration_staircase = staircase.new_stim_duration_staircase(
+    state.get('stim_duration_s'), state.get('stim_duration_consecutive_successes'),
+    state.get('stim_duration_consecutive_failures'))
+iti_staircase = staircase.new_iti_staircase(
+    state.get('iti_s'), state.get('iti_consecutive_successes'),
+    state.get('iti_consecutive_failures'))
+
+# This session's one fixed side. 'AOS' click generation already guarantees zero clicks on the
+# non-chosen channel for the whole trial (see click_train_v2.generate_trial_clicks), so holding
+# `side` constant for the whole session is all that's needed to make every tone this session
+# heard belong to one side only. Per explicit instruction: a coin flip only the very FIRST time
+# this subject ever runs this stage (so different subjects don't all start on the same side);
+# after that, UNCHANGED across a same-day restart, deterministically ALTERNATING once a new
+# calendar day starts.
+_today_str = datetime.date.today().isoformat()
+_last_side = state.get('stage3_last_side')
+_last_side_date = state.get('stage3_last_side_date')
+if _last_side is None:
+    VAR_SESSION_SIDE = str(np.random.choice(['L', 'R']))
+else:
+    VAR_SESSION_SIDE = staircase.next_alternating_value(
+        _last_side, _last_side_date, _today_str, ('L', 'R'))
+state.set('stage3_last_side', VAR_SESSION_SIDE)
+state.set('stage3_last_side_date', _today_str)
+# Saved IMMEDIATELY, not just at session end like every other state.set() in this file -- the
+# side decision above must survive even a near-instant Kill/crash, since a same-day restart needs
+# to see it to avoid re-randomizing/re-alternating. A deliberate, narrow exception to StageState's
+# own "save once at the end" convention (see its own docstring for why that's normally right): safe
+# here because this is one single, atomic, already-fully-decided value, not a partially-computed
+# one -- every OTHER key in state.data at this point is still exactly what was already on disk, so
+# this early save can't write out any half-finished session update.
+state.save()
+VAR_P_RIGHT_TARGET = 1.0 if VAR_SESSION_SIDE == 'R' else 0.0
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -321,6 +399,7 @@ my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
+my_bpod.register_value('SESSION_SIDE', VAR_SESSION_SIDE)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -334,13 +413,6 @@ camera = CameraRecorder(log_python_t0, camera_index=VAR_CAMERA_INDEX,
                          output_path=VAR_CAMERA_OUTPUT_PATH, fps=VAR_CAMERA_FPS,
                          preview=VAR_CAMERA_PREVIEW)
 camera.start()
-# Diagnostic marker only (see STAGE3_TEST_PLAN.md) -- a real bench-test session froze right after
-# CameraRecorder's own construction print, with the actual exception truncated by the GUI's CSV
-# console capture ("Exception ignored in: ..." -- a GC/destructor-context error, which a try/except
-# around construction would not catch, and which Python 3.6 has no sys.unraisablehook to intercept
-# cleanly). This print exists only to confirm, on the next run, whether execution gets past
-# camera.start() before whatever kills the process -- not a fix for the crash itself.
-print("DEBUG: camera.start() returned OK", flush=True)
 
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
@@ -361,7 +433,8 @@ bench_plots = WheelShapingPlots(
     stage=3, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': VAR_RESPONSE_THRESHOLD_DEG},
     session_status={'click_attenuated': _click_attenuation_remaining > 0,
-                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
+                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG,
+                     'session_side': VAR_SESSION_SIDE},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -369,9 +442,9 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting Stage 3 -- response threshold frozen at {0:.1f}deg, in-trial threshold {1:.1f}deg"
-      "{2}, click level {3}".format(
-          VAR_RESPONSE_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG,
+print("Starting Stage 3 -- session side fixed to {0}, response threshold frozen at {1:.1f}deg, "
+      "in-trial threshold {2:.1f}deg{3}, click level {4}".format(
+          VAR_SESSION_SIDE, VAR_RESPONSE_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG,
           ' (PLACEHOLDER -- not yet empirically derived)'
           if VAR_CUE_ABORT_THRESHOLD_DEG == VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER else '',
           'ATTENUATED (-{0:.0f}dB, {1} session(s) remaining)'.format(
@@ -382,17 +455,13 @@ session_start_time = time.time()
 last_initiation_time = session_start_time
 session_reward_count = 0
 session_trial_count = 0        # MAIN trials only -- feeds VAR_TRIAL_COUNT_ADVANCE
-total_attempts = 0              # every trial attempt (warmup+main+repeat), feeds abort_rate
+total_attempts = 0              # every trial attempt (warmup+main), feeds abort_rate
 total_aborts = 0
 consecutive_aborts = 0
 main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos + sub-chance check
 warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
-fresh_trial_count = 0           # non-repeat trial draws so far this session
-
-prev_outcome = None             # 'correct'/'incorrect'/None -- drives debiasing
-prev_side = None
-pending_repeat = False
-repeat_side = None
+fresh_trial_count = 0           # trial draws so far this session (every attempt counts -- no
+                                 # separate 'repeat' category here, see module docstring)
 
 session_end_reason = None
 trial = 0
@@ -421,23 +490,10 @@ while True:
 
     trial += 1
     try:
-        if pending_repeat:
-            trial_type = 'repeat'
-            side = repeat_side
-            # A post-abort repeat re-offers the same side deterministically, not a probabilistic
-            # draw -- p_right_target is 1.0/0.0 accordingly (feeds the sidebias plot's target line).
-            p_right_target = 1.0 if side == 'R' else 0.0
-            pending_repeat = False
-        else:
-            fresh_trial_count += 1
-            trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
-            if prev_outcome == 'incorrect':
-                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if prev_side == 'R'
-                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
-                side = debiasing.next_side_after_error(prev_side)
-            else:
-                p_right_target = 0.5
-                side = np.random.choice(['L', 'R'])
+        fresh_trial_count += 1
+        trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
+        side = VAR_SESSION_SIDE
+        p_right_target = VAR_P_RIGHT_TARGET
 
         rotary.disable_evt_transmission()
         n_breaks = runner.wait_for_held_steady(VAR_QUIESCENCE_S, VAR_STEADY_THRESHOLD_DEG,
@@ -462,9 +518,14 @@ while True:
         camera.pump()
 
         # additions.txt T1: fresh per-trial seed, not a globally reseeded generator.
+        # Both staircases' CURRENT values are captured once here, at trial start -- record_outcome()
+        # (below, once this trial's outcome is known) only changes what the NEXT trial sees.
+        stim_duration_this_trial = stim_duration_staircase.current_value
+        iti_this_trial = iti_staircase.current_value
         stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
         trial_clicks = click_train.generate_trial_clicks(
-            'AOS', side, rng=np.random.RandomState(stim_seed), stim_duration_s=VAR_STIM_DURATION_S)
+            'AOS', side, rng=np.random.RandomState(stim_seed),
+            stim_duration_s=stim_duration_this_trial)
         # Warmup attenuation is a multiplier ON TOP of the calibrated base amplitude (dB below the
         # calibrated target), not a substitute for it.
         attenuation_mult = (10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)
@@ -473,7 +534,7 @@ while True:
             trial_clicks, hifi.sampling_rate,
             amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE * attenuation_mult,
             amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE * attenuation_mult,
-            stim_duration_s=VAR_STIM_DURATION_S)
+            stim_duration_s=stim_duration_this_trial)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 
@@ -488,7 +549,8 @@ while True:
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
         runner.register('QUIESCENCE_DUR_S', VAR_QUIESCENCE_S)
-        runner.register('ITI_S', VAR_ITI_S)
+        runner.register('STIM_DURATION_S', stim_duration_this_trial)
+        runner.register('ITI_S', iti_this_trial)
         runner.register('CLICK_LEVEL_ATTENUATED', _click_attenuation_remaining > 0)
 
         print("Trial {0} ({1}): side={2}, n_L={3}, n_R={4}".format(
@@ -508,7 +570,7 @@ while True:
 
         cue_sma.add_state(
             state_name='CuePeriod',
-            state_timer=click_train.CLICK_START_OFFSET_S + VAR_STIM_DURATION_S,
+            state_timer=click_train.CLICK_START_OFFSET_S + stim_duration_this_trial,
             state_change_conditions={
                 wheel_abort_event_neg: 'WheelAbort',
                 wheel_abort_event_pos: 'WheelAbort',
@@ -569,11 +631,7 @@ while True:
             # filters downstream, this is not a second, redundant filter.
             runner.register('INCLUDED', False)
 
-            pending_repeat = True
-            repeat_side = side
-
-            print("Trial {0}: Abort ({1} epoch) -- re-offering side {2} next trial.".format(
-                trial, abort_epoch, side), flush=True)
+            print("Trial {0}: Abort ({1} epoch).".format(trial, abort_epoch), flush=True)
 
             bench_plots.add_trial(side, 0.0, VAR_RESPONSE_THRESHOLD_DEG, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
@@ -639,7 +697,7 @@ while True:
 
         sma.add_state(
             state_name='ITI',
-            state_timer=VAR_ITI_S,
+            state_timer=iti_this_trial,
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[])
 
@@ -726,9 +784,6 @@ while True:
             response = None
         correct = rewarded if outcome_state in ('Reward', 'ErrorConsumption') else None
 
-        prev_outcome = 'correct' if correct else ('incorrect' if correct is False else None)
-        prev_side = side
-
         # accuracy_aos (session end) is conditional on a genuine L/R response -- a NoResponse
         # trial contributes to neither the numerator nor denominator here (it's already a
         # separately-tracked engagement signal via VAR_NO_INIT_TIMEOUT_S/consecutive_aborts, not
@@ -736,6 +791,8 @@ while True:
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
+            stim_duration_staircase.record_outcome(bool(correct))
+            iti_staircase.record_outcome(bool(correct))
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -822,10 +879,19 @@ advance_ready = len(history) >= 3 and all(history[-3:])
 if _click_attenuation_remaining > 0:
     state.set('click_attenuation_sessions_remaining', _click_attenuation_remaining - 1)
 
+state.set('stim_duration_s', stim_duration_staircase.current_value)
+state.set('stim_duration_consecutive_successes', stim_duration_staircase.consecutive_successes)
+state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecutive_failures)
+state.set('iti_s', iti_staircase.current_value)
+state.set('iti_consecutive_successes', iti_staircase.consecutive_successes)
+state.set('iti_consecutive_failures', iti_staircase.consecutive_failures)
+
 state.save()
 
-print("Session: {0} main trials, accuracy(AOS)={1:.1%}, abort_rate={2:.1%}, gates_met={3}".format(
-    session_trial_count, accuracy_aos, abort_rate, this_session_gates_met), flush=True)
+print("Session: side={0}, {1} main trials, accuracy(AOS)={2:.1%}, abort_rate={3:.1%}, "
+      "gates_met={4}".format(
+          VAR_SESSION_SIDE, session_trial_count, accuracy_aos, abort_rate,
+          this_session_gates_met), flush=True)
 print("ADVANCE-READY (3 consecutive qualifying sessions): {0}".format(
     "yes" if advance_ready else "no"), flush=True)
 if not advance_ready:
@@ -834,8 +900,7 @@ if accuracy_aos <= 0.5 and len(main_trial_correct) >= VAR_SUBCHANCE_BLOCK_SIZE:
     print("NOTE: accuracy is at or below chance -- per the doc's Tag J, before declaring a "
           "non-learner: (1) verify per-rig speaker SPL calibration measured at the head position, "
           "(2) inspect ears for infection, (3) confirm response to a brief supra-threshold "
-          "unilateral click-train block. See STAGE3_TEST_PLAN.md for the full checklist.",
-          flush=True)
+          "unilateral click-train block.", flush=True)
 
 _cleanup_and_export()
 

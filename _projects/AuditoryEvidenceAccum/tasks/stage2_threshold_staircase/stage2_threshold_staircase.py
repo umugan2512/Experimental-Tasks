@@ -120,16 +120,32 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 # --- stage parameters (training_protocol.md Part 4, Stage 2) -----------------------------------------
 
 VAR_MAX_TRIALS = 400
+# If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
+# registered) and this one is starting soon enough to count as its own continuation (same
+# merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own
+# trial quota by however many trials that interrupted bout already ran -- so a restart doesn't
+# hand the animal a full fresh 400 trials on top of what it already did. Resets back to the full
+# value automatically once a session reaches its own deliberate end (see
+# session_csv_parser.compute_remaining_quota()'s own docstring).
+VAR_MAX_TRIALS, _ = session_csv_parser.compute_remaining_quota(
+    os.path.dirname(os.path.abspath(os.getcwd())), os.path.basename(os.path.abspath(os.getcwd())),
+    os.path.splitext(os.path.basename(__file__))[0], VAR_SUBJECT_ID, full_max_trials=VAR_MAX_TRIALS)
 VAR_QUIESCENCE_S = 0.1              # unchanged from Stage 1 -- doc: quiescence "resumes staircasing
-                                     # only at Stage 4", frozen at its Stage-1 value through Stage 3
+                                     # only at Stage 5" (formerly "Stage 4" before a new Stage 3 --
+                                     # tone-side association -- was inserted), frozen at its
+                                     # Stage-1 value through Stage 4
 VAR_STEADY_THRESHOLD_DEG = 4
 VAR_RESPONSE_TIMEOUT_S = 10.0       # same flagged/tunable placeholder as Stage 1
 
 VAR_THRESHOLD_FINAL_DEG = 35        # matches Stage 1 / this project's established final-task value
 VAR_TRIAL_COUNT_ADVANCE = 200
 
-VAR_REWARD_UL = 4.0                 # target reward volume -- valve open time is derived from this
-                                     # via Calibration/liquid_calibration.py's own fitted curve
+VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
+                                     # valve open time is derived from this via
+                                     # Calibration/liquid_calibration.py's own fitted curve. The
+                                     # env var lets run_session.py's own launch-time reward field
+                                     # override this default; absent (real PyBpod-GUI launch) ->
+                                     # falls back to the hardcoded default, unchanged behavior.
                                      # (falls back to a hardcoded 0.1s if no calibration data/fit
                                      # exists yet on this machine -- see get_reward_duration_s()).
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
