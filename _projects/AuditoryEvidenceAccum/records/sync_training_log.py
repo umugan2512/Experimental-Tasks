@@ -101,6 +101,14 @@ def sync_on_box_branch(branch):
     print('Fetching latest changes...', flush=True)
     git('fetch', 'origin')
     upstream = 'origin/' + MAIN
+    # run_session.py's Save commits training_log.xlsx onto LOCAL main without pushing
+    # (commit_xlsx_locally()) -- build on top of any such unpushed commits rather than strand them.
+    if git('merge-base', '--is-ancestor', upstream, MAIN, check=False).returncode == 0:
+        upstream = MAIN
+    elif git('merge-base', '--is-ancestor', MAIN, upstream, check=False).returncode != 0:
+        raise SyncError('Local {0} and origin/{0} have diverged (unpushed local commits AND new '
+                        'commits on origin). Nothing was updated or pushed. Resolve it by hand '
+                        '(e.g. on {0}: git pull), then run again.'.format(MAIN))
 
     print('Merging {0} into {1}...'.format(upstream, branch), flush=True)
     if git('merge', '--no-edit', upstream, check=False).returncode != 0:
@@ -112,6 +120,10 @@ def sync_on_box_branch(branch):
     build_log()
     if not xlsx_changed_vs(upstream):
         print('\nNo changes to training_log.xlsx since the last sync -- nothing to commit.')
+        if upstream == MAIN and git_out('rev-parse', MAIN) != git_out('rev-parse', 'origin/' + MAIN):
+            print('Pushing already-committed training_log.xlsx saves on {0}...'.format(MAIN), flush=True)
+            if git('push', 'origin', '{0}:refs/heads/{0}'.format(MAIN), check=False).returncode != 0:
+                raise SyncError('git push to {0} failed -- try running this again.'.format(MAIN))
     else:
         print('\nCommitting training_log.xlsx onto {0} and pushing...'.format(MAIN), flush=True)
         new_commit = commit_xlsx_onto(upstream)
@@ -132,6 +144,47 @@ def sync_on_box_branch(branch):
         print('\nWARNING: backing up branch "{0}" to origin failed -- training_log.xlsx itself is '
               'unaffected.'.format(branch))
     print('\nDone.')
+
+
+def commit_xlsx_locally():
+    """Commit the working-tree training_log.xlsx onto the LOCAL `main` branch -- never pushes --
+    from whichever branch is checked out. Called after every weight/notes Save in run_session.py;
+    pushing is left to the user (or the next Sync Training Log run, which pushes these along).
+
+    On main: plain add + commit. On a computer-specific branch: same temporary-index commit
+    sync_on_box_branch() uses (main is never checked out), then that commit is merged back into
+    the current branch so its working copy isn't left showing training_log.xlsx as modified.
+    Returns a one-line status message; raises SyncError on failure."""
+    branch = git_out('rev-parse', '--abbrev-ref', 'HEAD')
+    if not xlsx_changed_vs('HEAD') or not xlsx_changed_vs(MAIN):
+        return 'training_log.xlsx unchanged -- nothing to commit.'
+    path = xlsx_repo_path()
+    if branch != MAIN and git_out('rev-parse', 'HEAD:' + path) != git_out('rev-parse', MAIN + ':' + path):
+        # This branch hasn't merged main's latest training_log.xlsx, so the edited file on disk
+        # started from an older version -- committing it would silently overwrite main's newer one.
+        raise SyncError('"{0}" is behind {1}\'s training_log.xlsx -- not committed, to avoid '
+                        'overwriting newer entries. Your edits are still in the file; run Sync '
+                        'Training Log (or git merge {1}) and re-save.'.format(branch, MAIN))
+    if branch == MAIN:
+        git('add', XLSX_NAME)
+        git('commit', '-m', commit_message())
+        return 'Committed training_log.xlsx to {0} (not pushed).'.format(MAIN)
+
+    old_main = git_out('rev-parse', MAIN)
+    new_commit = commit_xlsx_onto(old_main)
+    git('update-ref', 'refs/heads/' + MAIN, new_commit, old_main)
+    # The working copy already matches new_commit's xlsx -- reset it so the merge can apply.
+    git('checkout', 'HEAD', '--', XLSX_NAME)
+    if git('merge', '--no-edit', MAIN, check=False).returncode != 0:
+        git('merge', '--abort', check=False)
+        # Put the saved xlsx content back in the working copy (it's safely committed on main).
+        content = subprocess.run(['git', 'show', '{0}:./{1}'.format(new_commit, XLSX_NAME)],
+                                 cwd=RECORDS_DIR, stdout=subprocess.PIPE, check=True).stdout
+        with open(os.path.join(RECORDS_DIR, XLSX_NAME), 'wb') as f:
+            f.write(content)
+        raise SyncError('Committed training_log.xlsx to {0}, but merging {0} back into "{1}" '
+                        'failed -- merge it by hand (git merge {0}).'.format(MAIN, branch))
+    return 'Committed training_log.xlsx to {0} (not pushed).'.format(MAIN)
 
 
 def main():
