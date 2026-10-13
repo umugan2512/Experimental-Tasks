@@ -69,6 +69,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -108,6 +109,7 @@ sys.path.insert(0, _RECORDS_DIR)   # build_training_log.py lives in records/, a 
                                     # script, not a module imported from elsewhere).
 import session_csv_parser     # noqa: E402
 import build_training_log     # noqa: E402
+import sync_training_log      # noqa: E402
 import wheel_shaping_plots    # noqa: E402
 import debiasing               # noqa: E402
 
@@ -2079,10 +2081,41 @@ class SessionRunnerWindow(QWidget):
             QMessageBox.critical(self, 'Save failed', str(err))
             return
         if found:
-            self.save_status_label.setText('Saved.')
+            saved_text = 'Saved.'
         else:
-            self.save_status_label.setText('Header fields saved -- session row not found yet '
-                                            '(try again once the session has at least one trial).')
+            saved_text = ('Header fields saved -- session row not found yet '
+                          '(try again once the session has at least one trial).')
+        self.save_status_label.setText(saved_text + ' Committing to main...')
+        self._commit_training_log(saved_text)
+
+    def _commit_training_log(self, saved_text):
+        """ Commits the just-saved training_log.xlsx onto the local `main` branch (never pushes --
+        see sync_training_log.commit_xlsx_locally()). Runs on a background thread since git can be
+        slow on some rigs (CLAUDE.md's Stage 3 startup-freeze note), polled via QTimer so the label
+        is only ever touched from the GUI thread. The Save button stays disabled meanwhile, so a
+        second save can't rewrite the file while git is reading it. """
+        result = {}
+
+        def work():
+            try:
+                result['msg'] = sync_training_log.commit_xlsx_locally()
+            except Exception as err:
+                print(traceback.format_exc(), flush=True)
+                result['msg'] = 'Commit to main FAILED: {0}'.format(err)
+
+        thread = threading.Thread(target=work, daemon=True)
+        self.save_weight_button.setEnabled(False)
+        thread.start()
+
+        def poll():
+            if thread.is_alive():
+                QTimer.singleShot(500, poll)
+                return
+            self.save_weight_button.setEnabled(True)
+            print(result['msg'], flush=True)
+            self.save_status_label.setText(saved_text + ' ' + result['msg'])
+
+        QTimer.singleShot(500, poll)
 
     # --- shutdown --------------------------------------------------------------------------------
 
