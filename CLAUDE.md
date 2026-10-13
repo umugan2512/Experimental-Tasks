@@ -819,6 +819,19 @@ non-obvious design choices:
   `commit_data_locally()` (the same commit, no push) runs after every `run_session.py` Save;
   `Sync Training Log.bat` also pushes. Uses `git add --ignore-removal`, so deleting old local
   sessions never deletes them from `main`.
+- **One mouse, one computer — nothing another computer wrote is overwritten.** Since session data
+  is shared, every box has every box's sessions on disk, so `build_training_log.build_workbook()`
+  only rebuilds sheets (and writes combined structs) for `owned_subjects()`: mice whose most recent
+  session ran on THIS computer, detected by the session folder's own `user_settings.py` (gitignored,
+  so it only exists where the session actually ran). `sync_training_log.tree_with_data()` likewise
+  never commits changes to session files that ran elsewhere. When another computer pushed in the
+  meantime, `reconcile_with_origin()` merges the two mains instead of failing: session files are
+  unioned (refusing — not overwriting — if one file differs on both sides) and `training_log.xlsx`
+  is merged sheet by sheet (`records/xlsx_sheet_merge.py`: their workbook, with this computer's own
+  mice's sheets taken from ours). Verified with a simulated two-computer setup (both computers
+  hand-typing into their own mouse's sheet while the other pushed). Two computers both running the
+  same subject name (e.g. a shared `test` subject) would each claim it — the later sync's version
+  of that one sheet wins.
   Code edits made on such a box should be committed on `main` (`git switch main`), then pulled into
   the machine branch (`git merge origin/main`, or just run the sync).
 - **Update-in-place, not rebuild-from-scratch.** Rebuilding fresh every run (an earlier design)
