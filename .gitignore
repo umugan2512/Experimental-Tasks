@@ -1,5 +1,10 @@
 _projects/docs_local/
-_projects/AuditoryEvidenceAccum/experiments/
+# Session data IS committed (shared via main, see records/sync_training_log.py) -- except:
+_projects/AuditoryEvidenceAccum/experiments/*/setups/*/*.json
+_projects/AuditoryEvidenceAccum/experiments/**/session_video.avi
+_projects/AuditoryEvidenceAccum/experiments/**/session_video_latest.jpg
+_projects/AuditoryEvidenceAccum/experiments/**/user_settings.py
+_projects/AuditoryEvidenceAccum/experiments/**/*.log
 _projects/AuditoryEvidenceAccum/subjects/
 _projects/AuditoryEvidenceAccum/boards/
 _projects/AuditoryEvidenceAccum/users/
