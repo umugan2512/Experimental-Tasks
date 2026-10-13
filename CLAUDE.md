@@ -121,11 +121,16 @@ when a project is open.
 **Only actual code (and one specific data file) gets committed here — everything else is
 gitignored, deliberately and strictly**, per this repo's own `.gitignore`:
 - `tasks/` (the real task scripts) — committed, this is source code.
-- `_projects/*/records/training_log.xlsx` — committed, the **one explicit exception** to
-  "no non-code files." See "Multi-box training-log sync" below for why this one file is special.
-- `boards/`, `subjects/`, `users/`, `experiments/` (real session data, hardware/COM-port config) —
-  gitignored. Board/subject configs are box-specific (different COM ports per machine); session
-  data is exactly what `training_log.xlsx` summarizes, no need to duplicate the raw CSVs in git.
+- `_projects/*/records/training_log.xlsx` — committed, an explicit exception to "no non-code
+  files" (along with session data, next bullet). See "Multi-box training-log sync" below for why this one file is special.
+- `AuditoryEvidenceAccum/experiments/` session folders (session CSV, `_struct.json`/`.mat`, video
+  timestamps) — **committed to `main`** (since 2026-10-13, reversing an Oct 9 change that had
+  gitignored the whole folder), so every box can see every box's sessions. Still gitignored inside
+  it: `session_video.avi`, `session_video_latest.jpg`, launch `*.log`s, session-local
+  `user_settings.py`, and the setup-level `experiments/*/setups/*/*.json` (they name the box's own
+  board). Committed by `records/sync_training_log.py` (see "Multi-box training-log sync").
+- `boards/`, `subjects/`, `users/`, and `Tests/experiments/` — gitignored. Board/subject configs are
+  box-specific (different COM ports per machine).
 - `docs_local/` (design docs like `training_protocol.md`, bench-test docs like
   `HARDWARE_TEST_EXAMPLES.md`) — gitignored. These exist locally on this machine but are
   deliberately not shared via git; treat them as this machine's own reference material, not
@@ -807,8 +812,13 @@ non-obvious design choices:
   (e.g. its own conda interpreter path in the `.bat` launchers / `run_session.py`'s
   `_TASK_PYTHON_CANDIDATES`) stays checked out on its own branch named after the machine (e.g.
   `training05`) = `main` + just those patches — never put real code changes there, and never merge
-  it into `main`. `sync_training_log.py` handles this: on a non-`main` branch it merges `origin/main`
-  in, then pushes ONLY `training_log.xlsx` onto `main` (temporary index, no checkout of `main`).
+  it into `main`. `sync_training_log.py` handles this: on a non-`main` branch it merges `main` in,
+  then commits ONLY data (`training_log.xlsx` + `experiments/` session files) onto `main` via a
+  temporary index (no checkout of `main`) and writes the main->branch merge commit by hand —
+  a plain `git merge` refuses because the new data files already exist on disk untracked.
+  `commit_data_locally()` (the same commit, no push) runs after every `run_session.py` Save;
+  `Sync Training Log.bat` also pushes. Uses `git add --ignore-removal`, so deleting old local
+  sessions never deletes them from `main`.
   Code edits made on such a box should be committed on `main` (`git switch main`), then pulled into
   the machine branch (`git merge origin/main`, or just run the sync).
 - **Update-in-place, not rebuild-from-scratch.** Rebuilding fresh every run (an earlier design)

@@ -2089,16 +2089,17 @@ class SessionRunnerWindow(QWidget):
         self._commit_training_log(saved_text)
 
     def _commit_training_log(self, saved_text):
-        """ Commits the just-saved training_log.xlsx onto the local `main` branch (never pushes --
-        see sync_training_log.commit_xlsx_locally()). Runs on a background thread since git can be
-        slow on some rigs (CLAUDE.md's Stage 3 startup-freeze note), polled via QTimer so the label
-        is only ever touched from the GUI thread. The Save button stays disabled meanwhile, so a
-        second save can't rewrite the file while git is reading it. """
+        """ Commits the just-saved training_log.xlsx and any new session data onto the local
+        `main` branch (never pushes -- see sync_training_log.commit_data_locally()). Runs on a
+        background thread since git can be slow on some rigs (CLAUDE.md's Stage 3 startup-freeze
+        note), polled via QTimer so the label is only ever touched from the GUI thread. The Save
+        button stays disabled meanwhile, so a second save can't rewrite the file while git is
+        reading it. """
         result = {}
 
         def work():
             try:
-                result['msg'] = sync_training_log.commit_xlsx_locally()
+                result['msg'] = sync_training_log.commit_data_locally()
             except Exception as err:
                 print(traceback.format_exc(), flush=True)
                 result['msg'] = 'Commit to main FAILED: {0}'.format(err)
