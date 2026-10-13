@@ -96,6 +96,7 @@ _OUTPUT_XLSX = os.path.join(_RECORDS_DIR, 'training_log.xlsx')
 # Calibration/ is a sibling of _projects/ (see CLAUDE.md), not nested under this project --
 # _PROJECT_DIR is _projects/AuditoryEvidenceAccum/, so two levels up reaches the repo root.
 _CALIBRATION_DIR = os.path.abspath(os.path.join(_PROJECT_DIR, '..', '..', 'Calibration'))
+_REPO_ROOT = os.path.abspath(os.path.join(_PROJECT_DIR, '..', '..'))
 VAR_RIG_CHECK_SCRIPT = os.path.join(_CALIBRATION_DIR, 'rig_check.py')
 VAR_FLUSH_VALVE_SCRIPT = os.path.join(_CALIBRATION_DIR, 'flush_valve.py')
 
@@ -1003,6 +1004,92 @@ def save_subject_header_fields(subject, header_fields):
     ws, _table_start_row = build_training_log._get_or_create_subject_sheet(wb, subject)
     _write_header_fields(ws, header_fields)
     wb.save(_OUTPUT_XLSX)
+
+
+# Real session data (CSV, struct exports, timestamps) gets committed alongside training_log.xlsx
+# on save, per explicit instruction -- but NOT the video itself (its own live-preview JPEG either)
+# and NOT the machine-generated user_settings.py (box-specific, not experimental data). experiments/
+# stays fully gitignored by default (see .gitignore) -- these are added with `-f`, a deliberate,
+# narrowly-scoped override for exactly the files _session_data_paths() below allowlists, never a
+# blanket add.
+_SESSION_DATA_EXCLUDE_NAMES = {'user_settings.py'}
+_SESSION_DATA_EXCLUDE_SUFFIXES = ('_video.avi', '_video_latest.jpg')
+
+
+def _session_data_paths(session_dir):
+    """ Every file in one session's own folder worth committing alongside training_log.xlsx --
+    everything except the video/its live-preview JPEG/user_settings.py (see the module-level
+    excludes above). Returns absolute paths; empty list if session_dir doesn't exist. """
+    if not session_dir or not os.path.isdir(session_dir):
+        return []
+    paths = []
+    for name in sorted(os.listdir(session_dir)):
+        if name in _SESSION_DATA_EXCLUDE_NAMES:
+            continue
+        if name.endswith(_SESSION_DATA_EXCLUDE_SUFFIXES) or name.lower().endswith('.avi'):
+            continue
+        path = os.path.join(session_dir, name)
+        if os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
+def _git_commit_training_data(message, extra_paths=()):
+    """ A LOCAL-ONLY commit (never pushes) of training_log.xlsx plus whichever extra_paths the
+    caller passes (e.g. one session's own data files from _session_data_paths() above), made
+    right after a real weight/notes entry is saved -- a durable checkpoint the instant real data
+    is entered, distinct from both "Update Training Log" (a pure local refresh, no git action at
+    all -- see records/Update Training Log.bat's own docstring) and records/Sync Training Log.bat
+    (pull -> refresh -> commit AND push, training_log.xlsx only). Pushing/syncing with other boxes
+    stays a separate, deliberate action via that existing .bat -- this just means a crash or
+    revert on THIS box never loses an already-saved entry to an uncommitted working-tree change.
+
+    Deliberately conservative about WHEN it acts, since multiple boxes share this history:
+    - Skips (prints a warning, never raises) if the repo has an unresolved merge in progress or
+      HEAD is detached -- e.g. a previous Sync Training Log.bat run left something unresolved.
+      Blindly adding/committing on top of that would only compound the confusion; leave it for
+      the existing, more careful sync tooling (or a human) to sort out.
+    - Never pulls or pushes itself -- it only ever adds a commit on top of whatever this box's
+      own HEAD already is, so it can't overwrite or conflict with anything already on origin or
+      on another box; the first real risk moment is the NEXT manual sync, which already has its
+      own conflict handling (sync_training_log.py refuses and reports clearly rather than
+      silently resolving a binary-file conflict either way).
+    - Silently no-ops if there's nothing to commit (the given paths didn't actually change) or
+      git isn't available -- this is a convenience checkpoint, not something that should ever
+      block a real save from completing. """
+    paths = [_OUTPUT_XLSX] + list(extra_paths)
+    try:
+        git_dir_result = subprocess.run(['git', 'rev-parse', '--git-dir'], cwd=_REPO_ROOT,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if git_dir_result.returncode != 0:
+            print("WARNING: not a git repo -- skipping local commit.", flush=True)
+            return
+        git_dir = git_dir_result.stdout.decode().strip()
+        if not os.path.isabs(git_dir):
+            git_dir = os.path.join(_REPO_ROOT, git_dir)
+        if os.path.exists(os.path.join(git_dir, 'MERGE_HEAD')):
+            print("WARNING: repo has an unresolved merge in progress -- skipping local commit "
+                  "(resolve that first, e.g. via whatever Sync Training Log.bat's own error "
+                  "message says).", flush=True)
+            return
+        branch_result = subprocess.run(['git', 'symbolic-ref', '-q', '--short', 'HEAD'],
+                                        cwd=_REPO_ROOT, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+        if branch_result.returncode != 0:
+            print("WARNING: repo is in a detached HEAD state -- skipping local commit.", flush=True)
+            return
+
+        subprocess.run(['git', 'add', '-f', '--'] + paths, cwd=_REPO_ROOT, check=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        staged = subprocess.run(['git', 'diff', '--cached', '--quiet', '--'] + paths,
+                                 cwd=_REPO_ROOT)
+        if staged.returncode == 0:
+            return   # nothing actually changed -- no-op, not an error
+        subprocess.run(['git', 'commit', '-m', message, '--'] + paths, cwd=_REPO_ROOT,
+                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print("Committed locally ({0} file(s)): {1}".format(len(paths), message), flush=True)
+    except Exception as err:
+        print("WARNING: local git commit failed: {0}".format(err), flush=True)
 
 
 def save_manual_fields(subject, session_started, weight_g, weight_after_g, hand_watered, notes,
@@ -2077,11 +2164,28 @@ class SessionRunnerWindow(QWidget):
             print(traceback.format_exc(), flush=True)
             QMessageBox.critical(self, 'Save failed', str(err))
             return
-        if found:
-            self.save_status_label.setText('Saved.')
+        # Per existing policy (nothing "test"-related gets committed -- see .gitignore/CLAUDE.md),
+        # a test subject's save still writes to the local xlsx/session files as normal, it just
+        # never gets locally committed.
+        if 'test' in subject.lower():
+            print("Subject '{0}' contains 'test' -- not committing locally (existing "
+                  "policy).".format(subject), flush=True)
+            commit_suffix = ''
         else:
-            self.save_status_label.setText('Header fields saved -- session row not found yet '
-                                            '(try again once the session has at least one trial).')
+            session_dir = (os.path.dirname(self._watched_csv_path)
+                            if self._watched_csv_path else None)
+            extra_paths = _session_data_paths(session_dir)
+            _git_commit_training_data(
+                'training_log.xlsx + session data: save weight/notes for {0} ({1})'.format(
+                    subject, session_started),
+                extra_paths=extra_paths)
+            commit_suffix = ' (committed locally)'
+        if found:
+            self.save_status_label.setText('Saved{0}.'.format(commit_suffix))
+        else:
+            self.save_status_label.setText(
+                'Header fields saved{0} -- session row not found yet (try again once the '
+                'session has at least one trial).'.format(commit_suffix))
 
     # --- shutdown --------------------------------------------------------------------------------
 
