@@ -317,23 +317,82 @@ _SCAN_PROJECT_DIRS = [
 ]
 
 
-def scan_all_sessions():
-    """ Returns {subject: [session_summary, ...]}, each subject's list sorted by session_started.
-    Only scans this machine's own local experiments/ folders (AuditoryEvidenceAccum + Tests, see
-    _SCAN_PROJECT_DIRS) -- inherently per-box. """
-    by_subject = {}
+def _session_csv_paths():
     for project_dir in _SCAN_PROJECT_DIRS:
         pattern = os.path.join(project_dir, 'experiments', '*', 'setups', '*', 'sessions', '*',
                                 '*.csv')
         for path in sorted(glob.glob(pattern)):
+            yield path
+
+
+def _ran_here(csv_path):
+    """ True if this session was run on THIS computer. Every launcher (PyBpod GUI's board_com.py,
+    run_session.py) writes a session-local user_settings.py into the session folder, and that file
+    is gitignored -- so it only ever exists on the computer that actually ran the session, never on
+    one that just pulled the session's data from git. """
+    return os.path.exists(os.path.join(os.path.dirname(csv_path), 'user_settings.py'))
+
+
+def _quick_session_header(csv_path):
+    """ (subject, session_started) from just the INFO header rows at the top of a session CSV --
+    cheap enough to run over every computer's shared sessions on every rebuild/Save. """
+    subject = started = None
+    with open(csv_path, 'r', encoding='utf-8', errors='replace') as f:
+        for i, line in enumerate(f):
+            if i > 60 or (subject and started):
+                break
+            parts = line.rstrip('\r\n').split(';', 5)
+            if len(parts) == 6 and parts[0] == 'INFO':
+                if parts[4] == 'SUBJECT-NAME':
+                    subject = session_csv_parser.parse_subject_name(parts[5])
+                elif parts[4] == 'SESSION-STARTED':
+                    started = parts[5]
+    if subject is not None:
+        subject = _load_subject_aliases().get(subject, subject)
+    return subject, started or ''
+
+
+def owned_subjects():
+    """ Subjects this computer is responsible for in training_log.xlsx: those whose MOST RECENT
+    session (across every computer's sessions shared via git) ran here. One mouse is trained on one
+    computer, so each subject's sheet has exactly one writer -- no computer ever rewrites another
+    computer's mouse (or its hand-typed weights/notes, or its session folders' combined structs).
+    If a mouse moves to another computer, ownership follows it as soon as it runs a session there. """
+    latest = {}   # subject -> (session_started, ran_here)
+    for path in _session_csv_paths():
+        try:
+            subject, started = _quick_session_header(path)
+        except Exception as err:
+            print("WARNING: failed to read {0}: {1}".format(path, err), flush=True)
+            continue
+        if subject is None:
+            continue
+        if subject not in latest or started > latest[subject][0]:
+            latest[subject] = (started, _ran_here(path))
+    return {subject for subject, (_started, ran_here) in latest.items() if ran_here}
+
+
+def scan_all_sessions(subjects=None):
+    """ Returns {subject: [session_summary, ...]}, each subject's list sorted by session_started.
+    Scans the local experiments/ folders (AuditoryEvidenceAccum + Tests, see _SCAN_PROJECT_DIRS),
+    which now also hold other computers' sessions pulled via git. `subjects`, if given, limits the
+    (expensive) full parse to just those subjects. """
+    by_subject = {}
+    for path in _session_csv_paths():
+        if subjects is not None:
             try:
-                summary = summarize_session(path)
-            except Exception as err:
-                print("WARNING: failed to parse {0}: {1}".format(path, err), flush=True)
-                continue
-            if summary is None:
-                continue
-            by_subject.setdefault(summary['subject'], []).append(summary)
+                if _quick_session_header(path)[0] not in subjects:
+                    continue
+            except Exception:
+                pass   # let summarize_session() below report it
+        try:
+            summary = summarize_session(path)
+        except Exception as err:
+            print("WARNING: failed to parse {0}: {1}".format(path, err), flush=True)
+            continue
+        if summary is None:
+            continue
+        by_subject.setdefault(summary['subject'], []).append(summary)
     for sessions in by_subject.values():
         sessions.sort(key=lambda s: s['session_started'])
     return by_subject
@@ -784,9 +843,11 @@ def _rewrite_subject_sheet(wb, subject, sessions):
 
 
 def build_workbook():
-    by_subject = scan_all_sessions()
+    # Only this computer's own mice (see owned_subjects()) -- every other sheet, and every other
+    # computer's session folders, are left exactly as they came from git.
+    by_subject = scan_all_sessions(subjects=owned_subjects())
     if not by_subject:
-        print("No session CSVs found under experiments/*/setups/*/sessions/ on this machine -- "
+        print("No sessions run on this computer found under experiments/*/setups/*/sessions/ -- "
               "nothing to update.", flush=True)
         return
 
@@ -805,8 +866,8 @@ def build_workbook():
               flush=True)
 
     wb.save(_OUTPUT_PATH)
-    print("Wrote {0} -- {1} new row(s), {2} updated row(s) across {3} subject(s) found on this "
-          "machine. Every other subject's sheet in the workbook was left untouched.".format(
+    print("Wrote {0} -- {1} new row(s), {2} updated row(s) across {3} subject(s) run on this "
+          "computer. Every other subject's sheet in the workbook was left untouched.".format(
               _OUTPUT_PATH, total_new, total_updated, len(by_subject)), flush=True)
 
 
