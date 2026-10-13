@@ -803,6 +803,14 @@ above) — one workbook, one sheet per animal, shared across every behavior box 
 pull`/`push`, each box only ever able to see its own local session CSVs. This drove several
 non-obvious design choices:
 
+- **Computer-specific branches.** All code lives on `main`. A box that needs machine-only patches
+  (e.g. its own conda interpreter path in the `.bat` launchers / `run_session.py`'s
+  `_TASK_PYTHON_CANDIDATES`) stays checked out on its own branch named after the machine (e.g.
+  `training05`) = `main` + just those patches — never put real code changes there, and never merge
+  it into `main`. `sync_training_log.py` handles this: on a non-`main` branch it merges `origin/main`
+  in, then pushes ONLY `training_log.xlsx` onto `main` (temporary index, no checkout of `main`).
+  Code edits made on such a box should be committed on `main` (`git switch main`), then pulled into
+  the machine branch (`git merge origin/main`, or just run the sync).
 - **Update-in-place, not rebuild-from-scratch.** Rebuilding fresh every run (an earlier design)
   would silently wipe every OTHER box's sheet it can't see locally the moment two boxes' xlsx
   copies diverged even slightly. `build_workbook()` instead loads the existing file if present and

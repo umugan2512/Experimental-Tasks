@@ -3,8 +3,8 @@
 Run via `Sync Training Log.bat`. Works the same on every box, whichever branch it has checked out:
 
 - On `main` (the default for a shared box): plain `git pull` -> rebuild -> commit + push.
-- On a box-specific branch (e.g. `training-box-5`, which carries code changes meant for that box
-  only): `origin/main` is merged INTO the box branch first (so the box picks up shared code and every
+- On a computer-specific branch (e.g. `training05`: main plus only that machine's own patches, such
+  as interpreter paths -- all real code lives on main): `origin/main` is merged INTO the box branch first (so the box picks up shared code and every
   other box's latest training_log.xlsx), then the rebuilt training_log.xlsx is committed directly
   onto `origin/main` -- via a temporary index, without ever checking `main` out -- and pushed there.
   Only training_log.xlsx ever lands on main from a box branch; the box's own code never does. That
