@@ -203,6 +203,14 @@ class WheelShapingPlots(object):
         self._cur_iti_s = None
         self._session_trial_count = 0
 
+        # Staircase trajectory panel (Stage 2/3/4/5 only) -- one entry per trial, aligned 1:1 with
+        # self._trial_idx (None for a trial/stage that didn't pass that particular value, filtered
+        # out at redraw time rather than ever interpolated/guessed).
+        self._threshold_deg_series = []
+        self._iti_s_series = []
+        self._stim_duration_s_series = []   # Stage 3/4 only
+        self._quiescence_s_series = []      # Stage 5 only
+
         self._total_lick_count = 0
         self._all_lick_times = []
         self._all_first_lick_times = []
@@ -265,16 +273,18 @@ class WheelShapingPlots(object):
                       ['percent_outcome', 'psychometric'],
                       ['accuracy', 'sidebias'],
                       ['reaction_time', 'reward_licks'],
+                      ['staircase_trajectory', 'staircase_trajectory'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 0.8, 1.0, 1.1, 1.1, 0.9]
+            height_ratios = [2.2, 0.8, 1.0, 1.1, 1.1, 0.9, 0.9]
         elif stage == 2:
             # Each label's cells must form one contiguous rectangle (subplot_mosaic's own
             # requirement).
             mosaic = [['raster', 'raster'],
                       ['progress', 'direction_ratio'],
+                      ['staircase_trajectory', 'staircase_trajectory'],
                       ['reward_licks', 'reward_licks'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 1.0, 1.3, 1.0]
+            height_ratios = [2.2, 1.0, 0.9, 1.3, 1.0]
         else:
             mosaic = [['raster', 'raster'],
                       ['progress', 'progress'],
@@ -283,7 +293,16 @@ class WheelShapingPlots(object):
             height_ratios = [2.2, 0.8, 1.3, 1.0]
 
         self._embed = embed
-        figsize = (11, 14) if stage in (3, 4, 5) else (10, 11)
+        # Stage 2/3/4/5 each get one extra row now (the new staircase-trajectory panel) -- Stage 1
+        # doesn't, since it has no within-session, per-trial staircase at all (its own
+        # threshold/gain change once per QUALIFYING SESSION, constant within any one session, so
+        # a within-session trajectory would just be a flat, uninformative line).
+        if stage in (3, 4, 5):
+            figsize = (11, 15.5)
+        elif stage == 2:
+            figsize = (10, 12.5)
+        else:
+            figsize = (10, 11)
         # constrained_layout instead of a one-time tight_layout() call -- handles the mixed
         # panel sizes/legends/titles here far more robustly (recomputes automatically on every
         # redraw as content changes, e.g. a legend appearing once data exists), which is what was
@@ -324,6 +343,8 @@ class WheelShapingPlots(object):
             self._setup_percent_outcome_axes()
             self._setup_psychometric_axes()
             self._setup_reaction_time_axes()
+        if stage in (2, 3, 4, 5):
+            self._setup_staircase_trajectory_axes()
         self._redraw()
 
     # --- data intake -------------------------------------------------------------------------------
@@ -331,7 +352,8 @@ class WheelShapingPlots(object):
     def add_trial(self, side, magnitude_deg, threshold_deg, outcome, gain_mult=None, iti_s=None,
                    direction_ratio=None, lick_times_abs=None, reward_time_abs=None,
                    trial_type=None, in_trial_threshold_deg=None, p_right_target=None,
-                   response_time_s=None, click_diff=None):
+                   response_time_s=None, click_diff=None, stim_duration_s=None,
+                   quiescence_s=None):
         """ Call once per trial. side='L'/'R' (whichever direction the movement was, even if
         below threshold -- use the larger-magnitude direction for a NoMovement trial); magnitude_deg
         is the signed peak displacement that trial; outcome is 'Rewarded'/'Withheld'/'NoMovement'
@@ -361,7 +383,10 @@ class WheelShapingPlots(object):
         trial, e.g. trial_clicks['realized_delta'] = n_right-n_left, only for a genuine
         Reward/NoReward response) -- feeds the psychometric curve, paired internally with whether
         the response was actually to the right (derived from side+outcome, not a separate
-        parameter). """
+        parameter). stim_duration_s (Stage 3/4 only) / quiescence_s (Stage 5 only) -- this
+        trial's own CURRENT staircase.BoundedStaircase/QuiescenceStaircase value, feeds the
+        staircase-trajectory panel alongside threshold_deg/iti_s (Stage 2/3/4/5 all feed that
+        panel from whichever of these four values apply to that stage). """
         self._session_trial_count += 1
         self._trial_idx.append(self._session_trial_count)
         signed_mag = magnitude_deg if side == 'R' else -magnitude_deg
@@ -371,6 +396,10 @@ class WheelShapingPlots(object):
         self._cur_threshold_deg = threshold_deg
         self._cur_gain_mult = gain_mult
         self._cur_iti_s = iti_s
+        self._threshold_deg_series.append(threshold_deg)
+        self._iti_s_series.append(iti_s)
+        self._stim_duration_s_series.append(stim_duration_s)
+        self._quiescence_s_series.append(quiescence_s)
         if direction_ratio is not None:
             self._direction_ratio_series.append(direction_ratio)
         if in_trial_threshold_deg is not None:
@@ -620,8 +649,20 @@ class WheelShapingPlots(object):
             [], [], color=FIRST_LICK_COLOR, s=90, zorder=3, edgecolors='black', linewidths=0.8,
             alpha=0.85, label='first lick of trial')
         ax.set_yticks([])
+        # Every marker sits at the SAME y=0 -- with no explicit ylim, matplotlib's autoscale on
+        # zero-variance data squeezes the usable vertical band down to almost nothing, which is
+        # what made a loc='upper right' legend anchored INSIDE the axes visually collide with the
+        # marker row itself (confirmed, not just a theoretical risk). An explicit ylim gives the
+        # markers real headroom, and the legend now sits ABOVE the axes entirely
+        # (bbox_to_anchor y>1) instead of overlapping any of it, same fix as the new
+        # staircase-trajectory panel's own legend above.
+        ax.set_ylim(-2, 2)
         ax.set_xlabel('session time (s)')
-        ax.legend(fontsize=7, loc='upper right', frameon=False)
+        # framealpha (not frameon=False) -- this panel is now visually tighter than before (one
+        # more row was added above it for the new staircase-trajectory panel), so a borderless
+        # legend sitting at the same corner as a late-session lick marker is still hard to read at
+        # a glance even with real y-headroom; an opaque-ish frame keeps it legible regardless.
+        ax.legend(fontsize=7, loc='upper right', framealpha=0.85)
         _style_axes(ax)
 
     def _redraw_lick_timeline(self, ax):
@@ -657,6 +698,84 @@ class WheelShapingPlots(object):
         x = self._trial_idx[-len(self._direction_ratio_series):]
         self._direction_ratio_line.set_data(x, self._direction_ratio_series)
         ax.set_xlim(0, max(10, x[-1] + 1))
+
+    # --- staircase trajectory (Stage 2/3/4/5 only -- the within-session staircase(s) each of
+    # those stages actually has, plotted trial-by-trial rather than just the progress panel's own
+    # single CURRENT-value bar) --------------------------------------------------------------------
+
+    def _setup_staircase_trajectory_axes(self):
+        ax = self._axes['staircase_trajectory']
+        self._staircase_lines = {}
+        self._staircase_trajectory_ax2 = None
+        # loc='best' (not a fixed corner, and NOT placed outside the axes via bbox_to_anchor --
+        # confirmed by rendering a real preview that the latter collides with ax.set_title(),
+        # which sits in roughly the same spot just above the axes) -- a light, semi-opaque frame
+        # (framealpha, not frameon=False) so the legend stays readable even on the rare trial
+        # range where matplotlib's own "emptiest corner" heuristic still picks a spot a line later
+        # passes through, same principle as the lick-timeline panel's own legend fix below.
+        if self._stage == 2:
+            self._staircase_lines['threshold_deg'], = ax.plot(
+                [], [], color='tab:blue', label='response threshold (deg)')
+            ax.set_ylabel('deg', fontsize=8)
+            ax.legend(fontsize=6, loc='best', framealpha=0.8)
+        elif self._stage in (3, 4):
+            self._staircase_lines['stim_duration_s'], = ax.plot(
+                [], [], color='tab:blue', label='stim duration (s)')
+            self._staircase_lines['iti_s'], = ax.plot(
+                [], [], color='tab:orange', label='ITI (s)')
+            ax.set_ylabel('seconds', fontsize=8)
+            ax.legend(fontsize=6, loc='best', ncol=2, framealpha=0.8)
+        elif self._stage == 5:
+            # Two incompatible units (degrees/seconds) -- a twin y-axis, not two lines sharing
+            # one axis the way Stage 3/4's stim-duration/ITI (both seconds) can. Legend combines
+            # handles from BOTH axes; loc='best' is called on the PRIMARY axes (ax), which only
+            # weighs ax's own line when picking the emptiest corner -- acceptable here since both
+            # lines tend to move in the same broad direction (ratcheting toward their own final
+            # value) over a session, so a corner clear of one is usually clear of both.
+            self._staircase_lines['threshold_deg'], = ax.plot(
+                [], [], color='tab:blue', label='response threshold (deg)')
+            ax.set_ylabel('deg', fontsize=8, color='tab:blue')
+            ax.tick_params(axis='y', labelcolor='tab:blue', labelsize=7)
+            ax2 = ax.twinx()
+            self._staircase_trajectory_ax2 = ax2
+            self._staircase_lines['quiescence_s'], = ax2.plot(
+                [], [], color='tab:orange', label='quiescence (s)')
+            ax2.set_ylabel('seconds', fontsize=8, color='tab:orange')
+            ax2.tick_params(axis='y', labelcolor='tab:orange', labelsize=7)
+            handles = [self._staircase_lines['threshold_deg'], self._staircase_lines['quiescence_s']]
+            ax.legend(handles=handles, labels=[h.get_label() for h in handles], fontsize=6,
+                      loc='best', ncol=2, framealpha=0.8)
+        ax.set_xlabel('trial', fontsize=8)
+        ax.set_title('Staircase trajectory', fontsize=8)
+        ax.tick_params(axis='both', labelsize=7)
+        _style_axes(ax)
+
+    def _redraw_staircase_trajectory(self, ax):
+        def _series_xy(series):
+            pairs = [(t, v) for t, v in zip(self._trial_idx, series) if v is not None]
+            return list(zip(*pairs)) if pairs else ([], [])
+
+        if self._stage == 2:
+            x, y = _series_xy(self._threshold_deg_series)
+            self._staircase_lines['threshold_deg'].set_data(x, y)
+        elif self._stage in (3, 4):
+            x1, y1 = _series_xy(self._stim_duration_s_series)
+            self._staircase_lines['stim_duration_s'].set_data(x1, y1)
+            x2, y2 = _series_xy(self._iti_s_series)
+            self._staircase_lines['iti_s'].set_data(x2, y2)
+        elif self._stage == 5:
+            x1, y1 = _series_xy(self._threshold_deg_series)
+            self._staircase_lines['threshold_deg'].set_data(x1, y1)
+            x2, y2 = _series_xy(self._quiescence_s_series)
+            self._staircase_lines['quiescence_s'].set_data(x2, y2)
+
+        if self._trial_idx:
+            ax.set_xlim(0, max(10, self._trial_idx[-1] + 1))
+        ax.relim()
+        ax.autoscale_view(scalex=False, scaley=True)
+        if self._staircase_trajectory_ax2 is not None:
+            self._staircase_trajectory_ax2.relim()
+            self._staircase_trajectory_ax2.autoscale_view(scalex=False, scaley=True)
 
     # --- rolling accuracy (Stage 3/4 only, persistent line + per-trial-type marker scatter) --------
 
@@ -842,6 +961,8 @@ class WheelShapingPlots(object):
             self._redraw_percent_outcome(self._axes['percent_outcome'])
             self._redraw_psychometric(self._axes['psychometric'])
             self._redraw_reaction_time(self._axes['reaction_time'])
+        if self._stage in (2, 3, 4, 5):
+            self._redraw_staircase_trajectory(self._axes['staircase_trajectory'])
         if self._embed:
             # draw_idle() -- the standard embedded-in-Qt redraw call. plt.pause() would do a full
             # global pyplot event-loop pump across every pyplot-tracked figure, unneeded here since

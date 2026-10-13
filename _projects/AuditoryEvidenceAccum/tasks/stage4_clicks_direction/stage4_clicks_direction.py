@@ -6,10 +6,13 @@ association -- was inserted, pushing this and the old Stage 4 each up by one) --
 direction".
 
 Aim: the click-side association -- the first moment clicks and direction both appear together.
-0.25s Poisson clicks at gamma=+-1.0 (all clicks on the rewarded side, i.e. click_train_v2's 'AOS'
+0.25s Poisson clicks at gamma=+-1.0 (all clicks on the CLICK side, i.e. click_train_v2's 'AOS'
 grid entry) -> a short fixed 100-200ms cue-to-go delay (Tag A) -> LED + dot (centred, appears after
-a further J1 jitter) -> turn toward the click side for reward (ITI 1.5s), away for no reward (ITI
-4.0s). Quiescence (100ms) and response threshold (frozen at whatever fraction Stage 2 ended on) do
+a further J1 jitter) -> turn AWAY FROM the click side for reward (ITI 1.5s), toward it for no
+reward (ITI 4.0s) -- confirmed on real hardware that this rig's rotary encoder requires the
+OPPOSITE turn direction from the click side, not the same one; see the rewarded_event/
+unrewarded_event assignment below for the actual mapping. Quiescence (100ms) and response
+threshold (frozen at whatever fraction Stage 2 ended on) do
 NOT restaircase here -- both resume at Stage 5. An in-trial wheel-excursion threshold is enforced
 for the FIRST time, monitored through CuePeriod+DelayPeriod (mirrors
 Tests/tasks/full_protocol_lookback_test/full_protocol_lookback_test.py's existing wheel-abort
@@ -622,13 +625,20 @@ while True:
 
             bench_plots.add_trial(side, 0.0, VAR_RESPONSE_THRESHOLD_DEG, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target)
+                                   p_right_target=p_right_target, iti_s=iti_this_trial,
+                                   stim_duration_s=stim_duration_this_trial)
             continue
 
         consecutive_aborts = 0
 
-        rewarded_event = right_event if side == 'R' else left_event
-        unrewarded_event = left_event if rewarded_event == right_event else right_event
+        # Confirmed on real hardware: the correct response is turning the wheel OPPOSITE to the
+        # click side, not toward it -- left_event/right_event's own left/right naming is purely a
+        # raw-rotary-sign convention (see ALL_THRESHOLDS_DEG above), not guaranteed to match
+        # physical turn direction one-to-one, and on this rig it's inverted relative to the
+        # click side. If this rig's wiring/mounting ever changes, re-confirm this mapping on
+        # hardware again rather than assuming it still holds.
+        rewarded_event = left_event if side == 'R' else right_event
+        unrewarded_event = right_event if rewarded_event == left_event else left_event
 
         dot_onset_delay = random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
         disappear_delay_s = random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
@@ -835,7 +845,8 @@ while True:
                                VAR_RESPONSE_THRESHOLD_DEG, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
                                trial_type=trial_type, p_right_target=p_right_target,
-                               response_time_s=response_time_s, click_diff=click_diff)
+                               response_time_s=response_time_s, click_diff=click_diff,
+                               iti_s=iti_this_trial, stim_duration_s=stim_duration_this_trial)
 
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)
