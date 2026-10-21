@@ -11,7 +11,8 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   6. Session merging: classify_trial()'s consumed-reward classification, group_sessions()'s
      merge-eligible-ending/same-protocol/gap-threshold rule, combine_group()'s field combination,
      and the stage-ordering helpers
-  7. QuiescenceStaircase (Stage 5): step-up/step-down, floor/ceiling, same shape as Section 1
+  7. QuiescenceStaircase (unlocked as early as Stage 2): step-up/step-down, floor/ceiling, same
+     shape as Section 1
   8. stage4_gates_met()/stage5_gates_met()/select_stage5_staircase_to_tighten() (Tag B policy)
   9. debiasing.next_side_after_error(): statistical repeat-rate check over many draws
   10. session_csv_parser.STREAM_KEYS fix: repeated VAL rows (e.g. WHEEL_POS) are retained as a
@@ -276,10 +277,14 @@ print("=" * 100)
 all_met = staircase.stage2_simple_gates_met(trial_count=201, iti_s=1.5, direction_ratio_in_band=True)
 print("  201 trials, ITI=1.5s, in-band: expect True: {0}".format(all_met))
 
-trial_count_fails = staircase.stage2_simple_gates_met(
+exactly_at_cap = staircase.stage2_simple_gates_met(
     trial_count=200, iti_s=1.5, direction_ratio_in_band=True)
-print("  exactly 200 trials (needs STRICTLY >): expect False: {0}".format(
-    trial_count_fails is False))
+print("  exactly 200 trials (needs >=, since a session is now capped AT 200): expect True: "
+      "{0}".format(exactly_at_cap))
+
+trial_count_fails = staircase.stage2_simple_gates_met(
+    trial_count=199, iti_s=1.5, direction_ratio_in_band=True)
+print("  199 trials: expect False: {0}".format(trial_count_fails is False))
 
 iti_fails = staircase.stage2_simple_gates_met(
     trial_count=250, iti_s=1.4, direction_ratio_in_band=True)
@@ -289,8 +294,8 @@ ratio_fails = staircase.stage2_simple_gates_met(
     trial_count=250, iti_s=1.5, direction_ratio_in_band=False)
 print("  direction ratio out of band: expect False: {0}".format(ratio_fails is False))
 
-section5_pass = all_met and trial_count_fails is False and iti_fails is False and \
-    ratio_fails is False
+section5_pass = (all_met and exactly_at_cap and trial_count_fails is False and
+                  iti_fails is False and ratio_fails is False)
 print("Section 5 result: {0}".format("PASS" if section5_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -451,8 +456,8 @@ section6_pass = section6a_pass and section6b_pass and section6c_pass and section
 print("Section 6 result: {0}".format("PASS" if section6_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 7: QuiescenceStaircase (Stage 4) -- same step-up/step-down/floor/ceiling shape as
-# Section 1's ThresholdStaircase
+# Section 7: QuiescenceStaircase (unlocked as early as Stage 2, continuous through Stage 5) --
+# same step-up/step-down/floor/ceiling shape as Section 1's ThresholdStaircase
 # ==================================================================================================
 
 print()

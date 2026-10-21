@@ -2064,6 +2064,16 @@ class SessionRunnerWindow(QWidget):
             QMessageBox.warning(self, 'No session', 'No watched session to attach this entry to '
                                                       'yet -- start or wait for a session first.')
             return
+        # Per explicit instruction: bench-test subjects (anything not named like a real training
+        # animal, build_training_log.is_real_animal_subject() -- this lab's convention is a 'UM'
+        # prefix, e.g. 'UM001') never get a training_log.xlsx sheet and are never committed to
+        # GitHub via this button. Checked here, before either the xlsx write or the commit, so a
+        # test subject's data never even lands in the shared file to begin with.
+        if not build_training_log.is_real_animal_subject(subject):
+            self.save_status_label.setText(
+                "Not saved -- '{0}' isn't a real-animal subject name (bench-test subjects "
+                "aren't added to the shared training log).".format(subject))
+            return
         # DOB/Sex/Strain are blank here on purpose -- see weight_group's own comment in
         # _build_ui(); _write_header_fields() never overwrites an existing value with blank, so
         # this never touches those cells. Baseline weight is the only one this form can change.
