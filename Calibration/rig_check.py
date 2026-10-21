@@ -83,10 +83,11 @@ from click_train_v2 import VAR_CLICK_DURATION_S, VAR_CLICK_RAMP_MS
 
 from pybpod_hifi_module.module_api import HiFiModule
 from pybpod_hifi_module.utils.generate_sound import pure_tone
+from bpod_port import resolve_bpod_serial_port
 from pybpodapi.protocol import Bpod, StateMachine
 
-VAR_BPOD_SERIAL_PORT = 'COM10'   # MACHINE-SPECIFIC -- same "edit per box" convention as
-                                  # flush_valve.py/calibrate_liquid.py's own VAR_BPOD_SERIAL_PORT.
+VAR_BPOD_SERIAL_PORT = None   # None = auto-detect from this box's own board config (bpod_port.py);
+                              # set e.g. 'COM20' only to force a specific port.
 VAR_VALVE_ID = 1                 # this rig's single valve (see CLAUDE.md).
 VAR_LED_CHANNEL_NUMBER = 1       # PWM1, Port 1's built-in LED -- same convention every task script
                                   # already uses for a go-cue LED.
@@ -229,7 +230,7 @@ class RigCheckWindow(QWidget):
 
     def _connect_hardware(self):
         try:
-            self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT)
+            self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT or resolve_bpod_serial_port())
             self.bpod_status = 'Connected on {0}'.format(self.my_bpod.serial_port)
             print("Connected to Bpod on {0}".format(self.my_bpod.serial_port), flush=True)
         except Exception as err:

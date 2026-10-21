@@ -70,17 +70,15 @@ from matplotlib.figure import Figure
 
 from liquid_calibration import LiquidCalibration
 
+from bpod_port import resolve_bpod_serial_port
 from pybpodapi.protocol import Bpod, StateMachine
 
 VAR_VALVE_IDS = [1]   # this rig's single valve (see CLAUDE.md: "wheel-turn choice + single valve")
                        # -- extend this list for a future second valve, nothing else needs to change.
 VAR_DEFAULT_DURATION_MS = 50.0
 VAR_DEFAULT_N_PULSES = 200   # within MATLAB's own suggested 100-500 range
-VAR_BPOD_SERIAL_PORT = 'COM10'   # MACHINE-SPECIFIC -- this rig's own confirmed Bpod COM port
-                                  # (Device Manager/"USB Serial Device"). Update per box, same
-                                  # "edit per box" convention as e.g. VAR_ROTARY_USB_PORT elsewhere
-                                  # in this codebase. See module docstring for why this is required
-                                  # here specifically, unlike every other task script.
+VAR_BPOD_SERIAL_PORT = None   # None = auto-detect from this box's own board config (bpod_port.py);
+                              # set e.g. 'COM20' only to force a specific port.
 VAR_PULSE_LED_CHANNEL = 'PWM1'   # Port 1's built-in LED, same convention as every other task
                                   # script's own go-cue LED -- see module docstring's "LED blink"
                                   # note for why this exists.
@@ -128,7 +126,7 @@ class CalibrationWindow(QWidget):
 
         self.calibration = LiquidCalibration()
 
-        self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT)
+        self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT or resolve_bpod_serial_port())
         print("Connected to Bpod on {0}".format(self.my_bpod.serial_port), flush=True)
 
         self.runner = None   # holds the current PulseRunner while a pulse batch is in flight
