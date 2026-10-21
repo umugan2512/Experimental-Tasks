@@ -118,6 +118,61 @@ def _session_subject(repo_path):
         return None
 
 
+def _ref_exists(ref):
+    return git('rev-parse', '--verify', '-q', ref + '^{commit}', check=False).returncode == 0
+
+
+def _owned_sheet_names():
+    return {build_training_log._sheet_name_for(s) for s in build_training_log.owned_subjects()}
+
+
+def newest_main_xlsx():
+    """(bytes, blob hash) of training_log.xlsx on the newest main this computer knows about --
+    origin/main or local main, whichever contains the other; if they diverged, origin/main's
+    workbook with this computer's own sheets from local main (same rule as _merge_mains()). No
+    network access: run `git fetch` first for the very latest. (None, None) if main has no log."""
+    path = xlsx_repo_path()
+    refs = [r for r in (REMOTE_MAIN, MAIN) if _ref_exists(r)]
+    if len(refs) == 2 and not is_ancestor(MAIN, REMOTE_MAIN):
+        if not is_ancestor(REMOTE_MAIN, MAIN):
+            theirs, ours = blob_at(REMOTE_MAIN, path), blob_at(MAIN, path)
+            if theirs and ours and theirs != ours:
+                merged = xlsx_sheet_merge.merge_workbooks(
+                    git_bytes('cat-file', 'blob', theirs), git_bytes('cat-file', 'blob', ours),
+                    _owned_sheet_names())
+                return merged, None
+        refs = [MAIN, REMOTE_MAIN]   # local main is newest (or blobs identical / one missing)
+    for ref in refs:
+        blob = blob_at(ref, path)
+        if blob:
+            return git_bytes('cat-file', 'blob', blob), blob
+    return None, None
+
+
+def xlsx_from_main():
+    """The workbook build_training_log.py should start from, as bytes -- or None if the file on
+    disk is already right. A computer-specific branch's copy of training_log.xlsx goes stale as
+    soon as main moves ahead (and switching branches swaps the file on disk), so the newest main's
+    copy is used instead. Unsaved local edits are kept: if the file on disk differs from HEAD's
+    committed copy, this computer's own mice's sheets are taken from disk."""
+    main_bytes, main_blob = newest_main_xlsx()
+    if main_bytes is None:
+        return None
+    disk_path = os.path.join(RECORDS_DIR, XLSX_NAME)
+    if not os.path.exists(disk_path):
+        return main_bytes
+    head_blob = blob_at('HEAD', xlsx_repo_path())
+    if main_blob is not None and main_blob == head_blob:
+        return None            # disk is already based on the newest main
+    disk_blob = git_out('hash-object', '--', XLSX_NAME)
+    if disk_blob == main_blob:
+        return None
+    if disk_blob == head_blob:  # no local edits -- just take main's
+        return main_bytes
+    with open(disk_path, 'rb') as f:
+        return xlsx_sheet_merge.merge_workbooks(main_bytes, f.read(), _owned_sheet_names())
+
+
 def build_log():
     print('Refreshing training_log.xlsx from local session data...', flush=True)
     rc = subprocess.call([sys.executable, 'build_training_log.py'], cwd=RECORDS_DIR)
@@ -177,10 +232,25 @@ def commit_data_locally():
 
     if branch != MAIN and not is_ancestor(MAIN, 'HEAD'):
         # The hand-written merge below is only correct if this branch already has all of main.
-        if git('merge', '--no-edit', MAIN, check=False).returncode != 0:
+        # training_log.xlsx on disk was already rebuilt on top of main's copy (see
+        # xlsx_from_main()), so set it aside for the merge and put it back afterwards --
+        # otherwise git refuses to merge over the modified file.
+        disk_path = os.path.join(RECORDS_DIR, XLSX_NAME)
+        held = None
+        if (os.path.exists(disk_path) and blob_at('HEAD', xlsx_repo_path())
+                and git_out('hash-object', '--', XLSX_NAME) != blob_at('HEAD', xlsx_repo_path())):
+            with open(disk_path, 'rb') as f:
+                held = f.read()
+            git('checkout', 'HEAD', '--', XLSX_NAME)
+        merged_ok = git('merge', '--no-edit', MAIN, check=False).returncode == 0
+        if not merged_ok:
             git('merge', '--abort', check=False)
-            raise SyncError('"{0}" is behind {1} and merging it in failed (usually because '
-                            'training_log.xlsx was edited here while {1} has a newer one). Nothing '
+        if held is not None:
+            with open(disk_path, 'wb') as f:
+                f.write(held)
+        if not merged_ok:
+            raise SyncError('"{0}" is behind {1} and merging it in failed (a conflict with this '
+                            'computer\'s own patches, or other unsaved edits in the way). Nothing '
                             'was committed; your edits are still in the files.'.format(branch, MAIN))
 
     old_main = git_out('rev-parse', MAIN)
@@ -287,11 +357,16 @@ def sync():
     if branch == 'HEAD':
         raise SyncError('Detached HEAD -- check out main or this computer\'s branch first.')
 
+    # Fetch BEFORE rebuilding, so the rebuild starts from the very latest training_log.xlsx on
+    # main (see xlsx_from_main()). Offline is fine here; the required fetch below reports it.
+    print('Fetching latest changes...', flush=True)
+    fetched = git('fetch', 'origin', check=False).returncode == 0
+
     build_log()
     print(commit_data_locally(), flush=True)
 
-    print('Fetching latest changes...', flush=True)
-    git('fetch', 'origin')
+    if not fetched:
+        git('fetch', 'origin')
     reconcile_with_origin(branch)
 
     if git_out('rev-parse', MAIN) != git_out('rev-parse', REMOTE_MAIN):

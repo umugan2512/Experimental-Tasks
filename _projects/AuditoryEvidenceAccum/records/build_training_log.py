@@ -44,6 +44,7 @@ import math
 import os
 import re
 import sys
+import threading
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -860,7 +861,36 @@ def _rewrite_subject_sheet(wb, subject, sessions):
     return new_count, updated_count
 
 
+def _start_from_main(timeout_s=30.0):
+    """ Replaces training_log.xlsx on disk with the newest copy on main (keeping unsaved edits to
+    this computer's own mice) before it gets rebuilt -- a computer-specific branch's own copy is
+    usually older than main's. See sync_training_log.xlsx_from_main(). Best-effort: git runs on a
+    daemon thread bounded by `timeout_s` (git has stalled for a minute+ on some rigs, see
+    CLAUDE.md), and on any failure the local copy is used as before, with a warning. """
+    result = {}
+
+    def work():
+        try:
+            import sync_training_log
+            result['bytes'] = sync_training_log.xlsx_from_main()
+        except Exception as err:
+            result['err'] = err
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive() or 'err' in result:
+        print("WARNING: could not load training_log.xlsx from main ({0}) -- updating the local "
+              "copy instead.".format(result.get('err', 'git timed out')), flush=True)
+        return
+    if result.get('bytes') is not None:
+        with open(_OUTPUT_PATH, 'wb') as f:
+            f.write(result['bytes'])
+        print("Started from the newest training_log.xlsx on main.", flush=True)
+
+
 def build_workbook():
+    _start_from_main()
     # Only this computer's own mice (see owned_subjects()) -- every other sheet, and every other
     # computer's session folders, are left exactly as they came from git.
     by_subject = scan_all_sessions(subjects=owned_subjects())
