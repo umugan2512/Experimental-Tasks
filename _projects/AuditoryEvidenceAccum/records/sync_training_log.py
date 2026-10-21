@@ -211,11 +211,21 @@ def tree_with_data(base_ref):
             else:
                 continue
             print('WARNING: not committing {0} -- {1}.'.format(path, reason), flush=True)
+            # update-index's path args resolve relative to the process's own cwd (RECORDS_DIR),
+            # NOT relative to the repo root -- unlike `rev-parse <rev>:<path>` (blob_at, above) or
+            # porcelain commands' pathspec magic (`:/...` is NOT supported here). `path` here is
+            # repo-root-relative (from diff-index), so passing it straight through silently
+            # matches no index entry at all (exit 0, no error, no effect) -- confirmed as a real,
+            # previously-silent bug: these exclusions never actually worked. Convert back to a
+            # RECORDS_DIR-relative path (matching DATA_PATHS[1]'s own '../experiments' form)
+            # before handing it to update-index.
+            cwd_relative = os.path.join('..', 'experiments', path[len(exp_prefix):])
             base_blob = blob_at(base_ref, path)
             if base_blob:
-                git('update-index', '--cacheinfo', '100644,{0},{1}'.format(base_blob, path), env=env)
+                git('update-index', '--cacheinfo', '100644,{0},{1}'.format(base_blob, cwd_relative),
+                    env=env)
             else:
-                git('update-index', '--force-remove', '--', path, env=env)
+                git('update-index', '--force-remove', '--', cwd_relative, env=env)
         return git_out('write-tree', env=env)
     finally:
         if os.path.exists(tmp_index):
