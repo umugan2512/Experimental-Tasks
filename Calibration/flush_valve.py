@@ -22,7 +22,7 @@ VAR_BPOD_SERIAL_PORT)` is required here too, not a bare `Bpod()`.
 **Small standalone GUI** (per explicit request -- launched from a button in `run_session.py`'s own
 dashboard, so a separate "type into a console" interactive loop was a worse fit than a couple of
 buttons): one status label plus explicit, SEPARATE "Open Valve" / "Close Valve" buttons -- not one
-toggle button, so there's never any ambiguity about which state a click will produce, and the
+toggle button (the Enter key does toggle, though: one press opens, the next closes), so there's never any ambiguity about which state a click will produce, and the
 layout stays uncrowded for a tool this small. `closeEvent()` force-closes the valve (and the Bpod
 connection) if the window is closed while the valve is still open, same guaranteed-close-on-exit
 safety net the original terminal version's own `finally:` block provided -- the valve, and the
@@ -31,14 +31,17 @@ no matter how the window is dismissed.
 """
 import sys
 
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QKeySequence
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QShortcut)
 
+from bpod_port import resolve_bpod_serial_port
 from pybpodapi.protocol import Bpod
 
 VAR_VALVE_ID = 1   # this rig's single valve (see CLAUDE.md: "wheel-turn choice + single valve")
-VAR_BPOD_SERIAL_PORT = 'COM10'   # MACHINE-SPECIFIC -- this rig's own confirmed Bpod COM port, same
-                                  # constant/convention as calibrate_liquid.py/rig_check.py's own
-                                  # VAR_BPOD_SERIAL_PORT. Update per box.
+VAR_BPOD_SERIAL_PORT = None   # None = auto-detect from this box's own board config (bpod_port.py);
+                              # set e.g. 'COM20' only to force a specific port.
 
 
 class FlushValveWindow(QWidget):
@@ -54,7 +57,7 @@ class FlushValveWindow(QWidget):
 
     def _connect_hardware(self):
         try:
-            self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT)
+            self.my_bpod = Bpod(serial_port=VAR_BPOD_SERIAL_PORT or resolve_bpod_serial_port())
             self.bpod_status = 'Connected on {0}'.format(self.my_bpod.serial_port)
             print("Connected to Bpod on {0}".format(self.my_bpod.serial_port), flush=True)
         except Exception as err:
@@ -80,6 +83,15 @@ class FlushValveWindow(QWidget):
         buttons_row.addWidget(self.close_button)
         layout.addLayout(buttons_row)
 
+        # Enter toggles: one press opens, the next closes. Both the main Return key and the
+        # keypad Enter key are bound. The buttons take no keyboard focus, so Enter/Space can't
+        # also trigger whichever button happens to be focused.
+        for button in (self.open_button, self.close_button):
+            button.setFocusPolicy(Qt.NoFocus)
+        for key in (Qt.Key_Return, Qt.Key_Enter):
+            QShortcut(QKeySequence(key), self, activated=self._on_toggle)
+        layout.addWidget(QLabel('Press Enter to open / close the valve.'))
+
         self.setLayout(layout)
         self._update_buttons()
 
@@ -103,6 +115,10 @@ class FlushValveWindow(QWidget):
 
     def _on_close(self):
         self._set_valve(False)
+
+    def _on_toggle(self):
+        if self.my_bpod is not None:
+            self._set_valve(not self._valve_open)
 
     def closeEvent(self, event):
         """ Guaranteed close-on-exit, regardless of how the window is dismissed -- the valve (and
