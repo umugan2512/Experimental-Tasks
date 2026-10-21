@@ -31,6 +31,7 @@ Works the same whichever branch is checked out:
   merge refusing to overwrite them. Only data ever lands on main from such a branch.
 """
 import functools
+import glob
 import os
 import subprocess
 import sys
@@ -102,6 +103,21 @@ def _ran_here(repo_path):
     return os.path.exists(os.path.join(repo_root(), os.path.dirname(repo_path), 'user_settings.py'))
 
 
+def _session_subject(repo_path):
+    """Subject name for the session folder holding repo_path (any file inside it), by reading
+    that session's own CSV -- or None if no readable CSV is found there. Used to keep bench-test
+    subjects' session data out of what gets committed to GitHub, per explicit instruction (see
+    build_training_log.is_real_animal_subject())."""
+    session_dir = os.path.join(repo_root(), os.path.dirname(repo_path))
+    csvs = glob.glob(os.path.join(session_dir, '*.csv'))
+    if not csvs:
+        return None
+    try:
+        return build_training_log.session_subject(csvs[0])
+    except Exception:
+        return None
+
+
 def build_log():
     print('Refreshing training_log.xlsx from local session data...', flush=True)
     rc = subprocess.call([sys.executable, 'build_training_log.py'], cwd=RECORDS_DIR)
@@ -116,8 +132,11 @@ def commit_message():
 def tree_with_data(base_ref):
     """The tree of `base_ref` plus the working-tree data files (added/modified only, never
     removed), built in a temporary index so HEAD, the real index and every other file are
-    untouched. Changes to session files in folders that did NOT run on this computer are left
-    out, so another computer's sessions are never overwritten from here. Returns the tree hash."""
+    untouched. Changes to session files in folders that did NOT run on this computer, OR whose
+    subject isn't a real training animal (build_training_log.is_real_animal_subject() -- per
+    explicit instruction, bench-test session data is never committed to GitHub), are left out, so
+    another computer's sessions are never overwritten from here and test data never leaves this
+    machine. Returns the tree hash."""
     fd, tmp_index = tempfile.mkstemp(prefix='sync_training_log_index_')
     os.close(fd)
     os.remove(tmp_index)  # git wants to create the index file itself
@@ -128,14 +147,20 @@ def tree_with_data(base_ref):
         exp_prefix = experiments_repo_prefix()
         changed = git_out('diff-index', '--cached', '--name-only', base_ref, env=env).splitlines()
         for path in changed:
-            if path.startswith(exp_prefix) and not _ran_here(path):
-                print('WARNING: not committing {0} -- that session ran on another computer.'.format(path),
-                      flush=True)
-                base_blob = blob_at(base_ref, path)
-                if base_blob:
-                    git('update-index', '--cacheinfo', '100644,{0},{1}'.format(base_blob, path), env=env)
-                else:
-                    git('update-index', '--force-remove', '--', path, env=env)
+            if not path.startswith(exp_prefix):
+                continue
+            if not _ran_here(path):
+                reason = 'that session ran on another computer'
+            elif not build_training_log.is_real_animal_subject(_session_subject(path)):
+                reason = 'not a real training animal (bench-test subject)'
+            else:
+                continue
+            print('WARNING: not committing {0} -- {1}.'.format(path, reason), flush=True)
+            base_blob = blob_at(base_ref, path)
+            if base_blob:
+                git('update-index', '--cacheinfo', '100644,{0},{1}'.format(base_blob, path), env=env)
+            else:
+                git('update-index', '--force-remove', '--', path, env=env)
         return git_out('write-tree', env=env)
     finally:
         if os.path.exists(tmp_index):

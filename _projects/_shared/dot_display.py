@@ -29,6 +29,7 @@ loop instead to actually process Qt's pending events/repaints.
 """
 import math
 import sys
+import time
 
 from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QtGui import QPainter, QColor
@@ -64,6 +65,7 @@ class _DotWidget(QWidget):
         self._dot_gray = dot_gray
         self._x_offset_px = 0
         self._visible_dot = False
+        self._punish_active = False
 
     def set_x_offset(self, x_offset_px):
         self._x_offset_px = x_offset_px
@@ -73,9 +75,16 @@ class _DotWidget(QWidget):
         self._visible_dot = visible
         self.update()
 
+    def set_punish_active(self, active):
+        """ Orthogonal overlay flag -- when True, paintEvent below paints a full-white (255)
+        background instead of the normal background_gray, without touching background_gray/
+        dot_gray themselves. Driven by DotDisplay.flash_white()/pump() below. """
+        self._punish_active = active
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        bg = self._background_gray
+        bg = 255 if self._punish_active else self._background_gray
         painter.fillRect(self.rect(), QColor(bg, bg, bg))
         if self._visible_dot:
             cx = self.width() // 2 + int(round(self._x_offset_px))
@@ -97,6 +106,7 @@ class DotDisplay(object):
     def __init__(self, screen_index=1, diameter_px=60, background_gray=128, dot_gray=0,
                  deg_to_px_gain=4.0):
         self._deg_to_px_gain = deg_to_px_gain
+        self._punish_until = None
 
         self._app = QApplication.instance()
         if self._app is None:
@@ -144,9 +154,23 @@ class DotDisplay(object):
         self._widget.set_dot_visible(True)
         self._widget.set_x_offset(wheel_position_deg * self._deg_to_px_gain)
 
+    def flash_white(self, duration_s):
+        """ Non-blocking: arms a full-white background override (covering the whole window --
+        every bonded physical monitor it spans) for duration_s seconds starting now, as an
+        aversive punishment cue. Caller's own existing render loop (already calling pump() every
+        render_interval) clears it automatically once the deadline passes -- no caller-side timing
+        needed. Re-arms (extends) if called again before a previous flash finishes; does not
+        stack. Orthogonal to background_gray/dot_gray -- does not mutate either. """
+        self._punish_until = time.time() + duration_s
+        self._widget.set_punish_active(True)
+
     def pump(self):
         """ Processes pending Qt events/repaints -- call repeatedly from an external polling loop
-        instead of app.exec_() (which would block the calling thread). """
+        instead of app.exec_() (which would block the calling thread). Also clears any active
+        flash_white() overlay once its deadline has passed. """
+        if self._punish_until is not None and time.time() >= self._punish_until:
+            self._widget.set_punish_active(False)
+            self._punish_until = None
         self._app.processEvents()
 
 

@@ -120,7 +120,10 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
 # --- stage parameters (training_protocol.md Part 4, Stage 1's table) --------------------------------
 
-VAR_MAX_TRIALS = 400                # hard-ceiling safety backstop, well above the 200-trial goal
+VAR_MAX_TRIALS = 400                # hard-ceiling SAFETY backstop only, above both real caps
+                                     # below (VAR_TRIAL_COUNT_ADVANCE trials / VAR_SESSION_WATER_
+                                     # CAP_UL) -- should essentially never be the thing that
+                                     # actually ends a session.
 # If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
 # registered) and this one is starting soon enough to count as its own continuation (same
 # merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own
@@ -155,7 +158,14 @@ VAR_THRESHOLD_STARTING_FRACTION = 0.10   # only used the very first time this su
                                      # sessions, not per-trial) -- read from persisted state below.
 
 VAR_TRIAL_COUNT_ADVANCE = 200       # doc: ">200 completed trials/session on two consecutive
-                                     # sessions"
+                                     # sessions" -- ALSO now the session's own hard trial cap (see
+                                     # the trial loop below): the session deliberately ends once
+                                     # this many trials complete, it isn't just an advancement
+                                     # threshold checked after an otherwise-longer session anymore.
+VAR_SESSION_WATER_CAP_UL = 1500.0   # per explicit instruction: three caps on the session --
+                                     # 200 trials, 1.5mL delivered, or 30 minutes elapsed --
+                                     # whichever comes first.
+VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
                                      # valve open time is derived from this via
@@ -183,8 +193,6 @@ VAR_POLL_HZ = 100                    # that the poll thread keeps up without del
                                       # handling -- if not, fall back to 50/50 (still a real
                                       # improvement over the old 50/10 split) and note which rate
                                       # was actually used when reporting results from a real session.
-
-VAR_GO_CUE_LED_CHANNEL = 'PWM1'     # Port 1's built-in LED, same convention as every other task
 
 VAR_CAMERA_INDEX = None                      # None = auto-discover, see
                                               # camera_recorder.discover_camera()
@@ -277,10 +285,15 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting up to {0} trials, targeting {1} for advancement".format(
-    VAR_MAX_TRIALS, VAR_TRIAL_COUNT_ADVANCE), flush=True)
+print("Starting up to {0} trials, capped at {1} trials, {2:.1f}mL delivered, or {3:.0f}min "
+      "elapsed -- whichever first ({1} also targeted for advancement)".format(
+          VAR_MAX_TRIALS, VAR_TRIAL_COUNT_ADVANCE, VAR_SESSION_WATER_CAP_UL / 1000.0,
+          VAR_SESSION_DURATION_CAP_S / 60.0), flush=True)
 
 session_trial_count = 0
+session_reward_ul_total = 0.0
+session_start_time = time.time()
+session_end_reason = None
 
 for trial in range(1, VAR_MAX_TRIALS + 1):
     try:
@@ -314,9 +327,9 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
 
         sma = StateMachine(my_bpod)
 
-        # Split into PreDotDelay (LED/rotary arm here, but no neg_event/pos_event wired -- a
-        # crossing during this window is still logged by Bpod as a raw event, it just can't trigger
-        # a transition) + WheelPeriod (the real response-collection state, entered only once
+        # Split into PreDotDelay (rotary arm here, but no neg_event/pos_event wired -- a crossing
+        # during this window is still logged by Bpod as a raw event, it just can't trigger a
+        # transition) + WheelPeriod (the real response-collection state, entered only once
         # dot_onset_delay has actually elapsed) -- fixes a real bug where a brisk turn right as
         # quiescence released could cross threshold and fire Reward before the dot had rendered at
         # all, since thresholds were armed and Bpod was already listening within ms of send_epoch,
@@ -328,8 +341,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             state_name='PreDotDelay',
             state_timer=dot_onset_delay,
             state_change_conditions={Bpod.Events.Tup: 'WheelPeriod'},
-            output_actions=[(rotary_channel, reset_positions_trigger_id),
-                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(rotary_channel, reset_positions_trigger_id)])
 
         sma.add_state(
             state_name='WheelPeriod',
@@ -345,13 +357,13 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             state_name='Reward',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), (VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1)])
 
         sma.add_state(
             state_name='NoMovement',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='ITI',
@@ -430,6 +442,8 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         outcome = 'Rewarded' if rewarded else 'NoMovement'
 
         session_trial_count += 1
+        if rewarded:
+            session_reward_ul_total += VAR_REWARD_UL
 
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
         neg_crossings = choice_events.get(neg_event, [])
@@ -464,6 +478,23 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
                                gain_mult=cur_gain_mult, lick_times_abs=lick_times_abs,
                                reward_time_abs=reward_time_abs)
 
+        # Deliberate session cap, per explicit instruction: stop at 200 trials, 1.5mL delivered,
+        # or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400) above is only a
+        # further-out safety backstop, not the real target. Checked at trial end (not trial
+        # start) so the trial that actually crosses a cap still completes and gets logged.
+        if session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
+            session_end_reason = 'trial_count_cap'
+        elif session_reward_ul_total >= VAR_SESSION_WATER_CAP_UL:
+            session_end_reason = 'water_cap'
+        elif (time.time() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
+            session_end_reason = 'duration_cap_30min'
+        if session_end_reason is not None:
+            print("Session cap reached ({0} trials, {1:.1f}uL delivered, {2:.1f}min elapsed) -- "
+                  "ending session.".format(
+                      session_trial_count, session_reward_ul_total,
+                      (time.time() - session_start_time) / 60.0), flush=True)
+            break
+
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)
         traceback.print_exc(file=sys.stdout)
@@ -477,9 +508,15 @@ else:
     runner.register('SESSION_END_REASON', 'completed')
     print("Done: reached VAR_MAX_TRIALS ({0})".format(VAR_MAX_TRIALS), flush=True)
 
+if session_end_reason is not None:
+    runner.register('SESSION_END_REASON', session_end_reason)
+
 # --- session-end bookkeeping: advancement gate + gain decay + threshold growth ----------------------
 
-cleared_this_session = session_trial_count > VAR_TRIAL_COUNT_ADVANCE
+# >= , not > -- a session is now deliberately capped AT VAR_TRIAL_COUNT_ADVANCE trials (see the
+# cap check above), so it can never exceed that count; the qualifying check has to recognize
+# exactly reaching it.
+cleared_this_session = session_trial_count >= VAR_TRIAL_COUNT_ADVANCE
 history = state.get('sessions_trial_count_history')
 history.append(cleared_this_session)
 state.set('sessions_trial_count_history', history[-2:])   # only need the last 2 to judge
