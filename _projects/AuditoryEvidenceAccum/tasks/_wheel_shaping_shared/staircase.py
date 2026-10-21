@@ -100,8 +100,11 @@ def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_c
     velocity-separation criterion) deliberately deferred (no real Stage 2 movement data exists yet
     to validate a concrete algorithm against -- see stage2_threshold_staircase.py's module
     docstring). This only reports whether the easy, unambiguous gates are met; the statistical
-    test remains a human judgment call until it's built. """
-    return trial_count > trial_count_gate and iti_s >= ITI_CEILING_S and direction_ratio_in_band
+    test remains a human judgment call until it's built.
+
+    >=, not > -- Stage 2's own session is now deliberately capped AT trial_count_gate trials (see
+    stage2_threshold_staircase.py's own session cap), so it can never exceed that count. """
+    return trial_count >= trial_count_gate and iti_s >= ITI_CEILING_S and direction_ratio_in_band
 
 
 # --- Stage 3/4/5 (training_protocol.md Revision 2) -----------------------------------------------

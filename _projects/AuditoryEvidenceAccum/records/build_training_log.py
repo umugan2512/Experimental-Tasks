@@ -352,12 +352,30 @@ def _quick_session_header(csv_path):
     return subject, started or ''
 
 
+def is_real_animal_subject(name):
+    """ True for a real training-animal subject name -- this lab's convention: starts with 'UM'
+    (e.g. 'UM001') AND doesn't look like a bench-test/dev subject (contains 'test', e.g. 'test',
+    'test1', 'testTask', or a hypothetical 'UMtest'). Per explicit instruction: bench-test
+    subjects should not get their own sheet in training_log.xlsx, and their session data should
+    never be committed to GitHub via the "Save to Training Log" button (see sync_training_log.py's
+    own use of this). """
+    return bool(name) and name.upper().startswith('UM') and 'test' not in name.lower()
+
+
+def session_subject(csv_path):
+    """ Public wrapper around _quick_session_header() -- just the subject name (or None),
+    for callers (sync_training_log.py) that only need subject identity, not session_started. """
+    return _quick_session_header(csv_path)[0]
+
+
 def owned_subjects():
     """ Subjects this computer is responsible for in training_log.xlsx: those whose MOST RECENT
-    session (across every computer's sessions shared via git) ran here. One mouse is trained on one
-    computer, so each subject's sheet has exactly one writer -- no computer ever rewrites another
-    computer's mouse (or its hand-typed weights/notes, or its session folders' combined structs).
-    If a mouse moves to another computer, ownership follows it as soon as it runs a session there. """
+    session (across every computer's sessions shared via git) ran here, AND which are real
+    training animals (is_real_animal_subject()) -- bench-test subjects never get a sheet here,
+    per explicit instruction. One mouse is trained on one computer, so each subject's sheet has
+    exactly one writer -- no computer ever rewrites another computer's mouse (or its hand-typed
+    weights/notes, or its session folders' combined structs). If a mouse moves to another
+    computer, ownership follows it as soon as it runs a session there. """
     latest = {}   # subject -> (session_started, ran_here)
     for path in _session_csv_paths():
         try:
@@ -365,7 +383,7 @@ def owned_subjects():
         except Exception as err:
             print("WARNING: failed to read {0}: {1}".format(path, err), flush=True)
             continue
-        if subject is None:
+        if subject is None or not is_real_animal_subject(subject):
             continue
         if subject not in latest or started > latest[subject][0]:
             latest[subject] = (started, _ran_here(path))

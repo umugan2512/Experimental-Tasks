@@ -119,7 +119,10 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
 # --- stage parameters (training_protocol.md Part 4, Stage 2) -----------------------------------------
 
-VAR_MAX_TRIALS = 400
+VAR_MAX_TRIALS = 400                # hard-ceiling SAFETY backstop only, above both real caps
+                                     # below (VAR_TRIAL_COUNT_ADVANCE trials / VAR_SESSION_WATER_
+                                     # CAP_UL) -- should essentially never be the thing that
+                                     # actually ends a session.
 # If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
 # registered) and this one is starting soon enough to count as its own continuation (same
 # merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own
@@ -139,7 +142,14 @@ VAR_STEADY_THRESHOLD_DEG = 4
 VAR_RESPONSE_TIMEOUT_S = 10.0       # same flagged/tunable placeholder as Stage 1
 
 VAR_THRESHOLD_FINAL_DEG = 35        # matches Stage 1 / this project's established final-task value
-VAR_TRIAL_COUNT_ADVANCE = 200
+VAR_TRIAL_COUNT_ADVANCE = 200       # ALSO now the session's own hard trial cap (see the trial
+                                     # loop below): the session deliberately ends once this many
+                                     # trials complete, it isn't just an advancement threshold
+                                     # checked after an otherwise-longer session anymore.
+VAR_SESSION_WATER_CAP_UL = 1500.0   # per explicit instruction: three caps on the session --
+                                     # 200 trials, 1.5mL delivered, or 30 minutes elapsed --
+                                     # whichever comes first.
+VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
                                      # valve open time is derived from this via
@@ -281,13 +291,18 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting up to {0} trials, targeting {1} for advancement (current threshold "
-      "{2:.1f}deg = {3:.0%} of final, ITI {4:.2f}s)".format(
-          VAR_MAX_TRIALS, VAR_TRIAL_COUNT_ADVANCE,
+print("Starting up to {0} trials, capped at {1} trials, {2:.1f}mL delivered, or {3:.0f}min "
+      "elapsed -- whichever first (current threshold {4:.1f}deg = {5:.0%} of final, "
+      "ITI {6:.2f}s)".format(
+          VAR_MAX_TRIALS, VAR_TRIAL_COUNT_ADVANCE, VAR_SESSION_WATER_CAP_UL / 1000.0,
+          VAR_SESSION_DURATION_CAP_S / 60.0,
           staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG, staircase_obj.current_fraction,
           cur_iti_s), flush=True)
 
 session_trial_count = 0
+session_reward_ul_total = 0.0
+session_start_time = time.time()
+session_end_reason = None
 
 for trial in range(1, VAR_MAX_TRIALS + 1):
     try:
@@ -461,6 +476,8 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         outcome = 'Rewarded' if rewarded else ('Withheld' if side is not None else 'NoMovement')
 
         session_trial_count += 1
+        if rewarded:
+            session_reward_ul_total += VAR_REWARD_UL
         fraction_before_step = staircase_obj.current_fraction
         staircase_obj.record_outcome(success=staircase_success)
         if staircase_obj.current_fraction > fraction_before_step:
@@ -492,6 +509,23 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
                                direction_ratio=direction_tracker.right_fraction(),
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs)
 
+        # Deliberate session cap, per explicit instruction: stop at 200 trials, 1.5mL delivered,
+        # or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400) above is only a
+        # further-out safety backstop, not the real target. Checked at trial end (not trial
+        # start) so the trial that actually crosses a cap still completes and gets logged.
+        if session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
+            session_end_reason = 'trial_count_cap'
+        elif session_reward_ul_total >= VAR_SESSION_WATER_CAP_UL:
+            session_end_reason = 'water_cap'
+        elif (time.time() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
+            session_end_reason = 'duration_cap_30min'
+        if session_end_reason is not None:
+            print("Session cap reached ({0} trials, {1:.1f}uL delivered, {2:.1f}min elapsed) -- "
+                  "ending session.".format(
+                      session_trial_count, session_reward_ul_total,
+                      (time.time() - session_start_time) / 60.0), flush=True)
+            break
+
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)
         traceback.print_exc(file=sys.stdout)
@@ -505,9 +539,15 @@ else:
     runner.register('SESSION_END_REASON', 'completed')
     print("Done: reached VAR_MAX_TRIALS ({0})".format(VAR_MAX_TRIALS), flush=True)
 
+if session_end_reason is not None:
+    runner.register('SESSION_END_REASON', session_end_reason)
+
 # --- session-end bookkeeping: staircase/ITI/spout persistence + advancement gates -------------------
 
-cleared_this_session = session_trial_count > VAR_TRIAL_COUNT_ADVANCE
+# >= , not > -- a session is now deliberately capped AT VAR_TRIAL_COUNT_ADVANCE trials (see the
+# cap check above), so it can never exceed that count; the qualifying check has to recognize
+# exactly reaching it.
+cleared_this_session = session_trial_count >= VAR_TRIAL_COUNT_ADVANCE
 
 if cleared_this_session:
     cur_iti_s = staircase.grow_iti(cur_iti_s)

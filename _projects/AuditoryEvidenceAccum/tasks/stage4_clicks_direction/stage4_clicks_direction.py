@@ -266,7 +266,8 @@ VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunab
 VAR_WARMUP_TRIAL_MIN = 20            # doc SS3.1 (Tag D): 20-40 trials at the easiest level,
 VAR_WARMUP_TRIAL_MAX = 40            # drawn fresh each session, excluded from advancement stats
 
-VAR_SESSION_CAP_S = 90 * 60          # doc SS3.2 (Tag E): 90-minute cap
+VAR_SESSION_CAP_S = 45 * 60          # 45-minute cap, per explicit instruction (was the doc SS3.2/
+                                      # Tag E 90-minute value)
 # If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
 # registered) and this one is starting soon enough to count as its own continuation (same
 # merge-eligibility window build_training_log.py's own session-merging uses), reduce today's own

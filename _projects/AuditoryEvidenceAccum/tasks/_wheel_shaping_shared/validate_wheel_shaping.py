@@ -277,10 +277,14 @@ print("=" * 100)
 all_met = staircase.stage2_simple_gates_met(trial_count=201, iti_s=1.5, direction_ratio_in_band=True)
 print("  201 trials, ITI=1.5s, in-band: expect True: {0}".format(all_met))
 
-trial_count_fails = staircase.stage2_simple_gates_met(
+exactly_at_cap = staircase.stage2_simple_gates_met(
     trial_count=200, iti_s=1.5, direction_ratio_in_band=True)
-print("  exactly 200 trials (needs STRICTLY >): expect False: {0}".format(
-    trial_count_fails is False))
+print("  exactly 200 trials (needs >=, since a session is now capped AT 200): expect True: "
+      "{0}".format(exactly_at_cap))
+
+trial_count_fails = staircase.stage2_simple_gates_met(
+    trial_count=199, iti_s=1.5, direction_ratio_in_band=True)
+print("  199 trials: expect False: {0}".format(trial_count_fails is False))
 
 iti_fails = staircase.stage2_simple_gates_met(
     trial_count=250, iti_s=1.4, direction_ratio_in_band=True)
@@ -290,8 +294,8 @@ ratio_fails = staircase.stage2_simple_gates_met(
     trial_count=250, iti_s=1.5, direction_ratio_in_band=False)
 print("  direction ratio out of band: expect False: {0}".format(ratio_fails is False))
 
-section5_pass = all_met and trial_count_fails is False and iti_fails is False and \
-    ratio_fails is False
+section5_pass = (all_met and exactly_at_cap and trial_count_fails is False and
+                  iti_fails is False and ratio_fails is False)
 print("Section 5 result: {0}".format("PASS" if section5_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
