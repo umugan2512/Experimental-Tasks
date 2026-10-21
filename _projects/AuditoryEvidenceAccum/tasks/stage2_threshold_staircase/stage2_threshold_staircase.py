@@ -130,10 +130,11 @@ VAR_MAX_TRIALS = 400
 VAR_MAX_TRIALS, _ = session_csv_parser.compute_remaining_quota(
     os.path.dirname(os.path.abspath(os.getcwd())), os.path.basename(os.path.abspath(os.getcwd())),
     os.path.splitext(os.path.basename(__file__))[0], VAR_SUBJECT_ID, full_max_trials=VAR_MAX_TRIALS)
-VAR_QUIESCENCE_S = 0.1              # unchanged from Stage 1 -- doc: quiescence "resumes staircasing
-                                     # only at Stage 5" (formerly "Stage 4" before a new Stage 3 --
-                                     # tone-side association -- was inserted), frozen at its
-                                     # Stage-1 value through Stage 4
+VAR_QUIESCENCE_S = 0.1              # unchanged from Stage 1 -- used as a FIXED value only until
+                                     # the quiescence staircase unlocks (see 'quiescence_unlocked'
+                                     # below: the first time the movement-threshold staircase steps
+                                     # up at least once within a session, staircasing begins the
+                                     # NEXT session). Before that unlock, every trial holds here.
 VAR_STEADY_THRESHOLD_DEG = 4
 VAR_RESPONSE_TIMEOUT_S = 10.0       # same flagged/tunable placeholder as Stage 1
 
@@ -168,8 +169,6 @@ VAR_POLL_HZ = 100                    # that the poll thread keeps up without del
                                       # improvement over the old 50/10 split) and note which rate
                                       # was actually used when reporting results from a real session.
 
-VAR_GO_CUE_LED_CHANNEL = 'PWM1'
-
 VAR_CAMERA_INDEX = None                      # None = auto-discover, see
                                               # camera_recorder.discover_camera()
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi' # relative to cwd -- lands in the real session
@@ -194,6 +193,15 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'spout_position_mm': 0.0,        # cumulative retraction so far, relative to Stage 1's
                                       # close-to-mouth position
     'sessions_trial_count_history': [],
+    'quiescence_unlocked': False,    # one-way latch: flips True the first session in which the
+                                      # movement-threshold staircase below steps UP at least once.
+                                      # Staircasing of the hold-to-initiate duration then begins
+                                      # the NEXT session (not this one) -- see the trial loop and
+                                      # session-end bookkeeping below. Carried forward unchanged by
+                                      # Stage 3/4 once set; Stage 5 never re-touches it.
+    'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
+    'quiescence_consecutive_successes': 0,
+    'quiescence_consecutive_failures': 0,
 })
 
 staircase_obj = staircase.ThresholdStaircase(
@@ -202,6 +210,19 @@ staircase_obj = staircase.ThresholdStaircase(
     consecutive_failures=state.get('consecutive_failures'))
 cur_iti_s = state.get('iti_s')
 cur_spout_position_mm = state.get('spout_position_mm')
+
+quiescence_unlocked = state.get('quiescence_unlocked')
+quiescence_unlocked_at_session_start = quiescence_unlocked   # snapshot -- session-end bookkeeping
+                                                              # below uses this to know whether
+                                                              # quiescence_obj was actually built
+if quiescence_unlocked:
+    quiescence_obj = staircase.QuiescenceStaircase(
+        current_s=state.get('quiescence_s'),
+        consecutive_successes=state.get('quiescence_consecutive_successes'),
+        consecutive_failures=state.get('quiescence_consecutive_failures'))
+session_saw_threshold_step_up = False   # set True the first time this session's threshold
+                                         # staircase steps up at least once (see record_outcome call
+                                         # below) -- drives the one-way unlock above.
 
 direction_tracker = DirectionRatioTracker()
 
@@ -273,8 +294,14 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         cur_threshold_deg = staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG
 
         rotary.disable_evt_transmission()
-        n_breaks = runner.wait_for_held_steady(VAR_QUIESCENCE_S, VAR_STEADY_THRESHOLD_DEG,
-                                                require_no_lick=False)
+        if quiescence_unlocked:
+            quiescence_duration_this_trial = float(np.clip(
+                np.random.exponential(quiescence_obj.current_s),
+                staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+        else:
+            quiescence_duration_this_trial = VAR_QUIESCENCE_S
+        n_breaks = runner.wait_for_held_steady(quiescence_duration_this_trial,
+                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=False)
         if n_breaks is None:
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
@@ -290,6 +317,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
 
         runner.register('TRIAL_START', trial_start_t)
         runner.register('QUIESCENCE_BREAKS', n_breaks)
+        runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
         runner.register('THRESHOLD_DEG', cur_threshold_deg)
         dot.clear()
         dot.pump()
@@ -319,38 +347,37 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
                 pos_event: 'NoRewardR' if withhold_right else 'RewardR',
                 Bpod.Events.Tup: 'NoMovement',
             },
-            output_actions=[(rotary_channel, reset_positions_trigger_id),
-                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(rotary_channel, reset_positions_trigger_id)])
 
         sma.add_state(
             state_name='RewardL',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), (VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1)])
 
         sma.add_state(
             state_name='RewardR',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), (VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1)])
 
         sma.add_state(
             state_name='NoRewardL',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='NoRewardR',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='NoMovement',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='ITI',
@@ -434,7 +461,12 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         outcome = 'Rewarded' if rewarded else ('Withheld' if side is not None else 'NoMovement')
 
         session_trial_count += 1
+        fraction_before_step = staircase_obj.current_fraction
         staircase_obj.record_outcome(success=staircase_success)
+        if staircase_obj.current_fraction > fraction_before_step:
+            session_saw_threshold_step_up = True
+        if quiescence_unlocked:
+            quiescence_obj.record_outcome(success=(n_breaks == 0))
         if side is not None:
             direction_tracker.record(side)
 
@@ -486,6 +518,19 @@ state.set('consecutive_successes', staircase_obj.consecutive_successes)
 state.set('consecutive_failures', staircase_obj.consecutive_failures)
 state.set('iti_s', cur_iti_s)
 state.set('spout_position_mm', cur_spout_position_mm)
+
+if not quiescence_unlocked and session_saw_threshold_step_up:
+    quiescence_unlocked = True
+    print("Quiescence hold-to-initiate UNLOCKED this session (threshold staircase stepped up) -- "
+          "staircasing begins NEXT session.", flush=True)
+state.set('quiescence_unlocked', quiescence_unlocked)
+if quiescence_unlocked_at_session_start:   # i.e. quiescence_obj was actually built/used this
+                                            # session -- a same-session unlock (above) only takes
+                                            # effect starting NEXT session, so there's nothing of
+                                            # quiescence_obj's to persist yet in that case.
+    state.set('quiescence_s', quiescence_obj.current_s)
+    state.set('quiescence_consecutive_successes', quiescence_obj.consecutive_successes)
+    state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
 
 history = state.get('sessions_trial_count_history')
 history.append(cleared_this_session)

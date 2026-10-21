@@ -5,6 +5,7 @@ Pure-Python (no Bpod/hardware) rules for Stage 1's gain decay and Stage 2's move
 staircase and ITI growth -- training_protocol.md Part 4, Stage 1's parameter table and Stage 2(a)/(b).
 Independently unit-testable offline, see validate_wheel_shaping.py.
 """
+import math
 
 STAIRCASE_STEP_UP = 0.10          # +10% (linear, of the FINAL threshold) after
 STAIRCASE_SUCCESSES_TO_STEP_UP = 20  # this many consecutive successes
@@ -109,8 +110,10 @@ QUIESCENCE_STEP_UP_S = 0.025        # doc: "+25ms per 20 consecutive successful 
 QUIESCENCE_SUCCESSES_TO_STEP_UP = 20
 QUIESCENCE_STEP_DOWN_S = 0.025      # doc: "-25ms per 5 resets"
 QUIESCENCE_FAILURES_TO_STEP_DOWN = 5
-QUIESCENCE_FLOOR_S = 0.1            # Stage 1-4's own frozen value -- the natural starting point
-QUIESCENCE_CEILING_S = 0.5          # doc: "0.1-0.5s exponential"
+QUIESCENCE_FLOOR_S = 0.1            # Stage 1's own frozen value -- the natural starting point
+QUIESCENCE_CEILING_S = 0.25         # per explicit instruction: hold-to-initiate should land in the
+                                     # 100-250ms range, not the doc's original 0.1-0.5s -- lowered
+                                     # from an earlier 0.5s ceiling.
 
 STAGE3_ACCURACY_GATE = 0.70         # doc doesn't specify this new stage's own numeric criterion
                                      # yet -- reusing Stage 4's values as a flagged placeholder
@@ -236,11 +239,14 @@ def next_alternating_value(last_value, last_date_str, today_str, choices):
 
 
 class QuiescenceStaircase(object):
-    """ Tracks the quiescence-duration EXPONENTIAL DRAW's scale parameter (seconds), resumed at
-    Stage 5 per training_protocol.md: frozen at 100ms through Stages 1-4, then staircased toward a
-    0.1-0.5s exponential -- +25ms per 20 consecutive successful initiations (no reset during that
-    trial's quiescence hold), -25ms per 5 consecutive resets, floor QUIESCENCE_FLOOR_S, ceiling
-    QUIESCENCE_CEILING_S. Same consecutive-counter/streak-reset shape as ThresholdStaircase above.
+    """ Tracks the quiescence-duration EXPONENTIAL DRAW's scale parameter (seconds). Frozen at
+    100ms in Stage 1, and in Stage 2 until that stage's own movement-threshold staircase steps up
+    at least once within a session (a one-way 'quiescence_unlocked' latch, persisted in
+    StageState) -- staircasing then begins the NEXT session and continues uninterrupted through
+    Stage 2/3/4/5: +25ms per 20 consecutive successful initiations (no reset during that trial's
+    quiescence hold), -25ms per 5 consecutive resets, floor QUIESCENCE_FLOOR_S, ceiling
+    QUIESCENCE_CEILING_S (100-250ms). Same consecutive-counter/streak-reset shape as
+    ThresholdStaircase above.
     A trial's actual quiescence duration is drawn fresh each trial as
     np.random.exponential(current_s) clipped to [QUIESCENCE_FLOOR_S, QUIESCENCE_CEILING_S] --
     current_s here is the distribution's scale parameter, not a fixed per-trial duration.
@@ -303,7 +309,13 @@ def stage5_gates_met(response_threshold_fraction, quiescence_s, accuracy_aos, ab
     advancement: both staircases at final values (response threshold >=
     STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION of edge azimuth, quiescence at QUIESCENCE_CEILING_S),
     >70% correct at gamma=+-1.0, abort rate <25%, >=200 trials/session. Caller tracks the "two
-    consecutive sessions" requirement itself. """
+    consecutive sessions" requirement itself.
+
+    NOTE: since quiescence now starts staircasing as early as Stage 2 (see QuiescenceStaircase's
+    own docstring) rather than being introduced fresh at Stage 5, `quiescence_at_final` may already
+    be trivially True on Stage 5's very first session if Stage 2/3/4 already pushed it to
+    QUIESCENCE_CEILING_S. This is intended, not a bug -- Stage 5's own job in that case is just the
+    response-threshold staircase. """
     response_at_final = response_threshold_fraction >= STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
     quiescence_at_final = quiescence_s >= QUIESCENCE_CEILING_S
     return (response_at_final and quiescence_at_final and accuracy_aos > STAGE5_ACCURACY_GATE
@@ -334,8 +346,14 @@ def select_stage5_staircase_to_tighten(response_threshold_fraction, quiescence_s
     quiescence_span = QUIESCENCE_CEILING_S - QUIESCENCE_FLOOR_S
     quiescence_remaining = max(0.0, QUIESCENCE_CEILING_S - quiescence_s) / quiescence_span
 
+    # A genuine tie between the two normalized "remaining" fractions should fall through to the
+    # alternation tie-break below, but comparing floats for EXACT equality is fragile -- it only
+    # happened to work for the floor/ceiling pair this was originally tuned against (0.1/0.5,
+    # which cancels out to bit-exact IEEE754 values here) and silently breaks for other pairs (e.g.
+    # 0.1/0.25) that don't cancel exactly. isclose() treats a near-enough tie as a real tie
+    # regardless of which floor/ceiling values are in play.
+    if math.isclose(response_remaining, quiescence_remaining, rel_tol=1e-9, abs_tol=1e-9):
+        return 'quiescence' if last_advanced == 'response' else 'response'
     if response_remaining > quiescence_remaining:
         return 'response'
-    if quiescence_remaining > response_remaining:
-        return 'quiescence'
-    return 'quiescence' if last_advanced == 'response' else 'response'
+    return 'quiescence'

@@ -11,7 +11,8 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   6. Session merging: classify_trial()'s consumed-reward classification, group_sessions()'s
      merge-eligible-ending/same-protocol/gap-threshold rule, combine_group()'s field combination,
      and the stage-ordering helpers
-  7. QuiescenceStaircase (Stage 5): step-up/step-down, floor/ceiling, same shape as Section 1
+  7. QuiescenceStaircase (unlocked as early as Stage 2): step-up/step-down, floor/ceiling, same
+     shape as Section 1
   8. stage4_gates_met()/stage5_gates_met()/select_stage5_staircase_to_tighten() (Tag B policy)
   9. debiasing.next_side_after_error(): statistical repeat-rate check over many draws
   10. session_csv_parser.STREAM_KEYS fix: repeated VAL rows (e.g. WHEEL_POS) are retained as a
@@ -451,8 +452,8 @@ section6_pass = section6a_pass and section6b_pass and section6c_pass and section
 print("Section 6 result: {0}".format("PASS" if section6_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 7: QuiescenceStaircase (Stage 4) -- same step-up/step-down/floor/ceiling shape as
-# Section 1's ThresholdStaircase
+# Section 7: QuiescenceStaircase (unlocked as early as Stage 2, continuous through Stage 5) --
+# same step-up/step-down/floor/ceiling shape as Section 1's ThresholdStaircase
 # ==================================================================================================
 
 print()

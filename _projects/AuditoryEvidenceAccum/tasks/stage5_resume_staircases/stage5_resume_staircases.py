@@ -7,12 +7,16 @@ threshold and quiescence staircases".
 
 Structural twin of stage4_clicks_direction.py (same 0.25s cue, same 100-200ms delay range --
 Stage 5 doesn't extend either, that's Stages 6/7; same warm-up block, debiasing rule, abort
-re-offer, and engagement-based session-end triggers) with the two staircases that were frozen
-since Stage 2/4 now resumed: response threshold (staircase.ThresholdStaircase, the SAME class
-Stage 2 uses, continuing from wherever Stage 2/4 left its persisted counters) toward
-STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION (90% of edge azimuth, not ThresholdStaircase's own 1.0
-ceiling) -- +10%/20 successes, -10%/5 failures; quiescence (staircase.QuiescenceStaircase, new)
-toward a 0.1-0.5s exponential -- +25ms/20 successful initiations, -25ms/5 resets.
+re-offer, and engagement-based session-end triggers) with two staircases in play: response
+threshold (staircase.ThresholdStaircase, the SAME class Stage 2 uses, continuing from wherever
+Stage 2/4 left its persisted counters) toward STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION (90% of
+edge azimuth, not ThresholdStaircase's own 1.0 ceiling) -- +10%/20 successes, -10%/5 failures;
+and quiescence (staircase.QuiescenceStaircase) toward a 0.1-0.25s exponential -- +25ms/20
+successful initiations, -25ms/5 resets. Quiescence is NOT newly "resumed" here -- it may already
+be staircasing (and may already be at its ceiling) by the time a subject reaches Stage 5, since
+Stage 2 unlocks it (the first time that stage's own threshold staircase steps up within a
+session) and Stage 2/3/4 continue it uninterrupted from there; this script just keeps using the
+same persisted 'quiescence_s'/counters, same as every other staircase it continues.
 
 Tag B (training_protocol.md Revision 2 Appendix A): at most ONE of the two staircases may tighten
 in any given SESSION -- selected once, at session start, via
@@ -229,7 +233,10 @@ VAR_STILL_POLL_HZ = 100              # additions.txt T4: NEEDS ON-RIG CONFIRMATI
 VAR_POLL_HZ = 100                    # thread keeps up without delaying state-machine handling --
                                       # if not, fall back to 50/50 and note which rate was used.
 
-VAR_GO_CUE_LED_CHANNEL = 'PWM1'
+VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (abort / incorrect
+                                      # choice) -- the dot alone is the go cue, see WheelDotPeriod.
+VAR_ERROR_FLASH_S = 0.35             # punishment flash duration (LED + full-white screen), on
+                                      # WheelAbort and the incorrect-choice path only.
 
 VAR_CAMERA_INDEX = None
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi'
@@ -247,7 +254,9 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'consecutive_successes': 0,
     'consecutive_failures': 0,
     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER,
-    'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
+    'quiescence_s': staircase.QUIESCENCE_FLOOR_S,   # sensible fallback only -- normally already
+                                       # set (possibly already at QUIESCENCE_CEILING_S) by
+                                       # Stage 2/3/4's own continuation of the same key.
     'quiescence_consecutive_successes': 0,
     'quiescence_consecutive_failures': 0,
     'stage5_last_staircase_advanced': None,   # 'response' / 'quiescence' / None -- Tag B tie-break
@@ -498,8 +507,14 @@ while True:
         cue_sma.add_state(
             state_name='WheelAbort',
             state_timer=0,
-            state_change_conditions={Bpod.Events.Tup: 'AbortITI'},
+            state_change_conditions={Bpod.Events.Tup: 'AbortPunish'},
             output_actions=[(hifi_channel, hifi_stop_msg_id)])
+
+        cue_sma.add_state(
+            state_name='AbortPunish',
+            state_timer=VAR_ERROR_FLASH_S,
+            state_change_conditions={Bpod.Events.Tup: 'AbortITI'},
+            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255)])
 
         cue_sma.add_state(
             state_name='AbortITI',
@@ -513,7 +528,48 @@ while True:
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[(hifi_channel, hifi_stop_msg_id)])
 
-        if not runner.run_trial_state_machine(cue_sma):
+        # Run cue_sma on a background thread (same thread/Event/SystemExit/finally shape as the
+        # choice period's own decision_thread below) so the main thread can poll rotary position
+        # concurrently and fire the punishment screen flash in near-lockstep with the native LED
+        # pulse above -- naively waiting for cue_sma to return would show the flash 1-2+ seconds
+        # late, after the randomized AbortITI had already elapsed too.
+        cue_result = {}
+        cue_done = threading.Event()
+
+        def _run_cue():
+            try:
+                cue_result['ran'] = runner.run_trial_state_machine(cue_sma)
+            except SystemExit:
+                cue_result['killed'] = True
+            finally:
+                cue_done.set()
+
+        cue_thread = threading.Thread(target=_run_cue, daemon=True)
+        cue_thread.start()
+
+        abort_flash_triggered = False
+        while not cue_done.is_set():
+            with runner.rotary_lock:
+                pos = rotary.current_position()
+            if not abort_flash_triggered and (pos <= -VAR_CUE_ABORT_THRESHOLD_DEG
+                                               or pos >= VAR_CUE_ABORT_THRESHOLD_DEG):
+                dot.flash_white(VAR_ERROR_FLASH_S)
+                abort_flash_triggered = True
+            dot.pump()
+            camera.pump()
+            time.sleep(render_interval)
+
+        cue_thread.join(timeout=3.0)
+        if cue_thread.is_alive():
+            print("WARNING: cue-period Bpod thread did not stop within 3s -- continuing "
+                  "anyway.", flush=True)
+
+        if cue_result.get('killed'):
+            print("Bpod Kill received -- ending session.", flush=True)
+            _cleanup_and_export()
+            sys.exit(0)
+
+        if not cue_result.get('ran', False):
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
             break
@@ -583,14 +639,13 @@ while True:
                 unrewarded_event: 'ErrorConsumption',
                 Bpod.Events.Tup: 'NoResponse',
             },
-            output_actions=[(rotary_channel, reset_positions_trigger_id),
-                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(rotary_channel, reset_positions_trigger_id)])
 
         sma.add_state(
             state_name='Reward',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'Consumption'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), (VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1)])
 
         sma.add_state(
             state_name='Consumption',
@@ -601,8 +656,14 @@ while True:
         sma.add_state(
             state_name='ErrorConsumption',
             state_timer=0.5,
-            state_change_conditions={'Port1In': 'IncorrectITI', Bpod.Events.Tup: 'IncorrectITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            state_change_conditions={'Port1In': 'ErrorPunish', Bpod.Events.Tup: 'ErrorPunish'},
+            output_actions=[])
+
+        sma.add_state(
+            state_name='ErrorPunish',
+            state_timer=VAR_ERROR_FLASH_S,
+            state_change_conditions={Bpod.Events.Tup: 'IncorrectITI'},
+            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255)])
 
         sma.add_state(
             state_name='IncorrectITI',
@@ -614,7 +675,7 @@ while True:
             state_name='NoResponse',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='ITI',
@@ -652,6 +713,10 @@ while True:
                 if pos <= -cur_response_threshold_deg or pos >= cur_response_threshold_deg:
                     frozen = True
                     frozen_at = now
+                    crossed_event = (left_event if pos <= -cur_response_threshold_deg
+                                      else right_event)
+                    if crossed_event == unrewarded_event:
+                        dot.flash_white(VAR_ERROR_FLASH_S)
                 else:
                     dot.set_position_deg(pos)
 
@@ -796,6 +861,11 @@ accuracy_aos = (sum(main_trial_correct) / float(len(main_trial_correct))
                 if main_trial_correct else 0.0)
 abort_rate = (total_aborts / float(total_attempts)) if total_attempts else 0.0
 
+# NOTE: quiescence_s may already be at QUIESCENCE_CEILING_S on this stage's very first session if
+# Stage 2/3/4 already pushed it there (quiescence now starts staircasing as early as Stage 2 -- see
+# this file's own module docstring) -- stage5_gates_met()'s quiescence_at_final check can
+# therefore already be trivially True from session one. Intended, not a bug: Stage 5's own job in
+# that case is just the response-threshold staircase.
 this_session_gates_met = staircase.stage5_gates_met(
     threshold_obj.current_fraction, quiescence_obj.current_s, accuracy_aos, abort_rate,
     session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE)

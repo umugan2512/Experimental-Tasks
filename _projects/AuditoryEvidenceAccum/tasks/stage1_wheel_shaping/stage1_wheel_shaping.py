@@ -184,8 +184,6 @@ VAR_POLL_HZ = 100                    # that the poll thread keeps up without del
                                       # improvement over the old 50/10 split) and note which rate
                                       # was actually used when reporting results from a real session.
 
-VAR_GO_CUE_LED_CHANNEL = 'PWM1'     # Port 1's built-in LED, same convention as every other task
-
 VAR_CAMERA_INDEX = None                      # None = auto-discover, see
                                               # camera_recorder.discover_camera()
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi' # relative to cwd -- lands in the real session
@@ -314,9 +312,9 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
 
         sma = StateMachine(my_bpod)
 
-        # Split into PreDotDelay (LED/rotary arm here, but no neg_event/pos_event wired -- a
-        # crossing during this window is still logged by Bpod as a raw event, it just can't trigger
-        # a transition) + WheelPeriod (the real response-collection state, entered only once
+        # Split into PreDotDelay (rotary arm here, but no neg_event/pos_event wired -- a crossing
+        # during this window is still logged by Bpod as a raw event, it just can't trigger a
+        # transition) + WheelPeriod (the real response-collection state, entered only once
         # dot_onset_delay has actually elapsed) -- fixes a real bug where a brisk turn right as
         # quiescence released could cross threshold and fire Reward before the dot had rendered at
         # all, since thresholds were armed and Bpod was already listening within ms of send_epoch,
@@ -328,8 +326,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             state_name='PreDotDelay',
             state_timer=dot_onset_delay,
             state_change_conditions={Bpod.Events.Tup: 'WheelPeriod'},
-            output_actions=[(rotary_channel, reset_positions_trigger_id),
-                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(rotary_channel, reset_positions_trigger_id)])
 
         sma.add_state(
             state_name='WheelPeriod',
@@ -345,13 +342,13 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             state_name='Reward',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), (VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1)])
 
         sma.add_state(
             state_name='NoMovement',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='ITI',

@@ -204,7 +204,11 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 
 VAR_MAX_TRIALS = 1000                # hard-ceiling safety backstop, well above what a 90-min
                                       # session at this stage's pace should ever reach
-VAR_QUIESCENCE_S = 0.1               # frozen through Stage 4 (doc: resumes staircasing at Stage 5)
+VAR_QUIESCENCE_S = 0.1               # FIXED fallback only -- used unless 'quiescence_unlocked' is
+                                      # already True (the normal case by the time a subject reaches
+                                      # Stage 3; see Stage 2's own module for the unlock condition),
+                                      # in which case the persisted per-trial staircase continues
+                                      # uninterrupted instead (see the trial loop below).
 VAR_STEADY_THRESHOLD_DEG = 4         # IBL convention, same as every other task -- hold-still deadzone
 VAR_RESPONSE_TIMEOUT_S = 5.0         # doc's own epoch table: response window <=5s
 
@@ -294,7 +298,10 @@ VAR_STILL_POLL_HZ = 100              # additions.txt T4: NEEDS ON-RIG CONFIRMATI
 VAR_POLL_HZ = 100                    # thread keeps up without delaying state-machine handling --
                                       # if not, fall back to 50/50 and note which rate was used.
 
-VAR_GO_CUE_LED_CHANNEL = 'PWM1'
+VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (abort / incorrect
+                                      # choice) -- the dot alone is the go cue, see WheelDotPeriod.
+VAR_ERROR_FLASH_S = 0.35             # punishment flash duration (LED + full-white screen), on
+                                      # WheelAbort and the incorrect-choice path only.
 
 VAR_CAMERA_INDEX = None
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi'
@@ -328,6 +335,11 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'stim_duration_s': staircase.STAGE34_STIM_DURATION_STARTING_S,
     'stim_duration_consecutive_successes': 0,
     'stim_duration_consecutive_failures': 0,
+    'quiescence_unlocked': False,    # set by Stage 2 only -- fallback for a subject that somehow
+                                      # skipped it (see VAR_QUIESCENCE_S above).
+    'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
+    'quiescence_consecutive_successes': 0,
+    'quiescence_consecutive_failures': 0,
 })
 
 VAR_RESPONSE_THRESHOLD_DEG = state.get('threshold_fraction') * VAR_THRESHOLD_FINAL_DEG
@@ -340,6 +352,13 @@ stim_duration_staircase = staircase.new_stim_duration_staircase(
 iti_staircase = staircase.new_iti_staircase(
     state.get('iti_s'), state.get('iti_consecutive_successes'),
     state.get('iti_consecutive_failures'))
+
+quiescence_unlocked = state.get('quiescence_unlocked')
+if quiescence_unlocked:
+    quiescence_obj = staircase.QuiescenceStaircase(
+        current_s=state.get('quiescence_s'),
+        consecutive_successes=state.get('quiescence_consecutive_successes'),
+        consecutive_failures=state.get('quiescence_consecutive_failures'))
 
 # This session's one fixed side. 'AOS' click generation already guarantees zero clicks on the
 # non-chosen channel for the whole trial (see click_train_v2.generate_trial_clicks), so holding
@@ -496,12 +515,20 @@ while True:
         p_right_target = VAR_P_RIGHT_TARGET
 
         rotary.disable_evt_transmission()
-        n_breaks = runner.wait_for_held_steady(VAR_QUIESCENCE_S, VAR_STEADY_THRESHOLD_DEG,
-                                                require_no_lick=False)
+        if quiescence_unlocked:
+            quiescence_duration_this_trial = float(np.clip(
+                np.random.exponential(quiescence_obj.current_s),
+                staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+        else:
+            quiescence_duration_this_trial = VAR_QUIESCENCE_S
+        n_breaks = runner.wait_for_held_steady(quiescence_duration_this_trial,
+                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=False)
         if n_breaks is None:
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
             break
+        if quiescence_unlocked:
+            quiescence_obj.record_outcome(success=(n_breaks == 0))
         trial_start_t = time.time() - log_python_t0
         last_initiation_time = time.time()
 
@@ -548,7 +575,7 @@ while True:
         runner.register('STIM_SEED', stim_seed)
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
-        runner.register('QUIESCENCE_DUR_S', VAR_QUIESCENCE_S)
+        runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
         runner.register('STIM_DURATION_S', stim_duration_this_trial)
         runner.register('ITI_S', iti_this_trial)
         runner.register('CLICK_LEVEL_ATTENUATED', _click_attenuation_remaining > 0)
@@ -591,8 +618,14 @@ while True:
         cue_sma.add_state(
             state_name='WheelAbort',
             state_timer=0,
-            state_change_conditions={Bpod.Events.Tup: 'AbortITI'},
+            state_change_conditions={Bpod.Events.Tup: 'AbortPunish'},
             output_actions=[(hifi_channel, hifi_stop_msg_id)])
+
+        cue_sma.add_state(
+            state_name='AbortPunish',
+            state_timer=VAR_ERROR_FLASH_S,
+            state_change_conditions={Bpod.Events.Tup: 'AbortITI'},
+            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255)])
 
         cue_sma.add_state(
             state_name='AbortITI',
@@ -606,7 +639,48 @@ while True:
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[(hifi_channel, hifi_stop_msg_id)])
 
-        if not runner.run_trial_state_machine(cue_sma):
+        # Run cue_sma on a background thread (same thread/Event/SystemExit/finally shape as the
+        # choice period's own decision_thread below) so the main thread can poll rotary position
+        # concurrently and fire the punishment screen flash in near-lockstep with the native LED
+        # pulse above -- naively waiting for cue_sma to return would show the flash 1-2+ seconds
+        # late, after the randomized AbortITI had already elapsed too.
+        cue_result = {}
+        cue_done = threading.Event()
+
+        def _run_cue():
+            try:
+                cue_result['ran'] = runner.run_trial_state_machine(cue_sma)
+            except SystemExit:
+                cue_result['killed'] = True
+            finally:
+                cue_done.set()
+
+        cue_thread = threading.Thread(target=_run_cue, daemon=True)
+        cue_thread.start()
+
+        abort_flash_triggered = False
+        while not cue_done.is_set():
+            with runner.rotary_lock:
+                pos = rotary.current_position()
+            if not abort_flash_triggered and (pos <= -VAR_CUE_ABORT_THRESHOLD_DEG
+                                               or pos >= VAR_CUE_ABORT_THRESHOLD_DEG):
+                dot.flash_white(VAR_ERROR_FLASH_S)
+                abort_flash_triggered = True
+            dot.pump()
+            camera.pump()
+            time.sleep(render_interval)
+
+        cue_thread.join(timeout=3.0)
+        if cue_thread.is_alive():
+            print("WARNING: cue-period Bpod thread did not stop within 3s -- continuing "
+                  "anyway.", flush=True)
+
+        if cue_result.get('killed'):
+            print("Bpod Kill received -- ending session.", flush=True)
+            _cleanup_and_export()
+            sys.exit(0)
+
+        if not cue_result.get('ran', False):
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
             break
@@ -669,14 +743,13 @@ while True:
                 unrewarded_event: 'ErrorConsumption',
                 Bpod.Events.Tup: 'NoResponse',
             },
-            output_actions=[(rotary_channel, reset_positions_trigger_id),
-                             (VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(rotary_channel, reset_positions_trigger_id)])
 
         sma.add_state(
             state_name='Reward',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'Consumption'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), (VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1)])
 
         sma.add_state(
             state_name='Consumption',
@@ -687,8 +760,14 @@ while True:
         sma.add_state(
             state_name='ErrorConsumption',
             state_timer=0.5,
-            state_change_conditions={'Port1In': 'IncorrectITI', Bpod.Events.Tup: 'IncorrectITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            state_change_conditions={'Port1In': 'ErrorPunish', Bpod.Events.Tup: 'ErrorPunish'},
+            output_actions=[])
+
+        sma.add_state(
+            state_name='ErrorPunish',
+            state_timer=VAR_ERROR_FLASH_S,
+            state_change_conditions={Bpod.Events.Tup: 'IncorrectITI'},
+            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255)])
 
         sma.add_state(
             state_name='IncorrectITI',
@@ -700,7 +779,7 @@ while True:
             state_name='NoResponse',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 0)])
+            output_actions=[])
 
         sma.add_state(
             state_name='ITI',
@@ -739,6 +818,9 @@ while True:
                 if pos <= -VAR_RESPONSE_THRESHOLD_DEG or pos >= VAR_RESPONSE_THRESHOLD_DEG:
                     frozen = True
                     frozen_at = now
+                    crossed_event = left_event if pos <= -VAR_RESPONSE_THRESHOLD_DEG else right_event
+                    if crossed_event == unrewarded_event:
+                        dot.flash_white(VAR_ERROR_FLASH_S)
                 else:
                     dot.set_position_deg(pos)
 
@@ -893,6 +975,11 @@ state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecut
 state.set('iti_s', iti_staircase.current_value)
 state.set('iti_consecutive_successes', iti_staircase.consecutive_successes)
 state.set('iti_consecutive_failures', iti_staircase.consecutive_failures)
+
+if quiescence_unlocked:
+    state.set('quiescence_s', quiescence_obj.current_s)
+    state.set('quiescence_consecutive_successes', quiescence_obj.consecutive_successes)
+    state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
 
 state.save()
 
