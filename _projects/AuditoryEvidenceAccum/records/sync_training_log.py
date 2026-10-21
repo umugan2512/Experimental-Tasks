@@ -211,11 +211,19 @@ def tree_with_data(base_ref):
             else:
                 continue
             print('WARNING: not committing {0} -- {1}.'.format(path, reason), flush=True)
+            # update-index takes the two path forms differently (confirmed on git 2.28):
+            # - plain path args (`--force-remove -- <path>`) resolve relative to the process's own
+            #   cwd (RECORDS_DIR), so the repo-root-relative `path` from diff-index silently matched
+            #   nothing (exit 0, no effect) -- these exclusions never worked. Use a
+            #   RECORDS_DIR-relative path there (DATA_PATHS[1]'s own '../experiments' form).
+            # - `--cacheinfo <mode>,<sha>,<path>` takes the path as-is, relative to the repo root,
+            #   and rejects '../' outright ("fatal: Invalid path"), so it keeps `path` unchanged.
             base_blob = blob_at(base_ref, path)
             if base_blob:
                 git('update-index', '--cacheinfo', '100644,{0},{1}'.format(base_blob, path), env=env)
             else:
-                git('update-index', '--force-remove', '--', path, env=env)
+                cwd_relative = '../experiments/' + path[len(exp_prefix):]
+                git('update-index', '--force-remove', '--', cwd_relative, env=env)
         return git_out('write-tree', env=env)
     finally:
         if os.path.exists(tmp_index):
