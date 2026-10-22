@@ -537,7 +537,7 @@ while True:
         else:
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
         n_breaks = runner.wait_for_held_steady(quiescence_duration_this_trial,
-                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=True)
+                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=False)
         if n_breaks is None:
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
