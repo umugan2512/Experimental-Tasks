@@ -905,14 +905,29 @@ class PlotFeeder(object):
         return kwargs
 
 
-def parse_wheel_position_series(trials, decimate_s=0.5):
+def _unwrap_deg(pos_array):
+    """ Standard circular unwrap for a ±180deg-wrapped signal, via deg->rad->unwrap->deg -- not
+    np.unwrap(..., period=360) directly, since this environment's NumPy may predate the `period`
+    kwarg (added in 1.21). Same helper as derive_intrial_threshold.py's own (small, intentional
+    duplicate -- see that module's own placement-convention precedent elsewhere in this paradigm,
+    not a cross-project import). """
+    return np.degrees(np.unwrap(np.radians(pos_array)))
+
+
+def parse_wheel_position_series(trials, starts, decimate_s=0.5):
     """ Every WHEEL_POS VAL across all trials, as (elapsed_s, position_deg) pairs -- WHEEL_POS is
     never collapsed to the last sample per trial (see session_csv_parser.STREAM_KEYS), so the full
     stream survives. Decimated to at most one sample per `decimate_s` seconds, same principle as
     the real "Wheel Position" plot's own DISPLAY_SAMPLE_INTERVAL_S, so a long session doesn't force
-    an ever-growing full-resolution redraw every poll. """
-    xs, ys = [], []
-    last_t = None
+    an ever-growing full-resolution redraw every poll.
+
+    `starts` (the same per-trial anchor list build_trial_markers() already computes -- pass its
+    own return value here) is used to unwrap the ±180deg-wrapped raw position WITHIN each trial's
+    own segment, but NEVER across a segment boundary (each anchor marks a
+    rotary.set_zero_position() reset) -- see derive_intrial_threshold.py's own identical fix for
+    the full reasoning. Falls back to session-wide unwrap (the old behavior) if `starts` is empty
+    (e.g. an unrecognized protocol). """
+    raw_times, raw_positions = [], []
     for trial in trials:
         raw = trial['vals'].get('WHEEL_POS')
         if not raw:
@@ -920,14 +935,36 @@ def parse_wheel_position_series(trials, decimate_s=0.5):
         for entry in raw:
             try:
                 t_str, pos_str = entry.split(',')
-                t, pos = float(t_str), float(pos_str)
+                raw_times.append(float(t_str))
+                raw_positions.append(float(pos_str))
             except (ValueError, AttributeError):
                 continue
-            if last_t is not None and (t - last_t) < decimate_s:
-                continue
-            xs.append(t)
-            ys.append(pos)
-            last_t = t
+    if not raw_times:
+        return [], []
+
+    order = np.argsort(raw_times)
+    raw_times = np.asarray(raw_times)[order]
+    raw_positions = np.asarray(raw_positions)[order]
+
+    if starts:
+        anchors_arr = np.asarray(sorted(starts))
+        bucket_idx = np.clip(np.searchsorted(anchors_arr, raw_times, side='right') - 1,
+                              0, len(anchors_arr) - 1)
+        unwrapped = np.empty_like(raw_positions)
+        for b in np.unique(bucket_idx):
+            mask = bucket_idx == b
+            unwrapped[mask] = _unwrap_deg(raw_positions[mask])
+    else:
+        unwrapped = _unwrap_deg(raw_positions)
+
+    xs, ys = [], []
+    last_t = None
+    for t, pos in zip(raw_times, unwrapped):
+        if last_t is not None and (t - last_t) < decimate_s:
+            continue
+        xs.append(float(t))
+        ys.append(float(pos))
+        last_t = t
     return xs, ys
 
 
