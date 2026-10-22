@@ -2033,8 +2033,8 @@ class SessionRunnerWindow(QWidget):
         panel, cheap redraw" convention already used elsewhere for low-cardinality panels; only
         the FULL WheelShapingPlots raster needs persistent artists, since that one redraws every
         single trial rather than every ~2s poll). """
-        xs, ys = parse_wheel_position_series(real)
         starts, segments = build_trial_markers(real, protocol_name, session_vals)
+        xs, ys = parse_wheel_position_series(real, starts)
         self._wheel_ax.cla()
         for x in starts:
             self._wheel_ax.axvline(x, color='#dddddd', linewidth=0.6, zorder=0)
