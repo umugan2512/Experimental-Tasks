@@ -34,24 +34,34 @@ def _unwrap_deg(pos_array):
     return np.degrees(np.unwrap(np.radians(pos_array)))
 
 
-def _trial_anchors(trials, anchor_key='SM_SEND_TIME'):
-    """ Sorted list of each trial's own anchor time (session-elapsed seconds, same basis WHEEL_POS
-    itself uses) -- each one marks a rotary.set_zero_position() reset, per
-    stage4_clicks_direction.py's own per-trial setup sequence. Trials missing the anchor (e.g. a
-    trailing incomplete trial) are skipped. """
-    anchors = []
-    for trial in trials:
-        value = trial['vals'].get(anchor_key)
-        if value is None:
-            continue
-        try:
-            anchors.append(float(value[-1]) if isinstance(value, list) else float(value))
-        except (TypeError, ValueError):
-            continue
-    return sorted(anchors)
+ANCHOR_KEYS = ('SM_SEND_TIME', 'TRIAL_START')
 
 
-def _session_wheel_trace(trials, anchor_key='SM_SEND_TIME'):
+def _trial_anchors(trials, anchor_keys=ANCHOR_KEYS):
+    """ (sorted anchor times, the key they came from) -- each anchor marks one
+    rotary.set_zero_position() reset (session-elapsed seconds, the same basis WHEEL_POS uses).
+    Tries each key in order and takes the first that any trial actually carries: stage3-5 register
+    SM_SEND_TIME, stage1/2 register TRIAL_START instead (a few ms after their own reset, which is
+    close enough -- nothing polls the wheel in between). Checking only SM_SEND_TIME, as an earlier
+    version did, silently sent every stage1/2 session down the session-wide fallback below; that
+    path is measurably worse on real data, since it unwraps straight across the per-trial resets.
+    Trials missing the key (e.g. a trailing incomplete trial) are skipped. """
+    for key in anchor_keys:
+        anchors = []
+        for trial in trials:
+            value = trial['vals'].get(key)
+            if value is None:
+                continue
+            try:
+                anchors.append(float(value[-1]) if isinstance(value, list) else float(value))
+            except (TypeError, ValueError):
+                continue
+        if anchors:
+            return sorted(anchors), key
+    return [], None
+
+
+def _session_wheel_trace(trials, anchor_keys=ANCHOR_KEYS):
     """ Concatenates every trial's own WHEEL_POS stream (session-elapsed-time, degrees) into one
     time-sorted (t, pos) pair of arrays spanning the whole session, unwrapping the ±180deg-wrapped
     position WITHIN each trial's own segment (bounded by its anchor_key reset time) but NEVER
@@ -82,12 +92,12 @@ def _session_wheel_trace(trials, anchor_key='SM_SEND_TIME'):
     raw_times = np.asarray(raw_times)[order]
     raw_positions = np.asarray(raw_positions)[order]
 
-    anchors = _trial_anchors(trials, anchor_key)
+    anchors, _anchor_key = _trial_anchors(trials, anchor_keys)
     if not anchors:
-        print("WARNING: no '{0}' anchors found in this session -- falling back to session-wide "
-              "unwrap (the old behavior); per-trial segmentation is NOT applied, so a sliding "
-              "window straddling a rotary reset may still register a spurious "
-              "excursion.".format(anchor_key), file=sys.stderr)
+        print("WARNING: none of the per-trial anchors {0} were found in this session -- falling "
+              "back to session-wide unwrap (the old behavior); per-trial segmentation is NOT "
+              "applied, so a sliding window straddling a rotary reset may still register a "
+              "spurious excursion.".format(list(anchor_keys)), file=sys.stderr)
         return raw_times, _unwrap_deg(raw_positions)
 
     anchors_arr = np.asarray(anchors)
