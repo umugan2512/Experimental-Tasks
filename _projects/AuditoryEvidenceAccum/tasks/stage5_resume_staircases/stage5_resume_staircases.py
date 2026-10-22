@@ -103,7 +103,12 @@ def _cleanup_and_export():
         runner.register('SESSION_WATER_UL', session_reward_count * VAR_REWARD_UL)
     except Exception as err:
         print("WARNING: could not register SESSION_WATER_UL: {0}".format(err), flush=True)
+    runner.stop()   # stops the session-long WHEEL_POS poll thread -- before rotary.close(), since
+                     # the poll thread still touches self.rotary right up until told to stop.
     camera.close()
+    realized_fps = camera.compute_realized_fps()
+    if realized_fps is not None:
+        my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
     dot.close()
     hifi.close()
     rotary.close()
@@ -171,7 +176,8 @@ VAR_STEADY_THRESHOLD_DEG = 4
 VAR_RESPONSE_TIMEOUT_S = 5.0
 
 VAR_THRESHOLD_FINAL_DEG = 35
-VAR_TRIAL_COUNT_ADVANCE = 200        # doc: ">=200 trials/session" (MAIN trials only)
+VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per explicit
+                                      # instruction. (MAIN trials only)
 
 VAR_STIM_DURATION_S = 0.25           # unchanged from Stage 4 -- extended only from Stage 6 onward
 VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
@@ -229,9 +235,14 @@ VAR_SUBCHANCE_BLOCK_SIZE = 20
 VAR_SUBCHANCE_BLOCKS = 3
 
 VAR_ROTARY_USB_PORT = None
-VAR_STILL_POLL_HZ = 100              # additions.txt T4: NEEDS ON-RIG CONFIRMATION that the poll
-VAR_POLL_HZ = 100                    # thread keeps up without delaying state-machine handling --
-                                      # if not, fall back to 50/50 and note which rate was used.
+VAR_STILL_POLL_HZ = 100              # The REQUESTED rate -- the poll loop's actual realized rate
+VAR_POLL_HZ = 100                    # is lower (confirmed on real hardware: ~33Hz at this 100Hz
+                                      # request, dominated by the rotary serial round-trip +
+                                      # register() cost per sample, not by this requested value --
+                                      # see bpod_trial_helpers.py's own module docstring and
+                                      # TrialRunner.start()). Re-measure the realized rate on a
+                                      # real session after any change here rather than assuming
+                                      # this number is what you actually get.
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (abort / incorrect
                                       # choice) -- the dot alone is the go cue, see WheelDotPeriod.
@@ -305,6 +316,8 @@ my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
+runner.start()   # starts the ONE session-long WHEEL_POS poll thread -- see its own docstring for
+                  # why this replaced the old per-Bpod-call thread lifecycle.
 
 dot = dot_display.create_dot_display()
 dot.show()
@@ -415,7 +428,7 @@ while True:
         # in-trial-abort/response logic before the trial has even properly started).
         rotary.disable_evt_transmission()
         n_breaks = runner.wait_for_held_steady(quiescence_duration_this_trial,
-                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=False)
+                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=True)
         if n_breaks is None:
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
@@ -474,8 +487,11 @@ while True:
 
         hifi.play(0)
 
+        # cue_send_t here anchors CUE_ONSET_TIME, which is deliberately tied to the real moment
+        # hifi.play() was just called (audio-onset timing), not to Bpod's own hardware clock -- it
+        # is NOT re-anchored below the way the SM_SEND_TIME/lick/abort values are (those get the
+        # corrected, post-upload anchor once cue_thread has actually run; see below).
         cue_send_t = time.time() - log_python_t0
-        runner.register('SM_SEND_TIME', cue_send_t)
         runner.register('CUE_ONSET_TIME', cue_send_t + click_train.CLICK_START_OFFSET_S)
 
         delay_duration_this_trial = random.uniform(VAR_DELAY_DURATION_MIN_S,
@@ -574,11 +590,20 @@ while True:
                   "{0}.".format(trial), flush=True)
             break
 
+        # Re-anchor to the post-upload timestamp run_trial_state_machine() just captured for
+        # cue_sma specifically -- see stage1_wheel_shaping.py's identical comment for why the
+        # early cue_send_t above (still correctly used for CUE_ONSET_TIME, an audio-onset anchor)
+        # doesn't account for cue_sma's own construction+upload+RUN-handshake latency.
+        if runner.last_send_t is not None:
+            cue_send_t = runner.last_send_t
+        runner.register('SM_SEND_TIME', cue_send_t)
+
         cue_visited = my_bpod.session.current_trial.states_durations
         aborted = was_visited(cue_visited, 'WheelAbort')
 
         cue_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
-        cue_lick_times_abs = [cue_send_t + t for t in cue_events.get('Port1In', [])]
+        cue_lick_times_abs, _cue_lick_times_out = runner.register_port_events(
+            'CUE_LICK', cue_events, cue_send_t)
 
         total_attempts += 1
 
@@ -616,9 +641,12 @@ while True:
         dot_onset_delay = random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
         disappear_delay_s = random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
 
+        # send_epoch/send_t here only drive the render loop's own dot-onset-delay comparison below
+        # (a UX timing decision made before the thread even starts) -- the SM_SEND_TIME VAL itself
+        # is registered later, after decision_thread has actually run, using the corrected
+        # post-upload anchor (see the comment at that registration site).
         send_epoch = time.time()
         send_t = send_epoch - log_python_t0
-        runner.register('SM_SEND_TIME', send_t)
 
         camera.show_snippet(VAR_CAMERA_SNIPPET_S)
 
@@ -748,6 +776,13 @@ while True:
                   "{0}.".format(trial), flush=True)
             break
 
+        # Re-anchor to the post-upload timestamp run_trial_state_machine() just captured for the
+        # choice-period sma -- see stage1_wheel_shaping.py's identical comment for why the early
+        # send_epoch/send_t above doesn't account for construction+upload+RUN-handshake latency.
+        if runner.last_send_t is not None:
+            send_t = runner.last_send_t
+        runner.register('SM_SEND_TIME', send_t)
+
         visited = my_bpod.session.current_trial.states_durations
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
 
@@ -813,7 +848,8 @@ while True:
         print("Trial {0} ({1}): side={2}, {3}{4}".format(
             trial, trial_type, side, outcome, ' -> reward' if rewarded else ''), flush=True)
 
-        choice_lick_times_abs = [send_t + t for t in choice_events.get('Port1In', [])]
+        choice_lick_times_abs, _choice_lick_times_out = runner.register_port_events(
+            'CHOICE_LICK', choice_events, send_t)
         lick_times_abs = sorted(cue_lick_times_abs + choice_lick_times_abs)
 
         reward_time_abs = None

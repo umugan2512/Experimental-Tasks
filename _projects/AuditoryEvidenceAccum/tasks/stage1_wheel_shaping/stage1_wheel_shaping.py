@@ -98,7 +98,12 @@ def _cleanup_and_export():
     skipped regardless of how the session ended -- fixes a real gap: an unhandled exception used
     to `raise` straight out of the trial loop, skipping this teardown (and the Kill/final-cleanup
     code below used to duplicate this by hand in three places instead of sharing it). """
+    runner.stop()   # stops the session-long WHEEL_POS poll thread -- before rotary.close(), since
+                     # the poll thread still touches self.rotary right up until told to stop.
     camera.close()
+    realized_fps = camera.compute_realized_fps()
+    if realized_fps is not None:
+        my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
     dot.close()
     rotary.close()
     csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
@@ -157,14 +162,20 @@ VAR_THRESHOLD_STARTING_FRACTION = 0.10   # only used the very first time this su
                                      # ends. Fixed for the whole SESSION (grows only between
                                      # sessions, not per-trial) -- read from persisted state below.
 
-VAR_TRIAL_COUNT_ADVANCE = 200       # doc: ">200 completed trials/session on two consecutive
-                                     # sessions" -- ALSO now the session's own hard trial cap (see
-                                     # the trial loop below): the session deliberately ends once
-                                     # this many trials complete, it isn't just an advancement
-                                     # threshold checked after an otherwise-longer session anymore.
+VAR_TRIAL_COUNT_ADVANCE = 100       # The QUALIFYING threshold only (lowered from the doc's
+                                     # original 200, per explicit instruction) -- how many
+                                     # REWARDED trials this session needs for advancement
+                                     # purposes. Deliberately NOT the same thing as the session's
+                                     # own hard trial cap any more (see VAR_TRIAL_CAP below) --
+                                     # those two numbers used to share one variable/value, but per
+                                     # explicit instruction they're now independent: a session can
+                                     # run well past 100 rewarded trials before actually ending.
+VAR_TRIAL_CAP = 250                 # The session's own hard trial-count cap (one of three --
+                                     # see below), checked against every ATTEMPTED trial
+                                     # (rewarded or not), not the qualifying count above.
 VAR_SESSION_WATER_CAP_UL = 1500.0   # per explicit instruction: three caps on the session --
-                                     # 200 trials, 1.5mL delivered, or 30 minutes elapsed --
-                                     # whichever comes first.
+                                     # VAR_TRIAL_CAP trials, 1.5mL delivered, or 30 minutes
+                                     # elapsed -- whichever comes first.
 VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
@@ -188,11 +199,14 @@ VAR_GAIN_INITIAL_MULT = 3.0         # decays via staircase.decay_gain() (-0.1x/q
 VAR_RENDER_HZ = 30
 
 VAR_ROTARY_USB_PORT = None
-VAR_STILL_POLL_HZ = 100              # additions.txt T4: raised 50->100. NEEDS ON-RIG CONFIRMATION
-VAR_POLL_HZ = 100                    # that the poll thread keeps up without delaying state-machine
-                                      # handling -- if not, fall back to 50/50 (still a real
-                                      # improvement over the old 50/10 split) and note which rate
-                                      # was actually used when reporting results from a real session.
+VAR_STILL_POLL_HZ = 100              # The REQUESTED rate -- the poll loop's actual realized rate
+VAR_POLL_HZ = 100                    # is lower (confirmed on real hardware: ~33Hz at this 100Hz
+                                      # request, dominated by the rotary serial round-trip +
+                                      # register() cost per sample, not by this requested value --
+                                      # see bpod_trial_helpers.py's own module docstring and
+                                      # TrialRunner.start()). Re-measure the realized rate on a
+                                      # real session after any change here rather than assuming
+                                      # this number is what you actually get.
 
 VAR_CAMERA_INDEX = None                      # None = auto-discover, see
                                               # camera_recorder.discover_camera()
@@ -244,6 +258,8 @@ my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ)
+runner.start()   # starts the ONE session-long WHEEL_POS poll thread -- see its own docstring for
+                  # why this replaced the old per-Bpod-call thread lifecycle.
 
 dot = dot_display.create_dot_display()
 dot.show()
@@ -285,10 +301,11 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting up to {0} trials, capped at {1} trials, {2:.1f}mL delivered, or {3:.0f}min "
-      "elapsed -- whichever first ({1} also targeted for advancement)".format(
-          VAR_MAX_TRIALS, VAR_TRIAL_COUNT_ADVANCE, VAR_SESSION_WATER_CAP_UL / 1000.0,
-          VAR_SESSION_DURATION_CAP_S / 60.0), flush=True)
+print("Starting up to {0} trials, capped at {1} attempted trials, {2:.1f}mL delivered, or "
+      "{3:.0f}min elapsed -- whichever first ({4} REWARDED trials targeted for "
+      "advancement)".format(
+          VAR_MAX_TRIALS, VAR_TRIAL_CAP, VAR_SESSION_WATER_CAP_UL / 1000.0,
+          VAR_SESSION_DURATION_CAP_S / 60.0, VAR_TRIAL_COUNT_ADVANCE), flush=True)
 
 session_trial_count = 0
 session_reward_ul_total = 0.0
@@ -299,7 +316,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
     try:
         rotary.disable_evt_transmission()
         n_breaks = runner.wait_for_held_steady(VAR_QUIESCENCE_S, VAR_STEADY_THRESHOLD_DEG,
-                                                require_no_lick=False)
+                                                require_no_lick=True)
         if n_breaks is None:
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
@@ -420,6 +437,17 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             print("WARNING: decision-period Bpod thread did not stop within 3s -- continuing "
                   "anyway.", flush=True)
 
+        # Re-anchor to the post-upload timestamp run_trial_state_machine() just captured (right
+        # after send_state_machine() completed, right before the RUN command) -- the early
+        # send_epoch/send_t above was captured before SM construction even began, so it doesn't
+        # account for construction+upload+RUN-handshake latency, a confirmed source of 0.22-0.48s
+        # drift between derived event timestamps and the hardware-relative offsets they're added
+        # to. Only derived/registered values re-anchor here -- the render loop's own earlier use
+        # of send_epoch (for the dot-onset-delay comparison, a UX timing decision made before the
+        # thread even started) is intentionally left untouched.
+        if runner.last_send_t is not None:
+            send_t = runner.last_send_t
+
         dot.clear()
         dot.pump()
 
@@ -441,8 +469,11 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         outcome_state = 'Reward' if rewarded else 'NoMovement'
         outcome = 'Rewarded' if rewarded else 'NoMovement'
 
-        session_trial_count += 1
+        # Per explicit instruction: only genuinely REWARDED trials count toward the qualifying/
+        # session-cap threshold -- a NoMovement trial doesn't demonstrate the behavior this
+        # threshold exists to confirm, so it shouldn't count toward reaching it.
         if rewarded:
+            session_trial_count += 1
             session_reward_ul_total += VAR_REWARD_UL
 
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
@@ -468,21 +499,25 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         print("Trial {0}: held {1:.2f}s (broke {2}x), {3}, gain={4:.2f}x".format(
             trial, VAR_QUIESCENCE_S, n_breaks, outcome, cur_gain_mult), flush=True)
 
-        # Port1In licks are already natively logged as raw EVENT rows in the session CSV (see
-        # CLAUDE.md) -- extracted here only for the LIVE plot's own in-memory use, same technique
-        # full_protocol_lookback_test.py already uses, not a new VAL registration.
-        lick_times_abs = [send_t + t for t in choice_events.get('Port1In', [])]
+        # Port1In/Port1Out licks are already natively logged as raw EVENT rows in the session CSV
+        # (see CLAUDE.md) -- register_port_events() also explicitly registers both edges as their
+        # own VALs (per explicit instruction: always report port in AND out times, not just in --
+        # useful on its own, and makes per-contact duration directly auditable without hand-
+        # parsing raw EVENT rows, relevant to a suspected sensor debounce/threshold issue).
+        lick_times_abs, _lick_times_out = runner.register_port_events('LICK', choice_events, send_t)
         reward_time_abs = send_t + visited['Reward'][-1][0] if rewarded else None
 
         bench_plots.add_trial(side, magnitude_deg, cur_threshold_deg, outcome,
                                gain_mult=cur_gain_mult, lick_times_abs=lick_times_abs,
                                reward_time_abs=reward_time_abs)
 
-        # Deliberate session cap, per explicit instruction: stop at 200 trials, 1.5mL delivered,
-        # or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400) above is only a
-        # further-out safety backstop, not the real target. Checked at trial end (not trial
-        # start) so the trial that actually crosses a cap still completes and gets logged.
-        if session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
+        # Deliberate session cap, per explicit instruction: stop at VAR_TRIAL_CAP ATTEMPTED
+        # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold),
+        # 1.5mL delivered, or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400)
+        # above is only a further-out safety backstop, not the real target. Checked at trial end
+        # (not trial start) so the trial that actually crosses a cap still completes and gets
+        # logged.
+        if trial >= VAR_TRIAL_CAP:
             session_end_reason = 'trial_count_cap'
         elif session_reward_ul_total >= VAR_SESSION_WATER_CAP_UL:
             session_end_reason = 'water_cap'
@@ -513,9 +548,9 @@ if session_end_reason is not None:
 
 # --- session-end bookkeeping: advancement gate + gain decay + threshold growth ----------------------
 
-# >= , not > -- a session is now deliberately capped AT VAR_TRIAL_COUNT_ADVANCE trials (see the
-# cap check above), so it can never exceed that count; the qualifying check has to recognize
-# exactly reaching it.
+# >= , not > -- the session's own hard cap is now VAR_TRIAL_CAP (a separate, larger number), not
+# this qualifying threshold, so session_trial_count can legitimately exceed VAR_TRIAL_COUNT_ADVANCE
+# by the time the session actually ends; >= still correctly recognizes "met or exceeded."
 cleared_this_session = session_trial_count >= VAR_TRIAL_COUNT_ADVANCE
 history = state.get('sessions_trial_count_history')
 history.append(cleared_this_session)
