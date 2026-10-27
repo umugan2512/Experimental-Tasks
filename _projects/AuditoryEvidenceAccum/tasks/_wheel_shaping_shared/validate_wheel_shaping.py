@@ -24,6 +24,16 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
       SESSION_END_REASON rather than the literal string 'completed')
   13. BoundedStaircase (Stage 3/4's shared stimulus-duration/ITI ramps) + next_alternating_value()
       (Stage 3's own same-day-unchanged/across-day-alternating tone-side rule)
+  14. classify_trial()'s side = the crossing that TRIGGERED the outcome state (not the first one
+      in the trial), plus TRIAL-BPOD-TIME parsing, fit_host_to_bpod(), wheel_samples_bpod_time()
+      and trial_host_anchor() against a synthetic clock pair with known drift/offset
+  15. TrialRunner/RotaryStream (no hardware): injected-stdin ordering, the non-blocking quiescence
+      tracker, WHEEL_POS keepalive filling (no gaps across still periods / late flushes), the
+      module->PC clock map's lower envelope, and exact Bpod-clock placement of 3-field WHEEL_POS rows
+  16. pybpodapi's real Session under a concurrent VAL writer with install_session_lock() (the race
+      that crashed session 20261023-120425 at trial 5), and struct export of 3-field WHEEL_POS rows
+  17. IncrementalSessionParser (the live dashboard's parser) == parse_session_csv() on a file
+      written in odd-sized chunks that split lines and a UTF-8 character across reads
 
 Run with the pybpod-environment interpreter:
     /c/Users/2P-Behav/.conda/envs/pybpod-environment/python.exe validate_wheel_shaping.py
@@ -831,12 +841,413 @@ section13_pass = (
 print("Section 13 result: {0}".format("PASS" if section13_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
+# Section 14: side = the TRIGGERING crossing; Bpod-clock parsing/alignment
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 14: triggering-crossing side + TrialStartTimestamp / host->Bpod clock alignment")
+print("=" * 100)
+
+# The real 2026-10-22 bug shape: R threshold crossed (ignored) at 0.056s, the rewarded crossing is
+# the L one at 2.7435s -- both the old first-crossing and last-vs-first rules got this wrong.
+swallowed = _trial({'WheelPeriod': (0.1814, 2.7435, 2.5621), 'Reward': (2.7435, 2.8245, 0.081)},
+                   {'RotaryEncoder1_2': [0.056], 'RotaryEncoder1_1': [2.7435]})
+_o, side_swallowed, _d, _c = session_csv_parser.classify_trial(swallowed, config1)
+side_ok = side_swallowed == 'L'
+print("  ignored R crossing then rewarded L crossing -> side 'L': {0} (got {1})".format(
+    side_ok, side_swallowed))
+
+no_move = _trial({'NoMovement': (10.0, 10.0, 0.0)}, {'RotaryEncoder1_2': [0.05]})
+_o, side_nm, _d, _c = session_csv_parser.classify_trial(no_move, config1)
+nm_ok = side_nm is None
+print("  NoMovement trial with an ignored crossing has no side: {0} (got {1})".format(nm_ok, side_nm))
+
+tmp_clock_dir = tempfile.mkdtemp(prefix='clock_test_')
+try:
+    csv_path = os.path.join(tmp_clock_dir, 'synth_session.csv')
+    # bpod_t = host_t * (1 - 10e-6) + 4.43 (a 10ppm, 4.43s-offset clock pair), 5 trials
+    rows = []
+    for i in range(5):
+        host_run = 10.0 + 5.0 * i
+        bpod_start = host_run * (1 - 10e-6) + 4.43
+        rows += [
+            ['TRIAL', '', '', '', 'New trial'],
+            ['EVENT', '', '0.5', '', '1', 'RotaryEncoder1_2'],
+            ['INFO', '', '{0:.6f}'.format(bpod_start), '{0:.6f}'.format(bpod_start + 1.0),
+             'TRIAL-BPOD-TIME', '1.0'],
+            ['STATE', '', '0', '0.5', 'WheelPeriod', '0.5'],
+            ['STATE', '', '0.5', '0.6', 'Reward', '0.1'],
+            ['VAL', '', '', '', 'SM_RUN_TIME', '{0:.6f}'.format(host_run)],
+            # stream-mode wheel rows: marker at module 100.0 + i*5 == WheelPeriod start
+            ['VAL', '', '', '', 'ROTARY_MARKER', '{0:.6f},{1:.4f}'.format(100.0 + 5 * i, host_run)],
+            ['VAL', '', '', '', 'WHEEL_POS', '{0:.4f},1.00'.format(host_run + 0.25)],
+            ['VAL', '', '', '', 'WHEEL_CLOCK_OFFSET', '{0:.6f}'.format(host_run - (100.0 + 5 * i))],
+        ]
+    with open(csv_path, 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows)
+    _info, _sv, trials = session_csv_parser.parse_session_csv(csv_path)
+    starts_ok = all(abs(t['bpod_start'] - (10.0 + 5.0 * i) * (1 - 10e-6) - 4.43) < 1e-6
+                    for i, t in enumerate(trials))
+    print("  TRIAL-BPOD-TIME parsed into each trial's bpod_start: {0}".format(starts_ok))
+    fit = session_csv_parser.fit_host_to_bpod(trials)
+    fit_ok = (fit is not None and abs(fit['slope'] - (1 - 10e-6)) < 1e-9
+              and abs(fit['intercept'] - 4.43) < 1e-6 and fit['max_abs_residual_s'] < 1e-6)
+    print("  fit_host_to_bpod() recovers the 10ppm/4.43s clock pair: {0}".format(fit_ok))
+    # one trial whose RUN left 8ms after its anchor: dropped as an outlier, fit unaffected
+    _out_trials = [dict(t, vals=dict(t['vals'])) for t in trials]
+    _out_trials[2]['vals']['SM_RUN_TIME'] = '{0:.6f}'.format(
+        float(_out_trials[2]['vals']['SM_RUN_TIME']) - 0.008)
+    fit_o = session_csv_parser.fit_host_to_bpod(_out_trials)
+    robust_ok = (fit_o is not None and fit_o['n_outliers'] == 1 and fit_o['outliers'][0][0] == 2
+                 and abs(fit_o['slope'] - (1 - 10e-6)) < 1e-9 and fit_o['residual_sd_s'] < 1e-6)
+    print("  an 8ms delayed-RUN anchor is flagged as the one outlier and doesn't bend the fit: "
+          "{0}".format(robust_ok))
+    fit_ok = fit_ok and robust_ok
+    exact = session_csv_parser.wheel_samples_bpod_time(trials[2], 'WheelPeriod')
+    # sample 0.25s after the marker -> bpod_start + 0 + 0.25
+    exact_ok = exact is not None and abs(exact[0][0] - (trials[2]['bpod_start'] + 0.25)) < 1e-4
+    print("  wheel_samples_bpod_time() places a sample 0.25s after the marker at "
+          "bpod_start+0.25: {0}".format(exact_ok))
+    anchor_ok = session_csv_parser.trial_host_anchor(trials[3]) == 25.0
+    print("  trial_host_anchor() reads the trial's own SM_RUN_TIME: {0}".format(anchor_ok))
+    # legacy session: no SM_RUN_TIME -- anchor recovered from THRESHOLD_CROSSING_TIME
+    legacy = _trial({'Reward': (2.7435, 2.8245, 0.081)}, {},
+                    {'THRESHOLD_CROSSING_TIME': '10.4986'})
+    legacy_ok = abs(session_csv_parser.trial_host_anchor(legacy) - (10.4986 - 2.7435)) < 1e-9
+    print("  legacy anchor recovered from THRESHOLD_CROSSING_TIME - Reward start: {0}".format(
+        legacy_ok))
+finally:
+    shutil.rmtree(tmp_clock_dir, ignore_errors=True)
+
+section14_pass = (side_ok and nm_ok and starts_ok and fit_ok and exact_ok and anchor_ok
+                  and legacy_ok)
+print("Section 14 result: {0}".format("PASS" if section14_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 15: trial handshake + continuous wheel logging (TrialRunner/RotaryStream, no hardware)
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 15: injected SoftCodes, quiescence tracker, wheel-log keepalive, clock map, 3-field rows")
+print("=" * 100)
+
+import threading as _threading
+import time as _time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '_shared'))
+import bpod_trial_helpers as _bth
+import rotary_stream as _rs
+
+
+class _Inner(object):
+    def __init__(self):
+        self.lines = ['kill']
+    def readline(self, timeout=None):
+        return self.lines.pop(0) if self.lines else None
+    def close(self):
+        pass
+
+
+inj = _bth._InjectableStdin(_Inner())
+inj.put('SoftCode1')
+order = [inj.readline(), inj.readline(), inj.readline()]
+inject_ok = order == ['SoftCode1', 'kill', None]
+print("  injected line is read before the real stdin (GUI Stop/Kill still delivered): {0} {1}".format(
+    inject_ok, order))
+
+
+class _FakeBpod(object):
+    def __init__(self):
+        self.rows = []
+        self.stdin = None
+    def register_value(self, k, v, flush=True):
+        self.rows.append((k, v))
+
+
+class _FakeStream(object):
+    """ Just enough of RotaryStream for TrialRunner's logging/quiescence paths. """
+    def __init__(self):
+        self.samples = []      # (module_t, host_t, pos)
+        self.queue = []
+        self.off = 0.25
+    def module_to_host(self, m):
+        return m + self.off
+    def samples_since_host(self, t):
+        return [s for s in self.samples if s[1] >= t]
+    def drain_for_logging(self):
+        q, self.queue = self.queue, []
+        return q
+    def latest(self):
+        return self.samples[-1] if self.samples else None
+    def add(self, host_t, pos):
+        s_ = (host_t - self.off, host_t, pos)
+        self.samples.append(s_)
+        self.queue.append(s_)
+
+
+fb = _FakeBpod()
+runner = _bth.TrialRunner(fb, None, _time.time(), use_stream=False)
+runner.stream = _FakeStream()
+t0 = runner._now()
+runner.stream.add(t0, 3.0)
+runner.flush_wheel_log()
+# 0.6s of stillness, then a late flush, then movement resumes
+fake_now = [t0 + 0.6]
+runner._now = lambda: fake_now[0]
+runner.flush_wheel_log()
+runner.stream.add(t0 + 0.65, 3.5)
+fake_now[0] = t0 + 0.9
+runner.stream.add(t0 + 0.9, 9.0)
+runner.flush_wheel_log()
+rows = [tuple(map(float, v.split(','))) for k, v in fb.rows if k == 'WHEEL_POS']
+ts = [r[0] for r in rows]
+max_gap = max(b - a for a, b in zip(ts, ts[1:]))
+keepalive_ok = max_gap <= _bth.WHEEL_LOG_MIN_INTERVAL_S + 1e-6 and ts == sorted(ts)
+three_field_ok = all(len(r) == 3 and abs(r[0] - r[2] - 0.25) < 1e-3 for r in rows)
+held_ok = all(r[1] == 3.0 for r in rows if t0 < r[0] < t0 + 0.65)
+print("  still wheel + late flush -> no WHEEL_POS gap > {0:.0f}ms, rows in order: {1} (max gap "
+      "{2:.0f}ms, {3} rows)".format(_bth.WHEEL_LOG_MIN_INTERVAL_S * 1e3, keepalive_ok,
+                                     max_gap * 1e3, len(rows)))
+print("  filled rows hold the last real position: {0}".format(held_ok))
+print("  every row carries t,pos,t_module with t_module = t - offset: {0}".format(three_field_ok))
+
+# quiescence tracker: moving for 0.3s, then still -> met only after a full still hold window
+runner2 = _bth.TrialRunner(_FakeBpod(), None, _time.time(), use_stream=False)
+runner2.stream = _FakeStream()
+clock = [0.0]
+runner2._now = lambda: clock[0]
+runner2.start_quiescence(0.25, 4.0)
+met_at = None
+for k in range(120):
+    clock[0] = k * 0.01
+    if clock[0] < 0.3 and k % 3 == 0:
+        runner2.stream.add(clock[0], 10.0 * ((k // 3) % 2))
+    if runner2.poll_quiescence() and met_at is None:
+        met_at = clock[0]
+quiescence_ok = met_at is not None and 0.5 <= met_at <= 0.6 and runner2.quiescence_breaks >= 1
+print("  quiescence met only after 0.25s of stillness following movement (met at {0}, breaks {1}): "
+      "{2}".format(met_at, runner2.quiescence_breaks, quiescence_ok))
+
+# RotaryStream clock map: lower envelope, no reset during a long data-free stretch, bounded rise
+st = _rs.RotaryStream.__new__(_rs.RotaryStream)
+st._lock = _threading.Lock(); st._carry = b''; st._raw_last = 0; st._rollover_ticks = 0
+st._scale = 1e-6; st._scale_probe = []; st._samples = _rs.deque(); st._events = _rs.deque()
+st._log_queue = []; st._offset_est = None; st._offset_t = None; st._latest = None
+st.n_resyncs = 0; st.max_buffer_s = 60.0; st._max_read_gap_s = 0.0
+def _msg(module_s, ticks=0):
+    return b'P' + int(ticks).to_bytes(2, 'little', signed=True) + int(module_s * 1e6).to_bytes(4, 'little')
+st._ingest(_msg(1.0), 11.010)      # latency 10ms
+st._ingest(_msg(1.1), 11.102)      # latency 2ms -> adopted
+est_after_low = st._offset_est
+st._ingest(_msg(31.1), 41.130)     # after 30s of silence, latency 30ms -> may rise only ~1.5ms
+est_after_gap = st._offset_est
+offset_ok = (abs(est_after_low - 10.002) < 1e-6
+             and est_after_gap - est_after_low <= (41.130 - 11.102) * 50e-6 + 1e-9)
+print("  clock map keeps its lower envelope across a 30s still period (rise {0:.2f}ms, limit "
+      "{1:.2f}ms): {2}".format((est_after_gap - est_after_low) * 1e3, 30 * 50e-3, offset_ok))
+tail_ok = [s[1] for s in _rs._tail_since(_rs.deque([(0, 1.0), (0, 2.0), (0, 3.0)]), 2.0)] == [2.0, 3.0]
+print("  tail scan returns exactly the items at/after the cutoff: {0}".format(tail_ok))
+
+# 3-field WHEEL_POS rows place samples on the Bpod clock exactly (per-row module time)
+tr = {'vals': {'ROTARY_MARKER': '100.000000,10.0000', 'WHEEL_CLOCK_OFFSET': ['-90.0', '-89.98'],
+               'WHEEL_POS': ['10.2500,1.00,100.250000', '10.5000,2.00,100.500000']},
+      'states': {'WheelPeriod': (0.5, 1.0, 0.5)}, 'bpod_start': 20.0}
+exact = session_csv_parser.wheel_samples_bpod_time(tr, 'WheelPeriod')
+exact3_ok = exact is not None and abs(exact[0][0] - 20.75) < 1e-6 and abs(exact[1][0] - 21.0) < 1e-6
+print("  3-field rows map to the Bpod clock via their own module time: {0}".format(exact3_ok))
+
+section15_pass = (inject_ok and keepalive_ok and held_ok and three_field_ok and quiescence_ok
+                  and offset_ok and tail_ok and exact3_ok)
+print("Section 15 result: {0}".format("PASS" if section15_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 16: pybpod Session thread-safety (the trial-5 crash) + struct export of stream-mode rows
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 16: real pybpodapi Session under concurrent writers; struct export of 3-field rows")
+print("=" * 100)
+
+_saved_out, _saved_err = sys.stdout, sys.stderr
+try:
+    from pybpodapi import session as _pyb_session
+    from pybpodapi.com.messaging.trial import Trial as _Trial
+    from pybpodapi.com.messaging.event_occurrence import EventOccurrence as _Ev
+    from pybpodapi.com.messaging.value import ValueMessage as _Val
+    _have_pybpod = True
+except ImportError:
+    _have_pybpod = False
+
+
+def _race(n_trials):
+    """ Bpod-thread pattern (new Trial + events) vs main-thread pattern (VALs), concurrently.
+    Returns how many trials ended up with events missing / replaced in session.trials. """
+    sess = _pyb_session.Session()
+    sys.stdout, sys.stderr = _saved_out, _saved_err   # Session() redirects them
+    stop, bad = _threading.Event(), [0]
+
+    def bpod_side():
+        for _ in range(n_trials):
+            t = _Trial(None)
+            sess.add_message(t)
+            for k in range(3):
+                sess.add_message(_Ev(1, 'Port1In', 0.1 * k))
+            if len(t.events_occurrences) != 3 or sess.trials[-1] is not t:
+                bad[0] += 1
+        stop.set()
+
+    def main_side():
+        while not stop.is_set():
+            sess.add_message(_Val('X', 1))
+
+    a, b = _threading.Thread(target=bpod_side), _threading.Thread(target=main_side)
+    b.start(); a.start(); a.join(); b.join()
+    _race.keep = getattr(_race, 'keep', []) + [sess]   # don't let Session.__del__ close stdout
+    return bad[0]
+
+
+if _have_pybpod:
+    _old_switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    _bth.install_session_lock()
+    bad_locked = _race(3000)
+    sys.setswitchinterval(_old_switch)
+    race_ok = bad_locked == 0
+    print("  with install_session_lock(): 0 of 3000 trials lose/misattribute events under a concurrent "
+          "VAL writer: {0} ({1} bad)".format(race_ok, bad_locked))
+else:
+    race_ok = True
+    print("  pybpodapi not importable in this interpreter -- race check skipped (run with the "
+          "pybpod-environment interpreter)")
+
+# struct export of a stream-mode (3-field WHEEL_POS) CSV
+tmp16 = tempfile.mkdtemp(prefix='struct3_')
+try:
+    path16 = os.path.join(tmp16, 'synth.csv')
+    with open(path16, 'w', newline='') as f:
+        w = csv.writer(f, delimiter=';')
+        w.writerows([
+            ['TRIAL', '', '', '', 'New trial'],
+            ['INFO', '', '10.000000', '11.000000', 'TRIAL-BPOD-TIME', '1.0'],
+            ['STATE', '', '0', '0.5', 'WheelPeriod', '0.5'],
+            ['VAL', '', '', '', 'SM_RUN_TIME', '5.0'],
+            ['VAL', '', '', '', 'WHEEL_POS', '5.1000,1.00,105.100000'],
+            ['VAL', '', '', '', 'WHEEL_POS', '5.2000,2.00,105.200000'],
+        ])
+    import session_struct_export as _sse
+    _m, _j = _sse.export_session_struct(path16, {'VAR_X': 1})
+    import json as _json
+    _d = _json.load(open(_j))
+    export_ok = _d['trials'][0]['vals']['WHEEL_POS']['t_module'] == [105.1, 105.2]
+except Exception as _err:
+    export_ok = False
+    print("  struct export raised: {0}".format(_err))
+finally:
+    shutil.rmtree(tmp16, ignore_errors=True)
+print("  struct export handles 3-field WHEEL_POS rows (keeps t_module): {0}".format(export_ok))
+
+section16_pass = race_ok and export_ok
+print("Section 16 result: {0}".format("PASS" if section16_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 17: IncrementalSessionParser == parse_session_csv() on a file written in pieces
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 17: incremental CSV parsing (live dashboard) vs full parse")
+print("=" * 100)
+
+import json as _json17
+
+
+def _norm17(parsed):
+    return _json17.dumps(parsed, sort_keys=True, default=str).replace('NaN', 'null')
+
+
+tmp17 = tempfile.mkdtemp(prefix='incparse_')
+try:
+    path17 = os.path.join(tmp17, 'growing.csv')
+    rows17 = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', 'stage1_wheel_shaping'],
+              ['VAL', 'pc', '', '', 'THRESHOLD_DEG', '3.5']]
+    for i in range(30):
+        rows17 += [['TRIAL', 'pc', '', '', 'New trial', ''],
+                   ['EVENT', 'pc', '0.0{0}'.format(i % 10), '', '75', 'PC_QuiescenceMet'],
+                   ['VAL', 'pc', '', '', 'WHEEL_POS', '{0}.1000,1.50,{0}.050000'.format(i)],
+                   ['VAL', 'pc', '', '', 'WHEEL_POS', '{0}.1500,-2.00,{0}.100000'.format(i)],
+                   ['END-TRIAL', 'pc', '', '', 'The trial ended', ''],
+                   ['INFO', 'pc', '{0}.0'.format(i), '{0}.9'.format(i), 'TRIAL-BPOD-TIME', '0.9'],
+                   ['STATE', 'pc', '0', '0.5', 'WheelPeriod', '0.5'],
+                   ['STATE', 'pc', 'nan', 'nan', 'NoMovement', 'nan'],
+                   ['VAL', 'pc', '', '', 'OUTCOME', 'Rewarded °'],   # non-ASCII on purpose
+                   ['VAL', 'pc', '', '', 'LICK_TIMES_OUT', '']]
+    import io as _io17
+    buf = _io17.StringIO()
+    csv.writer(buf, delimiter=';', lineterminator='\n').writerows(rows17)
+    data17 = buf.getvalue().encode('utf-8')
+    inc17 = session_csv_parser.IncrementalSessionParser(path17)
+    open(path17, 'wb').close()
+    pos, step, k = 0, 7, 0
+    mid_states_ok = True
+    with open(path17, 'ab') as f:
+        while pos < len(data17):
+            chunk = data17[pos:pos + step]          # chunks cut lines (and the UTF-8 char) apart
+            f.write(chunk); f.flush()
+            pos += len(chunk)
+            step = 7 + (k * 13) % 61; k += 1
+            _info, _sv, _tr = inc17.update()
+            # a partially written trial must never look complete (the dashboard relies on this)
+            for i_, tr_ in enumerate(_tr[:-1]):
+                if not tr_['states']:
+                    mid_states_ok = False
+    same17 = _norm17(inc17.update()) == _norm17(session_csv_parser.parse_session_csv(path17))
+    n_tr = len(inc17.result()[2])
+finally:
+    shutil.rmtree(tmp17, ignore_errors=True)
+print("  file written in {0} odd-sized chunks (lines and a UTF-8 char split across reads) parses "
+      "identically to a full parse: {1} ({2} trials)".format(k, same17, n_tr))
+print("  every trial before the last is complete at every poll: {0}".format(mid_states_ok))
+
+section17_pass = same17 and mid_states_ok and n_tr == 30
+print("Section 17 result: {0}".format("PASS" if section17_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+# Section 18: consumed-water accounting (Stage 1/2 water cap + training log)
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 18: ConsumedWaterTracker -- a drop counts once licked after delivery")
+print("=" * 100)
+
+from water_tracker import ConsumedWaterTracker
+
+w18 = ConsumedWaterTracker(4.0)
+w18.record_trial([], 1.0)                      # delivered, not licked yet
+c1 = (w18.delivered_ul, w18.consumed_ul, w18.pending_ul) == (4.0, 0.0, 4.0)
+w18.record_trial([0.2], None)                  # licked in the next (unrewarded) trial
+c2 = (w18.consumed_ul, w18.pending_ul) == (4.0, 0.0)
+w18.record_trial([0.5], 1.0)                   # lick only BEFORE this reward -> not consumed
+c3 = (w18.consumed_ul, w18.pending_ul) == (4.0, 4.0)
+w18.record_trial([], 1.0)
+w18.record_trial([2.0], 1.0)                   # one lick consumes all three pooled drops
+c4 = (w18.delivered_ul, w18.consumed_ul, w18.pending_ul) == (16.0, 16.0, 0.0)
+for label, ok in (("unlicked drop stays pending", c1), ("a later trial's lick consumes it", c2),
+                  ("a lick before delivery doesn't count", c3), ("pooled drops consumed at once", c4)):
+    print("  {0}: {1}".format(label, ok))
+section18_pass = c1 and c2 and c3 and c4
+print("Section 18 result: {0}".format("PASS" if section18_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
 
 print()
 print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
-                 section13_pass)
+                 section13_pass and section14_pass and section15_pass and section16_pass and
+                 section17_pass and section18_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

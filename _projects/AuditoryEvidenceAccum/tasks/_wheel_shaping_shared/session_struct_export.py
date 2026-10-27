@@ -65,15 +65,70 @@ def _split_stream_values(trials):
     for trial in trials:
         vals = trial['vals']
         if 'WHEEL_POS' in vals:
-            times, positions = [], []
+            times, positions, module_times = [], [], []
             for raw in vals['WHEEL_POS']:
-                t_str, pos_str = raw.split(',')
-                times.append(float(t_str))
-                positions.append(float(pos_str))
-            vals['WHEEL_POS'] = {'t': times, 'pos': positions}
+                parts = raw.split(',')   # 't,pos' or, since 2026-10-23, 't,pos,t_module'
+                times.append(float(parts[0]))
+                positions.append(float(parts[1]))
+                module_times.append(float(parts[2]) if len(parts) > 2 else float('nan'))
+            vals['WHEEL_POS'] = {'t': times, 'pos': positions, 't_module': module_times}
         if 'QUIESCENCE_RESET_TIME' in vals:
             vals['QUIESCENCE_RESET_TIME'] = [float(raw) for raw in vals['QUIESCENCE_RESET_TIME']]
+        if 'WHEEL_CLOCK_OFFSET' in vals:
+            vals['WHEEL_CLOCK_OFFSET'] = [float(raw) for raw in vals['WHEEL_CLOCK_OFFSET']]
     return trials
+
+
+# The state each stage's trial starts in -- the one that sends the rotary its '#' marker (Stage 1/2:
+# WheelPeriod, Stage 3/4/5: WheelDotPeriod). See session_csv_parser.wheel_samples_bpod_time().
+_MARKER_STATES = ('WheelPeriod', 'WheelDotPeriod')
+
+
+def _add_bpod_clock(trials, csv_path):
+    """ Puts host-clock data on the Bpod state machine's clock, MATLAB Bpod's convention (every
+    native STATE/EVENT time is already Bpod-trial-relative; bpod_start is the trial's
+    TrialStartTimestamp):
+    - 'TrialStartTimestamp'/'TrialEndTimestamp' per trial (copies of bpod_start/bpod_end, under
+      MATLAB's own names).
+    - 'WHEEL_POS_bpod_t' per trial: exact via the trial's ROTARY_MARKER (stream-mode sessions),
+      else via the session-wide host->Bpod fit.
+    - session-level 'camera' {'frame', 'host_t', 'bpod_t'} from <session folder>/
+      session_video_timestamps.csv, via that same fit.
+    Returns the fit dict (or None). Must run before _split_stream_values(), which replaces the raw
+    WHEEL_POS strings. """
+    fit = session_csv_parser.fit_host_to_bpod(trials)
+    for trial in trials:
+        trial['TrialStartTimestamp'] = trial.get('bpod_start')
+        trial['TrialEndTimestamp'] = trial.get('bpod_end')
+        exact = None
+        for state in _MARKER_STATES:
+            exact = session_csv_parser.wheel_samples_bpod_time(trial, state)
+            if exact is not None:
+                break
+        if exact is not None:
+            trial['WHEEL_POS_bpod_t'] = [t for t, _ in exact]
+        elif fit is not None and trial['vals'].get('WHEEL_POS'):
+            trial['WHEEL_POS_bpod_t'] = [
+                session_csv_parser.host_to_bpod(fit, float(raw.split(',')[0]))
+                for raw in trial['vals']['WHEEL_POS']]
+    return fit
+
+
+def _camera_times(csv_path, fit):
+    path = os.path.join(os.path.dirname(csv_path), 'session_video_timestamps.csv')
+    if not os.path.exists(path):
+        return None
+    frames, host_t = [], []
+    with open(path, 'r') as f:
+        for line in f:
+            parts = line.strip().split(',')
+            try:
+                frames.append(int(parts[0]))
+                host_t.append(float(parts[1]))
+            except (ValueError, IndexError):
+                continue   # header row
+    bpod_t = [session_csv_parser.host_to_bpod(fit, t) for t in host_t] if fit else None
+    return {'frame': frames, 'host_t': host_t, 'bpod_t': bpod_t}
 
 
 def export_session_struct(csv_path, task_params):
@@ -82,9 +137,11 @@ def export_session_struct(csv_path, task_params):
     stays complete as new parameters get added, no hand-maintained list to fall out of sync.
     Returns (mat_path, json_path). """
     info, session_vals, trials = session_csv_parser.parse_session_csv(csv_path)
+    fit = _add_bpod_clock(trials, csv_path)
     trials = _split_stream_values(trials)
     struct = {'info': info, 'task_params': task_params, 'session_vals': session_vals,
-              'trials': trials}
+              'trials': trials, 'clock': {'host_to_bpod': fit},
+              'camera': _camera_times(csv_path, fit)}
 
     base = os.path.splitext(csv_path)[0]
     mat_path = base + '_struct.mat'
@@ -114,6 +171,7 @@ def _load_member(csv_path):
         except (ValueError, OSError):
             pass   # fall through to the raw-CSV fallback below
     info, _session_vals, trials = session_csv_parser.parse_session_csv(csv_path)
+    _add_bpod_clock(trials, csv_path)
     trials = _split_stream_values(trials)
     return {'info': info, 'task_params': None, 'trials': trials}
 

@@ -28,7 +28,7 @@ def connect_rotary(bpod, usb_port=None):
     return rotary, rotary_bpod_module
 
 
-def build_reset_trigger(rotary_bpod_module):
+def build_reset_trigger(rotary_bpod_module, marker_code=None):
     """
     Bundles SETZEROPOS+ENABLE_ALLTHRESHOLDS into a single relay message, for use as an
     output_actions entry (e.g. fired on WaitForChoice's own entry so left/right are measured fresh
@@ -45,24 +45,63 @@ def build_reset_trigger(rotary_bpod_module):
     own command byte constants (importable directly from the class, no instance/classification
     needed).
 
+    With `marker_code` given, the message is instead SETZEROPOS + '#'+marker_code: the rotary logs
+    the '#' as an event on its own clock in its USB stream (MATLAB Bpod_Gen2's `{'RotaryEncoder1',
+    ['#' code]}` output action, used by readUSBStream(eventCode)), so the moment this state was
+    entered is known on BOTH Bpod's clock (the state's start time) and the module's clock (the
+    marker event) -- see rotary_stream.py. ENABLE_ALLTHRESHOLDS can't ride along: pybpod-api caps a
+    relay serial message at 3 bytes (`_bpodcom_load_serial_message`), so the caller arms the
+    thresholds over USB right before RUN instead (`arm_for_trial()`). Still ONE relay message fired
+    ONCE per trial, which matters: see CLAUDE.md's "firing a module output a second time within the
+    same trial hangs run_state_machine()" hazard.
+
     :return: (trigger_id, channel) -- pass as (channel, trigger_id) in output_actions.
     """
-    trigger_id = rotary_bpod_module.load_message(
-        [RotaryEncoder.COM_SETZEROPOS, RotaryEncoder.COM_ENABLE_ALLTHRESHOLDS])
+    if marker_code is not None:
+        message = [RotaryEncoder.COM_SETZEROPOS, ord('#'), int(marker_code)]
+    else:
+        message = [RotaryEncoder.COM_SETZEROPOS, RotaryEncoder.COM_ENABLE_ALLTHRESHOLDS]
+    trigger_id = rotary_bpod_module.load_message(message)
     channel = 'Serial{0}'.format(rotary_bpod_module.serial_port)
     return trigger_id, channel
 
 
-def set_and_enable_thresholds(rotary, thresholds_deg):
+# The '#' code every stage script's dot-onset state sends (see build_reset_trigger()) -- well above
+# the rotary's own threshold indices (1-8), so a marker can never be confused with a threshold
+# event code in the stream.
+DOT_ONSET_MARKER_CODE = 101
+
+
+def arm_for_trial(rotary):
+    """ SETZEROPOS then ENABLE_ALLTHRESHOLDS, sent straight over the rotary's USB connection --
+    neither command sends a reply byte, so this is safe while the USB stream is running (unlike
+    set_thresholds()/set_zero_position(), which read one). Called right before RUN (see
+    TrialRunner.run_trial_state_machine(arm_rotary=True)), after the hold-to-init wait has
+    confirmed the wheel is still, so both thresholds are re-armed (the firmware disarms each
+    threshold individually once crossed) relative to a zero taken milliseconds before the trial's
+    first state re-zeroes again via build_reset_trigger(marker_code=...). """
+    rotary.arcom.write_array([RotaryEncoder.COM_SETZEROPOS, RotaryEncoder.COM_ENABLE_ALLTHRESHOLDS])
+
+
+def set_and_enable_thresholds(rotary, thresholds_deg, stream=None):
     """
     Sets and arms every threshold in thresholds_deg (max 6, per set_thresholds()'s own limit), and
     returns the resulting Bpod event name for each, in the same order -- e.g. thresholds_deg[0]'s
     crossing event is the first string returned. Centralizes the "list index -> event number"
     mapping in one place (RotaryEncoder1_<index+1>) instead of every task script re-deriving it by
     hand from a threshold list built alongside separately-named constants.
+
+    Pass the running `RotaryStream` as `stream` once streaming has started: set_thresholds() reads
+    an acknowledgment byte, which must not race the stream (see rotary_stream.py), so it then runs
+    inside `stream.paused()`.
     """
-    rotary.set_thresholds(thresholds_deg)
-    rotary.enable_all_thresholds()
+    if stream is not None:
+        with stream.paused():
+            rotary.set_thresholds(thresholds_deg)
+            rotary.enable_all_thresholds()
+    else:
+        rotary.set_thresholds(thresholds_deg)
+        rotary.enable_all_thresholds()
     return ['RotaryEncoder1_{0}'.format(i + 1) for i in range(len(thresholds_deg))]
 
 

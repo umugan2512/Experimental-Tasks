@@ -150,7 +150,7 @@ GAIN_INITIAL_MULT_DISPLAY_REF = 2.0
 class WheelShapingPlots(object):
 
     def __init__(self, stage, threshold_final_deg, prev_session_values=None, session_status=None,
-                 reward_ul=None, embed=False):
+                 reward_ul=None, embed=False, headless=False):
         """
         :param int stage: 1, 2, 3, 4, or 5 -- controls which panels are meaningful. Stage 1 has no
             direction-ratio withholding and a fixed threshold/decaying gain instead of a staircase.
@@ -293,6 +293,11 @@ class WheelShapingPlots(object):
             height_ratios = [2.2, 0.8, 1.3, 1.0]
 
         self._embed = embed
+        # headless: keep accumulating data but never draw. Stage scripts launched from
+        # run_session.py pass it -- that dashboard draws its own copy from the CSV, this figure is
+        # never shown, and its deferred draw_idle() redraw (~200ms here, more on the rig) used to
+        # run inside the first dot.pump() of the next trial, delaying the dot by 300-470ms.
+        self._headless = headless
         # Stage 2/3/4/5 each get one extra row now (the new staircase-trajectory panel) -- Stage 1
         # doesn't, since it has no within-session, per-trial staircase at all (its own
         # threshold/gain change once per QUALIFYING SESSION, constant within any one session, so
@@ -948,6 +953,8 @@ class WheelShapingPlots(object):
     # --- unified redraw ------------------------------------------------------------------------------
 
     def _redraw(self):
+        if self._headless:
+            return
         self._redraw_raster(self._axes['raster'])
         self._redraw_progress(self._axes['progress'])
         self._redraw_reward_licks(self._axes['reward_licks'])

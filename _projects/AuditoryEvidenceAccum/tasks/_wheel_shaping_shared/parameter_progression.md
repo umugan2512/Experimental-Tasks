@@ -72,6 +72,17 @@ is `clip(Exponential(current_s), floor, ceiling)`.
 | 2 (post-unlock) / 3 / 4 | Per-trial `QuiescenceStaircase`: `+0.025s` after 20 consecutive clean holds (zero resets), `-0.025s` after 5 consecutive holds with at least one reset. Floor `0.1s`, ceiling `0.25s`. | Continuous across Stage 2 → 3 → 4 once unlocked — one ramp, not three. A subject that somehow skips Stage 2 entirely falls back to the fixed `0.1s` in Stage 3/4 rather than crashing. |
 | 5 | Continues the *same* persisted staircase — not a fresh reintroduction. Only advances on sessions where Tag B's selector picks `'quiescence'`; frozen otherwise. | May already be at the `0.25s` ceiling before Stage 5 even starts, if Stage 2/3/4 already got there — expected, not a bug (see "Known quirks"). |
 
+**The dot-onset jitter J1 (0.1-0.2s) is added on top of this, and is part of the hold
+requirement, not a separate delay after it** (since 2026-10-22). The dot may only appear after
+quiescence, and the wheel is zeroed the moment it does:
+- Stage 1/2: the actual per-trial hold is `quiescence + J1` (`QUIESCENCE_HOLD_S`). The dot appears
+  the instant the trial's first state starts.
+- Stage 3/4/5: J1 is a native `DotOnsetDelay` state at the end of the cue machine, guarded by the
+  same wheel-abort thresholds as the cue/delay.
+
+The staircased value above, and the `n_breaks == 0` clean-hold criterion, are unchanged: in Stage
+1/2 a break during the J1 part counts as a break like any other.
+
 **Tag B (Stage 5 only)**: at most one of {movement/response threshold, quiescence} may advance
 in any given Stage 5 session — `select_stage5_staircase_to_tighten()` picks whichever is
 furthest (as a normalized 0-1 fraction) from its own final value, tie-breaking by alternating
