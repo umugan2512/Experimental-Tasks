@@ -80,13 +80,17 @@ through it, on stock and patched pybpod-api alike, and `TrialRunner.register()` 
 `df47a22` stays on that submodule's local branch for history only. The offline suite passes
 against stock `4c9ced5` (checked by putting a `git archive` copy of it first on `PYTHONPATH`).
 
-**Pushing: `push.recurseSubmodules=on-demand`** is set in this repo's and `pybpod`'s local git
-config on this rig, so a plain `git push` at the top level first pushes any submodule commit the
-new gitlinks need (rotary fork, then `pybpod`), then `main`. That only works if those submodules
-are on their `save-local-changes` branch, not a detached HEAD. **Before committing a gitlink,
-check its commit is on that submodule's remote or on the branch that push will send.** After
-pulling on another box: `git submodule update --init --recursive`. The rotary fork's untested,
-never-pushed `12853a4` (display-rate decoupling) now sits on its own local branch,
+**Pushing order: forked submodules first, then `main`.** `records/sync_training_log.py`
+(Sync Training Log) does it: `push_forked_submodules()` pushes the rotary fork's, then `pybpod`'s,
+current branch if it is ahead of its remote. `pinned_commits_pushed()` then refuses to push a
+`main` whose `pybpod`, `pybpod-api` or rotary gitlink isn't on GitHub. For a plain `git push`
+by hand, push the same order yourself:
+`git -C pybpod/plugins/pybpod-gui-plugin-rotaryencoder push origin save-local-changes`, then
+`git -C pybpod push origin save-local-changes`, then `git push origin main`.
+**Don't use `push.recurseSubmodules=on-demand`:** it reuses the superproject's refspec (`main`)
+inside the submodules, which have no `main` branch, and the push fails ("src refspec main must
+name a ref"). After pulling on another box: `git submodule update --init --recursive`. The rotary
+fork's untested, never-pushed `12853a4` (display-rate decoupling) sits on its own local branch,
 `display-rate-decouple`, not on `save-local-changes`.
 
 Each fork's own remotes: `origin` = the fork (push access), `upstream` = the official repo (`git
