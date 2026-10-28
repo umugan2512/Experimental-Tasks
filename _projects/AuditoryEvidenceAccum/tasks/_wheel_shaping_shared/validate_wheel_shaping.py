@@ -1304,6 +1304,58 @@ section19_pass = mono19 and pre_ok and chatter_ok
 print("Section 19 result: {0}".format("PASS" if section19_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
+# Section 20: daily water cap total + session duration on the Bpod clock
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 20: water_consumed_today() across sessions; training-log duration")
+print("=" * 100)
+
+
+def _write_session20(project, name, subject, n_rewarded, lick=True, reward_ul='7.0'):
+    folder = os.path.join(project, 'experiments', 'Stage1', 'setups', 'Stage1', 'sessions', name)
+    os.makedirs(folder)
+    rows = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', 'stage1_wheel_shaping'],
+            ['INFO', 'pc', '', '', 'SUBJECT-NAME', "['{0}', 'x']".format(subject)],
+            ['VAL', 'pc', '', '', 'REWARD_UL', reward_ul]]
+    for i in range(n_rewarded):
+        rows += [['TRIAL', 'pc', '', '', 'New trial', ''],
+                 ['END-TRIAL', 'pc', '', '', 'The trial ended', ''],
+                 ['INFO', 'pc', str(10.0 * i), str(10.0 * i + 1.5), 'TRIAL-BPOD-TIME', '1.5'],
+                 ['STATE', 'pc', '0.5', '0.56', 'Reward', '0.06']]
+        if lick:
+            rows += [['EVENT', 'pc', '0.7', '', '68', 'Port1In'],
+                     ['EVENT', 'pc', '0.75', '', '69', 'Port1Out']]
+    with open(os.path.join(folder, name + '.csv'), 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows)
+    return os.path.join(folder, name + '.csv')
+
+
+proj20 = tempfile.mkdtemp(prefix='daywater_')
+try:
+    _write_session20(proj20, '20261028-090000', 'M1', 10)            # 70 uL
+    _write_session20(proj20, '20261028-100000', 'M1', 5)             # 35 uL
+    _write_session20(proj20, '20261028-110000', 'M1', 5, lick=False) # delivered, never licked
+    _write_session20(proj20, '20261028-120000', 'M2', 50)            # other animal
+    _write_session20(proj20, '20261029-090000', 'M1', 50)            # next day
+    now_csv = _write_session20(proj20, '20261028-130000', 'M1', 3)   # the session now starting
+    tot20, names20 = session_csv_parser.water_consumed_today(proj20, 'M1', '20261028',
+                                                             exclude_session='20261028-130000')
+    dur20 = build_training_log.summarize_session(now_csv)['session_duration_s']
+finally:
+    shutil.rmtree(proj20, ignore_errors=True)
+day_ok = abs(tot20 - 105.0) < 1e-9 and names20 == ['20261028-090000', '20261028-100000']
+print("  same animal + same day only, consumed (licked) water only, current session excluded: "
+      "{0} ({1:.0f} uL from {2})".format(day_ok, tot20, names20))
+dur_ok = dur20 is not None and abs(dur20 - 21.5) < 1e-9
+print("  session duration = last trial end - first trial start on the Bpod clock (21.5 s): "
+      "{0} ({1})".format(dur_ok, dur20))
+
+section20_pass = day_ok and dur_ok
+print("Section 20 result: {0}".format("PASS" if section20_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
 
 print()
 print("=" * 100)
@@ -1312,6 +1364,6 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
-                 section19_pass)
+                 section19_pass and section20_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

@@ -2,7 +2,7 @@ AUDIT 20261027-102843
   [PASS] reward only after the dot is painted                       221 trials ok
   [PASS] dot never frozen before its trial                          ok
   [PASS] dot visible on every painted trial                         ok
-  [PASS] Bpod machine running >= 97% of the session                 98.1% covered; between-machine gaps median 48ms, max 99ms
+  [PASS] Bpod machine running >= 99% of the session, excluding handovers 100.0% (raw 98.1%); between-machine gaps median 48ms, max 99ms
   [PASS] WHEEL_POS has no gap > 100ms                               0 gaps; longest 0.05s at t=574.7s; 57 rows/s
   [PASS] WHEEL_POS rows in time order                               0 out of order
   [PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms) 0.41ms around a +21.5ppm drift

@@ -23,7 +23,8 @@ import session_csv_parser as _scp     # noqa: E402 -- the same robust clock fit 
 
 # --- budgets (see the docstring of each check) ------------------------------------------------------
 BUDGET = {
-    'sm_coverage_min': 0.97,          # fraction of session time inside a running Bpod machine
+    'sm_coverage_min': 0.99,          # fraction of session time inside a running Bpod machine,
+                                      # not counting the normal machine-to-machine handovers
     'wheel_gap_max_s': 0.10,          # longest WHEEL_POS gap (keepalive writes every 50ms)
     'csv_silence_max_s': 0.50,        # longest stretch with no CSV row at all
     'clock_residual_sd_max_ms': 2.0,  # host->Bpod linear fit
@@ -139,10 +140,16 @@ def audit(folder):
         total = spans[-1][1] - spans[0][0]
         covered = sum(b - a for a, b in spans)
         gaps = [c - b for (_, b), (c, _) in zip(spans, spans[1:])]
-        add('Bpod machine running >= {0:.0%} of the session'.format(BUDGET['sm_coverage_min']),
-            covered / total >= BUDGET['sm_coverage_min'],
-            '{0:.1%} covered; between-machine gaps median {1:.0f}ms, max {2:.0f}ms'.format(
-                covered / total, statistics.median(gaps) * 1e3, max(gaps) * 1e3))
+        # The ~50 ms handover between one machine and the next can't be avoided (pybpod can't load
+        # the next machine while one runs) and is budgeted by its own check below; with 1.2 s
+        # trials it alone is 4% of the session. What this check exists to catch is time with no
+        # machine BEYOND that -- e.g. the old hold-wait outside any machine, 24% of a session.
+        handover = sum(g for g in gaps if 0 <= g <= BUDGET['inter_trial_gap_max_ms'] / 1e3)
+        frac = (covered + handover) / total
+        add('Bpod machine running >= {0:.0%} of the session, excluding handovers'.format(
+            BUDGET['sm_coverage_min']), frac >= BUDGET['sm_coverage_min'],
+            '{0:.1%} (raw {1:.1%}); between-machine gaps median {2:.0f}ms, max {3:.0f}ms'.format(
+                frac, covered / total, statistics.median(gaps) * 1e3, max(gaps) * 1e3))
     else:
         add('Bpod machine coverage', None, 'fewer than 2 trials with SM_RUN_TIME')
 

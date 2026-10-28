@@ -117,6 +117,10 @@ def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_r
     return None
 
 
+def _minutes(seconds):
+    return round(seconds / 60.0, 1) if seconds is not None else None
+
+
 def summarize_session(path, parsed=None):
     """ Parses one session CSV and returns a flat dict of everything the training log wants for
     one row, or None if the file has no recognizable protocol name OR the protocol has no
@@ -211,8 +215,19 @@ def summarize_session(path, parsed=None):
                     if main_trial_total else None)
     abort_rate = (wheel_abort_count / float(len(trials))) if trials else None
 
-    all_event_times = [t for trial in trials for times in trial['events'].values() for t in times]
-    session_duration_s = (max(all_event_times) - min(all_event_times)) if all_event_times else None
+    # Session length on the Bpod clock: first trial's start -> last trial's end (TRIAL-BPOD-TIME).
+    # It used to be max - min over every trial's EVENT times, but those are TRIAL-relative, so it
+    # came out as roughly the longest single trial (7.5 s for a 5-minute session).
+    session_duration_s = None
+    starts = [t['bpod_start'] for t in trials if t.get('bpod_start') is not None]
+    ends = [t['bpod_end'] for t in trials if t.get('bpod_end') is not None]
+    if starts and ends and max(ends) > min(starts):
+        session_duration_s = max(ends) - min(starts)
+    else:   # older sessions without TRIAL-BPOD-TIME rows: the session's own start/end stamps
+        _t0 = session_csv_parser.parse_datetime(info.get('SESSION-STARTED', ''))
+        _t1 = session_csv_parser.parse_datetime(info.get('SESSION-ENDED', ''))
+        if _t0 is not None and _t1 is not None and _t1 > _t0:
+            session_duration_s = (_t1 - _t0).total_seconds()
 
     threshold_start_deg = session_csv_parser.find_val_forward(trials, session_vals, 'THRESHOLD_DEG')
     threshold_end_deg = session_csv_parser.find_val_backward(trials, session_vals, 'THRESHOLD_DEG')
@@ -281,6 +296,7 @@ def summarize_session(path, parsed=None):
         'protocol': protocol_name,
         'trial_count': len(trials),
         'session_duration_s': session_duration_s,
+        'session_duration_min': _minutes(session_duration_s),
         'reward_count': reward_count,
         'consumed_reward_count': consumed_reward_count,
         'withheld_count': withheld_count,
@@ -511,6 +527,7 @@ def combine_group(group):
         'num_sessions': len(group) if len(group) > 1 else None,
         'trial_count': sum(s['trial_count'] for s in group),
         'session_duration_s': duration_s,
+        'session_duration_min': _minutes(duration_s),
         'reward_ul': last['reward_ul'],
         'consumed_volume_ul': sum(consumed_vals) if consumed_vals else None,
         'delivered_volume_ul': sum(delivered_vals) if delivered_vals else None,
@@ -595,7 +612,7 @@ COLUMNS = [
                                                          # references weight_after_task_g instead
     ('hand_watered', 'Water given by hand after task'), # MANUAL, TRUE/FALSE
     ('trial_count', 'Trials'),
-    ('session_duration_s', 'Duration (s)'),
+    ('session_duration_min', 'Duration (min)'),   # first trial start -> last trial end
     ('reward_ul', 'Reward Amount (uL)'),            # auto, from the REWARD_UL VAL
     ('consumed_volume_ul', 'Water Consumed (uL)'),  # auto, licked after delivery (same rule as the
                                                      # Stage 1/2 water cap, water_tracker.py)

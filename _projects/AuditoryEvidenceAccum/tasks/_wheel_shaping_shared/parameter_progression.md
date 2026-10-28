@@ -19,7 +19,7 @@ register a response.
 
 | Stage | Within-session | Across-session |
 |---|---|---|
-| 1 | Fixed for the whole session. | Grows once per qualifying session (>200 trials): `+0.02` fraction, ceiling `0.20` (Stage 2's own starting point). Starts at `0.10` (3.5°). |
+| 1 | Fixed for the whole session. | Grows once per qualifying session (≥100 rewarded trials; same-day and Stopped sessions count too): `+0.02` fraction, ceiling `0.20` (Stage 2's own starting point). Starts at `0.10` (3.5°). |
 | 2 | Per-trial `ThresholdStaircase`: `+0.10` after 20 consecutive successes (success = cleared the threshold at all, independent of debiasing withhold), `-0.10` after 5 consecutive failures. Ceiling `1.0`, floor `0.0`. | Persists `threshold_fraction` + both streak counters every session, so a streak survives overnight. |
 | 3 / 4 | Frozen — read once at session start, never updated. | Passthrough only; defaults to `1.0` (Stage 2's ceiling) if a subject somehow skipped Stage 2. |
 | 5 | Resumes the *same* `ThresholdStaircase` mechanism as Stage 2, continuing from whatever Stage 2/4 left persisted — but only on sessions where Tag B's selector (below) picks `'response'`; otherwise frozen for that whole session. | Target for advancement is `0.90` (`STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION`), **not** the staircase's own `1.0` ceiling — the staircase can still step past 0.90, advancement just stops requiring it to. |
@@ -32,7 +32,7 @@ fixed windows — see "Punishment and error/abort ITIs" below.)
 | Stage | Within-session | Across-session |
 |---|---|---|
 | 1 | Fixed `0.5s`. | Never changes. |
-| 2 | Fixed for the whole session. | Grows once per qualifying session (>200 trials): `+0.1s`, ceiling `1.5s`. |
+| 2 | Fixed for the whole session. | Grows once per qualifying session (≥100 rewarded trials; same-day and Stopped sessions count too): `+0.1s`, ceiling `1.5s`. |
 | 3 / 4 | Per-trial `BoundedStaircase`: `+0.25s` after 20 consecutive correct `main` trials, `-0.25s` after 5 consecutive incorrect. Floor `1.5s` (Stage 2's ceiling), ceiling `3.0s`. | Persists `iti_s` + both streak counters, continuous across Stage 3 → 4 (one ramp, not two). |
 | 5 | **Reverts to a fixed constant, `VAR_ITI_S = 1.5s`.** Does not read or write `iti_s` at all. | See "Known quirks" — this discards whatever Stage 3/4 ramped `iti_s` up to. |
 
@@ -88,6 +88,17 @@ in any given Stage 5 session — `select_stage5_staircase_to_tighten()` picks wh
 furthest (as a normalized 0-1 fraction) from its own final value, tie-breaking by alternating
 away from the previous session's pick (persisted as `stage5_last_staircase_advanced`). The
 *inactive* one is fully frozen that session — its counters don't move either.
+
+## Session caps (Stage 1/2)
+
+| Cap | Scope | Value |
+|---|---|---|
+| Trials attempted | per session | `VAR_TRIAL_CAP = 250` |
+| Water **consumed** (licked after delivery) | per animal per **calendar day**, all of its sessions | `VAR_DAILY_WATER_CAP_UL = 1500` |
+| Time | per session | 30 min |
+
+Whichever comes first ends the session. A session started with the day's water already used up
+ends before trial 1 (`SESSION_END_REASON=water_cap`) and doesn't count toward advancement.
 
 ## Punishment and error/abort ITIs (not staircased, any stage)
 
