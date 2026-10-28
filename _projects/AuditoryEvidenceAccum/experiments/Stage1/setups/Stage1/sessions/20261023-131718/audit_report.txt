@@ -1,0 +1,21 @@
+AUDIT 20261023-131718
+[PASS] reward only after the dot is painted  --  41 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[PASS] dot visible on every painted trial  --  ok
+[PASS] Bpod machine running >= 97% of the session  --  98.5% covered; between-machine gaps median 50ms, max 62ms
+[PASS] WHEEL_POS has no gap > 100ms  --  0 gaps; longest 0.05s at t=107.5s; 77 rows/s
+[PASS] WHEEL_POS rows in time order  --  0 out of order
+[PASS] wheel module->PC clock map stable (p95-p5 < 5ms)  --  2.0ms
+[PASS] no CSV-wide silence > 0.5s  --  longest 0.13s after 13:18:10.715197
+[PASS] host->Bpod clock fit residual SD < 2ms  --  0.37ms (max 0.84ms), drift -12.7ppm
+[PASS] camera frame gap < 150ms  --  max 80ms, 28.4fps realized
+[PASS] dot painted within 40ms of DotOn (p95)  --  p95 1.0ms (median 1.0ms, n=40)
+[PASS] dot frozen within 30ms of the outcome (p95)  --  p95 1.0ms (median 0.0ms, n=36)
+[PASS] no render-loop frame > 100ms  --  max 65.0ms (median 3.0ms, n=40)
+[PASS] between-machine gap < 150ms  --  max 55.5ms (median 43.1ms, n=39)
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[FAIL] rotary reader never stalls > 50ms  --  max 79.0ms (median 15.0ms, n=40)
+[PASS] rotary '#' marker logged on every trial that reached the response state  --  0/40 missing
+[PASS] no crash in the task (SESSION_ERROR / stderr traceback)  --  none
+[INFO] Bpod->PC SoftCode numbers  --  1=DotOnRequest,2=OutcomeFreeze
+[PASS] no warnings/errors logged  --  none
