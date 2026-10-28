@@ -944,7 +944,7 @@ class PlotFeeder(object):
 
         lick_times_abs = []
         if anchor is not None:
-            lick_times_abs = [anchor + t for t in trial['events'].get('Port1In', [])]
+            lick_times_abs = [anchor + t for t in session_csv_parser.trial_licks(trial)]
         kwargs['lick_times_abs'] = lick_times_abs
 
         reward_state_name = _OUTCOME_STATE_NAME.get(self.protocol_name, {}).get('rewarded')

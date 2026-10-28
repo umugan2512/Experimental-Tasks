@@ -25,6 +25,12 @@ import os
 # instead accumulated into a list, in registration order, preserving every sample.
 STREAM_KEYS = ('WHEEL_POS', 'QUIESCENCE_RESET_TIME', 'WHEEL_CLOCK_OFFSET')
 
+# VALs the task registers for a trial BEFORE that trial's own TRIAL row is written (TRIAL_INIT_START
+# is registered before the Bpod thread starts, on purpose -- see install_session_lock()). Seen while
+# no trial is open (after END-TRIAL, before the next TRIAL), they are held and filed under the next
+# trial instead of the previous one. Registered inside an open trial (older sessions), unchanged.
+PRE_TRIAL_KEYS = ('TRIAL_INIT_START',)
+
 # --- per-protocol state/event meaning -- extend as new protocols (Stage 3+) are built ---------------
 
 PROTOCOL_CONFIG = {
@@ -138,7 +144,8 @@ def parse_session_csv(path):
 
 
 def _new_parse_state():
-    return {'info': {}, 'session_vals': {}, 'trials': [], 'current': None}
+    return {'info': {}, 'session_vals': {}, 'trials': [], 'current': None, 'open': False,
+            'pending': []}
 
 
 def _consume_row(state, row):
@@ -159,6 +166,12 @@ def _consume_row(state, row):
     elif row_type == 'TRIAL':
         state['current'] = {'states': {}, 'events': {}, 'vals': {}}
         state['trials'].append(state['current'])
+        state['open'] = True
+        for key, value in state['pending']:
+            _add_val(state['current'], key, value)
+        state['pending'] = []
+    elif row_type == 'END-TRIAL':
+        state['open'] = False
     elif row_type == 'STATE' and len(row) > 5:
         if current is not None:
             current['states'][row[4]] = (_parse_float(row[2]), _parse_float(row[3]),
@@ -169,13 +182,50 @@ def _consume_row(state, row):
             current['events'].setdefault(row[5], []).append(t)
     elif row_type == 'VAL' and len(row) > 5:
         key, value = row[4], row[5]
-        if current is not None:
-            if key in STREAM_KEYS:
-                current['vals'].setdefault(key, []).append(value)
-            else:
-                current['vals'][key] = value
+        if key in PRE_TRIAL_KEYS and not state['open']:
+            state['pending'].append((key, value))
+        elif current is not None:
+            _add_val(current, key, value)
+        elif key in STREAM_KEYS:
+            # wheel samples logged before trial 1 belong to the wheel trace (filed under trial 1,
+            # where wheel_samples_bpod_time() places them by module time) -- not a session scalar
+            state['pending'].append((key, value))
         else:
             state['session_vals'][key] = value
+
+
+# A Port1In that follows the previous Port1Out by less than this is the lick sensor breaking one
+# tongue contact in two (QC of 20261027-102843: 17% of inter-lick intervals sat in a separate
+# 25-30 ms mode, Out->In gap median 15 ms, against a 137 ms lick mode). Analysis side only: the raw
+# EVENT and LICK_TIMES_* rows always keep every edge as recorded.
+LICK_CHATTER_GAP_S = 0.040
+
+
+def merge_lick_chatter(lick_ins, lick_outs, min_gap_s=LICK_CHATTER_GAP_S):
+    """ Port1In times with every In that follows the preceding Port1Out by < min_gap_s dropped --
+    one count per tongue contact. Times may be on any clock, as long as ins and outs share it. """
+    ins, outs = sorted(lick_ins or []), sorted(lick_outs or [])
+    kept, j, last_out = [], 0, None
+    for t in ins:
+        while j < len(outs) and outs[j] <= t:
+            last_out = outs[j]
+            j += 1
+        if kept and last_out is not None and last_out >= kept[-1] and t - last_out < min_gap_s:
+            continue
+        kept.append(t)
+    return kept
+
+
+def trial_licks(trial):
+    """ This trial's Port1In times (trial-relative), sensor chatter merged. """
+    return merge_lick_chatter(trial['events'].get('Port1In', []), trial['events'].get('Port1Out', []))
+
+
+def _add_val(trial, key, value):
+    if key in STREAM_KEYS:
+        trial['vals'].setdefault(key, []).append(value)
+    else:
+        trial['vals'][key] = value
 
 
 class IncrementalSessionParser(object):

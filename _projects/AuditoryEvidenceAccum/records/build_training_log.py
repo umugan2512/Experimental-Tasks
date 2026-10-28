@@ -200,7 +200,7 @@ def summarize_session(path, parsed=None):
             l_count += 1
         elif side == 'R':
             r_count += 1
-        lick_count += len(trial['events'].get('Port1In', []))
+        lick_count += len(session_csv_parser.trial_licks(trial))   # chatter merged
 
         if trial_type == 'warmup':
             warmup_trial_count += 1

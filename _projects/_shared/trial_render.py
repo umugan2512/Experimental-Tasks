@@ -126,8 +126,12 @@ def register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_retu
       answer arrived -- on the host clock (send_t + Bpod-relative start)
     - DOT_ONSET_PAINT_TIME, DOT_FREEZE_TIME/_SOURCE, DOT_VISIBLE_S (paint -> clear)
     - RENDER_MAX_FRAME_MS, RENDER_ONSET_LATENCY_MS, DOT_FREEZE_LATENCY_MS
-    - INTER_TRIAL_GAP_MS: previous Bpod call returning -> this RUN (the only time no state
-      machine is running), STREAM_MAX_READ_GAP_MS, WHEEL_LOG_LOCK_MAX_MS """
+    - INTER_TRIAL_GAP_MS: HOST-side, previous Bpod call returning -> this RUN write. The Bpod's
+      own dead time (previous machine's end -> this machine's start, Bpod clock) runs ~22 ms
+      longer (QC of 20261027-102843: -25.6 to -18.6 ms, p5-p95): it also includes USB transfer
+      and pybpod reading the trial's final events. Licks in that ~48 ms window per trial are
+      not logged -- mask it in lick analyses.
+    - STREAM_MAX_READ_GAP_MS, WHEEL_LOG_LOCK_MAX_MS """
     reg = runner.register
     if quiescence_hold_s is not None:
         reg('QUIESCENCE_HOLD_S', quiescence_hold_s)

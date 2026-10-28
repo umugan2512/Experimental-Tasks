@@ -68,15 +68,26 @@ upstream, so both are pinned to a fork (not the official repo) on a branch liter
   restructuring, `cd` into it and run `git status`/`git diff` directly** — a submodule flagged dirty
   in the parent's own `git status` may be carrying real, load-bearing, never-upstreamed work.
 
-**`pybpod/base/pybpod-api` is NOT forked** — its `origin` is still the official
-`github.com/pybpod/pybpod-api.git`, with no push access — worth knowing before editing anything
-under it. It currently carries a **local-only, unpushed** commit on a `save-local-changes` branch
-created inside that submodule: an optional `flush=False` parameter threaded through
-`BpodBase.register_value()` -> a new `Session.add_message(msg, flush=True)` (plus a
-`FLUSH_INTERVAL_S = 0.05` forced-flush floor), so a high-frequency VAL stream could skip its
-per-write `csvwriter.flush()`. Nothing passes `flush=False` today (the `TrialRunner` change that
-would have was reverted — see "Hardware module notes"), so it is inert, but it will be lost on any
-fresh clone until someone creates a `umugan2512/pybpod-api` fork and pushes that branch to it.
+**`pybpod/base/pybpod-api` is NOT forked, and is pinned to the official v1.8.2 release
+(`4c9ced5`)** — its `origin` is the official `github.com/pybpod/pybpod-api.git`, with no push
+access, so **never pin it to a local commit**. It used to be pinned to a local-only
+`save-local-changes` commit (`df47a22`, `add_message(msg, flush)` + `register_value(flush=)`),
+which exists on no remote: every other computer failed `git submodule update` with "pointing to a
+commit that doesn't exist" (fixed 2026-10-28). What that commit provided now lives in this repo:
+`_shared/bpod_trial_helpers.install_session_lock()` installs a locked `Session.add_message(msg,
+flush)` (with a `SESSION_FLUSH_INTERVAL_S = 0.05` forced-flush floor) and routes `Session.__add__`
+through it, on stock and patched pybpod-api alike, and `TrialRunner.register()` writes through it.
+`df47a22` stays on that submodule's local branch for history only. The offline suite passes
+against stock `4c9ced5` (checked by putting a `git archive` copy of it first on `PYTHONPATH`).
+
+**Pushing: `push.recurseSubmodules=on-demand`** is set in this repo's and `pybpod`'s local git
+config on this rig, so a plain `git push` at the top level first pushes any submodule commit the
+new gitlinks need (rotary fork, then `pybpod`), then `main`. That only works if those submodules
+are on their `save-local-changes` branch, not a detached HEAD. **Before committing a gitlink,
+check its commit is on that submodule's remote or on the branch that push will send.** After
+pulling on another box: `git submodule update --init --recursive`. The rotary fork's untested,
+never-pushed `12853a4` (display-rate decoupling) now sits on its own local branch,
+`display-rate-decouple`, not on `save-local-changes`.
 
 Each fork's own remotes: `origin` = the fork (push access), `upstream` = the official repo (`git
 fetch upstream` to pull in future official releases without losing the local branch). Each fork's
@@ -930,6 +941,25 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     (the firmware only streams changes). Rows are `t,pos,t_module`, so
     `wheel_samples_bpod_time()` places each one on the Bpod clock exactly. The module->PC map is a
     never-reset lower envelope (it used to restart high after still periods: 30 ms jitter).
+  - **Follow-ups from the independent QC of `20261027-102843` (2026-10-28):**
+    - The audit's wheel clock-map check is detrended. The module and PC crystals differ by
+      ~20 ppm, so the raw offset ramps over a session (82→95 ms), and undetrended it failed every
+      session longer than ~4 min. Residual spread: 0.41 ms. The reader-stall check excludes
+      trial 1 (stream start-up) and names any trial over budget.
+    - Keepalive `WHEEL_POS` rows' module time (an estimate, host − offset) is clamped between the
+      previous row's and the next real sample's, so the third field never steps backward.
+    - Parser: `TRIAL_INIT_START` (`PRE_TRIAL_KEYS`) registered between `END-TRIAL` and the next
+      `TRIAL` is filed under the next trial. It used to land one trial early. Stream rows logged
+      before trial 1 are filed under trial 1, instead of collapsing to a `session_vals` scalar.
+    - **Lick sensor chatter:** ~17% of inter-lick intervals are 25–30 ms, an In ~15 ms after the
+      previous Out (one contact broken in two). `session_csv_parser.merge_lick_chatter()`
+      (`LICK_CHATTER_GAP_S = 0.040`) / `trial_licks()` merge them for derived counts: the
+      training log's `Licks` and the dashboard rasters. Raw `EVENT`/`LICK_TIMES_*` rows are
+      untouched.
+    - **Known, not fixed: ~48 ms per trial with no lick logging**, at the ITI→next-machine
+      handover, because pybpod can't load the next machine while one runs. Mask that window in
+      lick analyses (0.559–0.607 s post-reward in that session). `INTER_TRIAL_GAP_MS` is the
+      host-side gap and runs ~22 ms shorter than the Bpod's own dead time.
   - **To check a session: `python records/audit_session.py <session_folder>`.** It gives PASS/FAIL
     for: dot before reward, dot never frozen early, state-machine coverage ≥ 97%, no wheel/CSV
     gaps, clock fit, camera gaps, and render/onset/freeze/between-machine/reader-stall budgets. The

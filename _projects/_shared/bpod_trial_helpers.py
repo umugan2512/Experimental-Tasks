@@ -50,6 +50,10 @@ import time
 from collections import deque
 
 from pybpodapi.protocol import Bpod, StateMachine
+try:
+    from pybpodapi.com.messaging.value import ValueMessage
+except ImportError:   # a test double standing in for pybpodapi -- register() then uses register_value()
+    ValueMessage = None
 
 import rotary_setup
 from rotary_stream import RotaryStream
@@ -90,6 +94,9 @@ def _name_pc_events(bpod):
             names[names.index(generic)] = name
 
 
+SESSION_FLUSH_INTERVAL_S = 0.05   # flush=False writes still reach disk at least this often
+
+
 def install_session_lock():
     """ Makes pybpodapi's Session.add_message() thread-safe (patched once per process; idempotent).
 
@@ -107,17 +114,44 @@ def install_session_lock():
         from pybpodapi import session as _session
     except ImportError:
         return   # a test double standing in for pybpodapi (no real Session to protect)
-    if getattr(_session.Session.add_message, '_lab_locked', False):
+    Session = _session.Session
+    if getattr(Session, '_lab_locked', False):
         return
-    original = _session.Session.add_message
     lock = threading.RLock()   # reentrant: a print() from inside a write must not deadlock
+
+    original = getattr(Session, 'add_message', None)
+    if original is None:
+        # Stock pybpod-api (v1.8.2, what every fresh clone gets): no add_message() and no
+        # per-message flush control -- __add__ does the write and always flushes. Install the
+        # lab's add_message(msg, flush) here instead of depending on an unpushed pybpod-api commit:
+        # same body as stock __add__, the disk flush skipped when flush=False but forced at least
+        # every SESSION_FLUSH_INTERVAL_S, so a crash loses at most that much of the CSV.
+        from pybpodapi.com.messaging.trial import Trial
+
+        def original(self, msg, flush=True):
+            if isinstance(msg, Trial):
+                self.trials.append(msg)
+            elif self.current_trial is not None:
+                self.current_trial += msg
+            self.history.append(msg)
+            if self.csvwriter:
+                self.csvwriter.writerow(msg.tolist())
+                now = time.time()
+                if flush or now - getattr(self, '_lab_last_flush', 0.0) >= SESSION_FLUSH_INTERVAL_S:
+                    self.csvwriter.flush()
+                    self._lab_last_flush = now
+            return self
 
     def add_message(self, msg, flush=True):
         with lock:
             return original(self, msg, flush=flush)
 
-    add_message._lab_locked = True
-    _session.Session.add_message = add_message
+    def __add__(self, msg):
+        return add_message(self, msg, flush=True)
+
+    Session.add_message = add_message
+    Session.__add__ = __add__   # `session += msg` (every pybpod write) goes through the lock too
+    Session._lab_locked = True
 
 
 def _set_windows_timer_resolution(enable):
@@ -236,6 +270,7 @@ class TrialRunner(object):
         self.last_marker = None          # (module_t, host_t) of that marker, this trial
         self._uploaded_sma = None
         self._wheel_log_last = None      # (host_t, pos) of the last WHEEL_POS row written
+        self._wheel_log_last_module_t = None   # its module time -- keeps that field monotonic
         self._wheel_log_pumped_at = 0.0
         self._wheel_log_lock = threading.Lock()
 
@@ -298,7 +333,13 @@ class TrialRunner(object):
 
     def register(self, key, value, flush=True):
         with self.register_lock:
-            self.bpod.register_value(key, value, flush=flush)
+            session = getattr(self.bpod, 'session', None)
+            if ValueMessage is not None and getattr(type(session), '_lab_locked', False):
+                # install_session_lock()'s add_message() exists on stock and patched pybpod-api
+                # alike; register_value() only takes flush= on the rig's old local patch.
+                session.add_message(ValueMessage(key, value), flush=flush)
+            else:
+                self.bpod.register_value(key, value)   # test doubles
 
     # --- wheel position ----------------------------------------------------------------------------
 
@@ -376,6 +417,7 @@ class TrialRunner(object):
                     n = int((now - last[0]) / WHEEL_LOG_MIN_INTERVAL_S)
                     samples = [(last[0] + k * WHEEL_LOG_MIN_INTERVAL_S - offset,
                                 last[0] + k * WHEEL_LOG_MIN_INTERVAL_S, pos) for k in range(1, n + 1)]
+            last_mod = self._wheel_log_last_module_t
             for module_t, host_t, pos in samples:
                 if last is not None:
                     # The firmware streams every position change, so between the previous row and
@@ -384,18 +426,29 @@ class TrialRunner(object):
                     k = 1
                     while host_t - (last[0] + k * WHEEL_LOG_MIN_INTERVAL_S) > 1e-6:
                         fill_t = last[0] + k * WHEEL_LOG_MIN_INTERVAL_S
+                        # A fill row's module time is only an estimate (host - offset); keep it
+                        # between the previous row's and this real sample's, so module times never
+                        # step backward (QC of 20261027-102843: 5 steps of up to 1.9 ms).
+                        fill_mod = min(fill_t - (offset or 0.0), module_t)
+                        if last_mod is not None:
+                            fill_mod = max(fill_mod, last_mod)
                         self.register('WHEEL_POS', '{0:.4f},{1:.2f},{2:.6f}'.format(
-                            fill_t, last[1], fill_t - (offset or 0.0)), flush=False)
+                            fill_t, last[1], fill_mod), flush=False)
+                        last_mod = fill_mod
                         k += 1
                     if k > 1:
                         last = (last[0] + (k - 1) * WHEEL_LOG_MIN_INTERVAL_S, last[1])
                     if pos == last[1] and host_t - last[0] < WHEEL_LOG_MIN_INTERVAL_S - 1e-6:
                         continue
                     host_t = max(host_t, last[0])
+                if last_mod is not None:
+                    module_t = max(module_t, last_mod)   # only a keepalive estimate can be later
                 self.register('WHEEL_POS', '{0:.4f},{1:.2f},{2:.6f}'.format(host_t, pos, module_t),
                               flush=False)
                 last = (host_t, pos)
+                last_mod = module_t
             self._wheel_log_last = last
+            self._wheel_log_last_module_t = last_mod
             if offset is not None:
                 self.register('WHEEL_CLOCK_OFFSET', '{0:.6f}'.format(offset))
             self._wheel_log_pumped_at = time.time()

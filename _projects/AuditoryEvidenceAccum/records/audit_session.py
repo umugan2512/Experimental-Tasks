@@ -173,12 +173,23 @@ def audit(folder):
             if r[4] == 'WHEEL_POS':
                 last_t = _f(r[5].split(',')[0])
             elif r[4] == 'WHEEL_CLOCK_OFFSET' and last_t is not None and last_t > 5.0:
-                offsets.append(_f(r[5]))
+                offsets.append((last_t, _f(r[5])))
     if len(offsets) > 10:
-        jitter = (_pct(offsets, .95) - _pct(offsets, .05)) * 1e3
-        add('wheel module->PC clock map stable (p95-p5 < {0:.0f}ms)'.format(
+        # Detrended: the module and PC crystals differ by a steady few tens of ppm, so the offset
+        # ramps linearly over a session (82 -> 95 ms over 10 min in 20261027-102843, 21.5 ppm).
+        # That ramp is harmless -- samples are placed by module time relative to each trial's own
+        # marker -- and undetrended it failed every session longer than ~4 min. Jitter around
+        # the line is what would misplace samples.
+        n = len(offsets)
+        mx = sum(t for t, _ in offsets) / n
+        my = sum(o for _, o in offsets) / n
+        sxx = sum((t - mx) ** 2 for t, _ in offsets)
+        slope = sum((t - mx) * (o - my) for t, o in offsets) / sxx if sxx > 0 else 0.0
+        resid = [o - (my + slope * (t - mx)) for t, o in offsets]
+        jitter = (_pct(resid, .95) - _pct(resid, .05)) * 1e3
+        add('wheel module->PC clock map stable (detrended p95-p5 < {0:.0f}ms)'.format(
             BUDGET['offset_jitter_max_ms']), jitter < BUDGET['offset_jitter_max_ms'],
-            '{0:.1f}ms'.format(jitter))
+            '{0:.2f}ms around a {1:+.1f}ppm drift'.format(jitter, slope * 1e6))
     else:
         add('wheel clock map stability', None, 'too few WHEEL_CLOCK_OFFSET rows')
 
@@ -243,14 +254,22 @@ def audit(folder):
                 'max {0:.0f}ms, {1:.1f}fps realized'.format(g, (len(cam) - 1) / (cam[-1] - cam[0])))
 
     # 7. latency / freeze instrumentation (registered per trial since 2026-10-23)
-    def budget_check(key, label, limit, stat):
-        vals = [x for x in (_val(t, key) for t in trials) if x is not None]
+    def budget_check(key, label, limit, stat, skip_first=False):
+        vals = [(i, x) for i, x in enumerate((_val(t, key) for t in trials), 1) if x is not None]
+        note = ''
+        if skip_first and vals and vals[0][0] == 1:
+            vals = vals[1:]
+            note = ', trial 1 excluded'
         if not vals:
             add(label, None, 'no {0} rows'.format(key))
             return
-        v = _pct(vals, 0.95) if stat == 'p95' else max(vals)
-        add(label, v < limit, '{0} {1:.1f}ms (median {2:.1f}ms, n={3})'.format(
-            stat, v, statistics.median(vals), len(vals)))
+        xs = [x for _, x in vals]
+        v = _pct(xs, 0.95) if stat == 'p95' else max(xs)
+        over = [i for i, x in vals if x >= limit]
+        add(label, v < limit, '{0} {1:.1f}ms (median {2:.1f}ms, n={3}{4}){5}'.format(
+            stat, v, statistics.median(xs), len(xs), note,
+            '; over budget on trial(s) {0}'.format(', '.join(str(i) for i in over[:10]))
+            if stat == 'max' and over else ''))
     budget_check('RENDER_ONSET_LATENCY_MS', 'dot painted within {0:.0f}ms of DotOn (p95)'.format(
         BUDGET['onset_latency_p95_max_ms']), BUDGET['onset_latency_p95_max_ms'], 'p95')
     budget_check('DOT_FREEZE_LATENCY_MS', 'dot frozen within {0:.0f}ms of the outcome (p95)'.format(
@@ -262,7 +281,8 @@ def audit(folder):
     budget_check('CUE_TO_CHOICE_GAP_MS', 'cue->choice machine gap < {0:.0f}ms (Stage 3-5)'.format(
         BUDGET['inter_trial_gap_max_ms']), BUDGET['inter_trial_gap_max_ms'], 'max')
     budget_check('STREAM_MAX_READ_GAP_MS', 'rotary reader never stalls > {0:.0f}ms'.format(
-        BUDGET['stream_read_gap_max_ms']), BUDGET['stream_read_gap_max_ms'], 'max')
+        BUDGET['stream_read_gap_max_ms']), BUDGET['stream_read_gap_max_ms'], 'max',
+        skip_first=True)   # trial 1 includes the stream's start-up
 
     # 8. markers + warnings
     with_resp = [t for t in ran if any(t['states'].get(s) is not None and not math.isnan(t['states'][s])

@@ -1241,6 +1241,69 @@ section18_pass = c1 and c2 and c3 and c4
 print("Section 18 result: {0}".format("PASS" if section18_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
+# Section 19: QC follow-ups -- monotonic keepalive module times, pre-trial VALs, lick chatter
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 19: keepalive module times, TRIAL_INIT_START / pre-trial wheel rows, lick chatter")
+print("=" * 100)
+
+# (a) a fill row's module time is an estimate (host - offset); with the offset estimate moving
+# DOWN between flushes it used to land after the next real sample's module time
+fb19 = _FakeBpod()
+r19 = _bth.TrialRunner(fb19, None, _time.time(), use_stream=False)
+r19.stream = _FakeStream()
+t19 = r19._now()
+r19.stream.add(t19, 1.0)
+r19.flush_wheel_log()
+r19.stream.off = 0.2475                       # map tightened by 2.5 ms
+r19.stream.add(t19 + 0.251, 2.0)              # real sample 1 ms after a fill row
+r19.stream.samples[-1] = r19.stream.queue[-1] = (t19 + 0.251 - 0.2500, t19 + 0.251, 2.0)
+r19.flush_wheel_log()
+mods19 = [float(v.split(',')[2]) for k, v in fb19.rows if k == 'WHEEL_POS']
+mono19 = all(b >= a for a, b in zip(mods19, mods19[1:]))
+print("  module times never step backward across keepalive fill rows: {0} ({1} rows)".format(
+    mono19, len(mods19)))
+
+# (b) parser: TRIAL_INIT_START registered between END-TRIAL and the next TRIAL belongs to the next
+# trial; WHEEL_POS rows before trial 1 are kept (filed under trial 1)
+tmp19 = tempfile.mkdtemp(prefix='pretrial_')
+try:
+    p19 = os.path.join(tmp19, 's.csv')
+    rows19 = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', 'stage1_wheel_shaping'],
+              ['VAL', 'pc', '', '', 'WHEEL_POS', '0.1,0.0,0.05'],
+              ['VAL', 'pc', '', '', 'WHEEL_POS', '0.15,0.0,0.10'],
+              ['VAL', 'pc', '', '', 'TRIAL_INIT_START', '1.0'],
+              ['TRIAL', 'pc', '', '', 'New trial', ''],
+              ['VAL', 'pc', '', '', 'WHEEL_POS', '1.1,0.5,1.05'],
+              ['END-TRIAL', 'pc', '', '', 'The trial ended', ''],
+              ['VAL', 'pc', '', '', 'OUTCOME', 'Rewarded'],
+              ['VAL', 'pc', '', '', 'TRIAL_INIT_START', '2.0'],
+              ['TRIAL', 'pc', '', '', 'New trial', ''],
+              ['VAL', 'pc', '', '', 'TRIAL_INIT_START', '9.0'],    # older sessions: inside the trial
+              ['END-TRIAL', 'pc', '', '', 'The trial ended', '']]
+    with open(p19, 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows19)
+    _i19, sv19, tr19 = session_csv_parser.parse_session_csv(p19)
+finally:
+    shutil.rmtree(tmp19, ignore_errors=True)
+pre_ok = (tr19[0]['vals'].get('TRIAL_INIT_START') == '1.0'
+          and tr19[1]['vals'].get('TRIAL_INIT_START') == '9.0'
+          and tr19[0]['vals'].get('OUTCOME') == 'Rewarded'
+          and len(tr19[0]['vals'].get('WHEEL_POS', [])) == 3 and 'WHEEL_POS' not in sv19
+          and 'TRIAL_INIT_START' not in sv19)
+print("  TRIAL_INIT_START filed under its own trial, pre-trial-1 wheel rows kept: {0}".format(pre_ok))
+
+# (c) lick chatter: an In < 40 ms after the previous Out is the same contact
+merged19 = session_csv_parser.merge_lick_chatter([0.00, 0.05, 0.30, 0.45], [0.03, 0.08, 0.33, 0.48])
+chatter_ok = merged19 == [0.00, 0.30, 0.45]
+print("  In 20 ms after an Out merged, 120 ms after kept: {0} {1}".format(chatter_ok, merged19))
+
+section19_pass = mono19 and pre_ok and chatter_ok
+print("Section 19 result: {0}".format("PASS" if section19_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
 
 print()
 print("=" * 100)
@@ -1248,6 +1311,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
-                 section17_pass and section18_pass)
+                 section17_pass and section18_pass and
+                 section19_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
