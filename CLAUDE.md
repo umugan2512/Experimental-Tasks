@@ -982,7 +982,7 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     150 ms between-machine budget, which has its own check) and requires ≥ 99% of the rest. With
     1.2 s trials the ~49 ms handover alone is 4%, so the old raw ≥ 97% check failed every
     fast session. It still fails the old hold-wait-outside-a-machine design (76%).
-  - **The training log's `Duration (s)` is on the Bpod clock** (first trial start → last trial
+  - **The training log's `Duration (min)` is on the Bpod clock** (first trial start → last trial
     end). It used to be max − min over trial-RELATIVE event times, i.e. roughly the longest single
     trial (7.5 s for a 5-min session), for every row ever written.
   - **To check a session: `python records/audit_session.py <session_folder>`.** It gives PASS/FAIL
