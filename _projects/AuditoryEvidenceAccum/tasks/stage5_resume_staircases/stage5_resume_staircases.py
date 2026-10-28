@@ -72,7 +72,8 @@ import session_csv_parser
 import debiasing
 import click_train_v2 as click_train
 from wheel_shaping_plots import WheelShapingPlots
-from bpod_trial_helpers import TrialRunner, was_visited
+from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
+from trial_render import run_trial_render_loop, register_trial_timing
 import rotary_setup
 import hifi_setup
 import dot_display
@@ -103,7 +104,12 @@ def _cleanup_and_export():
         runner.register('SESSION_WATER_UL', session_reward_count * VAR_REWARD_UL)
     except Exception as err:
         print("WARNING: could not register SESSION_WATER_UL: {0}".format(err), flush=True)
+    runner.stop()   # writes the last buffered wheel samples, then stops the rotary's USB stream --
+                     # before rotary.close() and my_bpod.close(), which it needs.
     camera.close()
+    realized_fps = camera.compute_realized_fps()
+    if realized_fps is not None:
+        my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
     dot.close()
     hifi.close()
     rotary.close()
@@ -171,7 +177,8 @@ VAR_STEADY_THRESHOLD_DEG = 4
 VAR_RESPONSE_TIMEOUT_S = 5.0
 
 VAR_THRESHOLD_FINAL_DEG = 35
-VAR_TRIAL_COUNT_ADVANCE = 200        # doc: ">=200 trials/session" (MAIN trials only)
+VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per explicit
+                                      # instruction. (MAIN trials only)
 
 VAR_STIM_DURATION_S = 0.25           # unchanged from Stage 4 -- extended only from Stage 6 onward
 VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
@@ -202,7 +209,8 @@ VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # env var 
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1
-VAR_DOT_ONSET_JITTER_MAX_S = 0.2
+VAR_DOT_ONSET_JITTER_MAX_S = 0.2     # (now a native, abort-guarded DotOnsetDelay state at the
+                                     # end of cue_sma -- see the trial loop)
 VAR_DOT_DISAPPEAR_MIN_S = 0.4
 VAR_DOT_DISAPPEAR_MAX_S = 0.9
 
@@ -229,9 +237,17 @@ VAR_SUBCHANCE_BLOCK_SIZE = 20
 VAR_SUBCHANCE_BLOCKS = 3
 
 VAR_ROTARY_USB_PORT = None
-VAR_STILL_POLL_HZ = 100              # additions.txt T4: NEEDS ON-RIG CONFIRMATION that the poll
-VAR_POLL_HZ = 100                    # thread keeps up without delaying state-machine handling --
-                                      # if not, fall back to 50/50 and note which rate was used.
+VAR_STILL_POLL_HZ = 100              # how often the hold-to-init check re-evaluates the streamed
+                                      # samples. The wheel's own sample rate is set by the rotary
+                                      # firmware's USB stream, not by this (see rotary_stream.py).
+VAR_POLL_HZ = 100                    # unused in stream mode (polling-mode TrialRunner only)
+
+SOFTCODE_DOT_ON = 1                  # sent by DotOn's entry: draw the dot (and answer once painted)
+VAR_DOT_HANDSHAKE_TIMEOUT_S = 1.0    # DotOn -> DotTimeout if the PC hasn't confirmed the dot by then
+VAR_WAIT_QUIESCENCE_MAX_S = 3600.0   # WaitQuiescence's own timer ("as long as it takes")
+SOFTCODE_CROSSED = 2                 # sent by Reward/ErrorConsumption's entry: freeze the dot
+SOFTCODE_PUNISH = 3                  # sent by AbortPunish/ErrorPunish's entry: white screen flash,
+                                     # in lockstep with the native LED pulse
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (abort / incorrect
                                       # choice) -- the dot alone is the go cue, see WheelDotPeriod.
@@ -287,7 +303,22 @@ my_bpod = Bpod()
 print("Connected to Bpod on {0}".format(my_bpod.serial_port), flush=True)
 
 rotary, rotary_bpod_module = rotary_setup.connect_rotary(my_bpod, usb_port=VAR_ROTARY_USB_PORT)
-reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(rotary_bpod_module)
+reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(
+    rotary_bpod_module, marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
+
+# Armed once here, before the stream starts; the trial loop only re-sets them (inside
+# stream.paused()) when the response staircase actually moves. Quiescence itself is judged by
+# wait_for_held_steady()'s rolling-window check on the streamed samples, never by these events, and
+# each trial's cue_sma/sma re-zero and re-arm them right before RUN (arm_rotary=True), so a crossing
+# during the hold can't pre-empt the in-trial abort/response logic.
+_start_response_threshold_deg = threshold_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG
+applied_thresholds = [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
+                      -_start_response_threshold_deg, _start_response_threshold_deg,
+                      -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG]
+event_names = rotary_setup.set_and_enable_thresholds(rotary, applied_thresholds)
+rotary.enable_evt_transmission()   # once per session, never toggled (MATLAB's sendThresholdEvents)
+left_event, right_event = event_names[2], event_names[3]
+wheel_abort_event_neg, wheel_abort_event_pos = event_names[4], event_names[5]
 
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
@@ -298,13 +329,22 @@ VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibra
 my_bpod.register_value('GIT_COMMIT', _git_commit())
 my_bpod.register_value('STAIRCASE_ACTIVE_THIS_SESSION', active_staircase)
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze,3=PunishFlash')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
+# What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
+# session's quota) -- registered so a surprisingly short session is traceable to its cause.
+my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.get('used_trials', 0))
+my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
+                       ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
-                      poll_hz=VAR_POLL_HZ)
+                      poll_hz=VAR_POLL_HZ, use_stream=True,
+                      marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
+runner.start()   # starts the rotary's own session-long USB stream (see rotary_stream.py) -- from
+                  # here on, never call an ack-reading rotary command directly.
 
 dot = dot_display.create_dot_display()
 dot.show()
@@ -329,7 +369,8 @@ bench_plots = WheelShapingPlots(
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
-    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
+    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'),
+    headless=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
 
 print("Starting Stage 5 -- staircase active this session: {0} (response threshold {1:.1f}deg = "
       "{2:.0%} of final, quiescence scale {3:.3f}s)".format(
@@ -408,41 +449,15 @@ while True:
             np.clip(np.random.exponential(cur_quiescence_s),
                     staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
 
-        # Thresholds are armed AFTER the hold-to-init succeeds, not before -- quiescence itself is
-        # governed by wait_for_held_steady()'s own rolling-window check on raw current_position(),
-        # never by these Bpod-native threshold-crossing events (same order as every other stage's
-        # trial loop; arming them earlier would let a stray crossing during the hold pre-empt the
-        # in-trial-abort/response logic before the trial has even properly started).
-        rotary.disable_evt_transmission()
-        n_breaks = runner.wait_for_held_steady(quiescence_duration_this_trial,
-                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=False)
-        if n_breaks is None:
-            print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
-                  "{0}.".format(trial), flush=True)
-            break
-        trial_start_t = time.time() - log_python_t0
-        last_initiation_time = time.time()
-
-        if active_staircase == 'quiescence':
-            quiescence_obj.record_outcome(success=(n_breaks == 0))
-
-        with runner.rotary_lock:
-            rotary.set_zero_position()
-            event_names = rotary_setup.set_and_enable_thresholds(
-                rotary, [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
-                         -cur_response_threshold_deg, cur_response_threshold_deg,
-                         -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG])
-        rotary.enable_evt_transmission()
-        left_event, right_event = event_names[2], event_names[3]
-        wheel_abort_event_neg, wheel_abort_event_pos = event_names[4], event_names[5]
-
-        runner.register('TRIAL_START', trial_start_t)
-        runner.register('QUIESCENCE_BREAKS', n_breaks)
-        runner.register('TRIAL_TYPE', trial_type)
-        runner.register('STAIRCASE_ACTIVE', active_staircase)
-        dot.clear()
-        dot.pump()
-        camera.pump()
+        thresholds_this_trial = [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
+                                 -cur_response_threshold_deg, cur_response_threshold_deg,
+                                 -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG]
+        if thresholds_this_trial != applied_thresholds:
+            # set_thresholds() reads an ack byte, so it runs inside stream.paused() -- between
+            # trials, before this trial's hold-to-init wait, never while a machine is running.
+            rotary_setup.set_and_enable_thresholds(rotary, thresholds_this_trial,
+                                                   stream=runner.stream)
+            applied_thresholds = thresholds_this_trial
 
         stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
         trial_clicks = click_train.generate_trial_clicks(
@@ -455,6 +470,8 @@ while True:
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 
+        runner.register('TRIAL_TYPE', trial_type)
+        runner.register('STAIRCASE_ACTIVE', active_staircase)
         runner.register('TRIAL_SIDE', side)
         runner.register('CLICK_TIMES_L', ','.join(
             '{0:.4f}'.format(t) for t in trial_clicks['left_times']))
@@ -472,17 +489,28 @@ while True:
             trial, trial_type, active_staircase, side, trial_clicks['n_left'],
             trial_clicks['n_right']), flush=True)
 
-        hifi.play(0)
-
-        cue_send_t = time.time() - log_python_t0
-        runner.register('SM_SEND_TIME', cue_send_t)
-        runner.register('CUE_ONSET_TIME', cue_send_t + click_train.CLICK_START_OFFSET_S)
-
         delay_duration_this_trial = random.uniform(VAR_DELAY_DURATION_MIN_S,
                                                      VAR_DELAY_DURATION_MAX_S)
         abort_timeout_this_trial = random.uniform(VAR_ABORT_TIMEOUT_MIN_S, VAR_ABORT_TIMEOUT_MAX_S)
+        # J1 is a native, abort-guarded state at the END of cue_sma (DotOnsetDelay), so the wheel
+        # must stay within the cue-abort tolerance right up to the moment the dot appears -- the
+        # dot itself appears the instant `sma`'s first state (WheelDotPeriod) is entered, signalled
+        # by SoftCode, not by a host timer. (It used to appear at a host-timed `send_epoch + J1`,
+        # while WheelDotPeriod -- already listening for the choice -- started whenever the upload
+        # and RUN happened to finish.)
+        dot_onset_jitter_s = random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
+        disappear_delay_s = random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
 
         cue_sma = StateMachine(my_bpod)
+
+        # The hold-to-init wait runs INSIDE this machine (licks logged, Stop/Kill handled): the PC
+        # injects SoftCode1 once the wheel has been still for the hold window (and starts the
+        # audio right then) -- see _shared/trial_render.py.
+        cue_sma.add_state(
+            state_name='WaitQuiescence',
+            state_timer=VAR_WAIT_QUIESCENCE_MAX_S,
+            state_change_conditions={PC_EVENT_QUIESCENCE_MET: 'CuePeriod', Bpod.Events.Tup: 'exit'},
+            output_actions=[])
 
         cue_sma.add_state(
             state_name='CuePeriod',
@@ -500,6 +528,16 @@ while True:
             state_change_conditions={
                 wheel_abort_event_neg: 'WheelAbort',
                 wheel_abort_event_pos: 'WheelAbort',
+                Bpod.Events.Tup: 'DotOnsetDelay',
+            },
+            output_actions=[])
+
+        cue_sma.add_state(
+            state_name='DotOnsetDelay',
+            state_timer=dot_onset_jitter_s,
+            state_change_conditions={
+                wheel_abort_event_neg: 'WheelAbort',
+                wheel_abort_event_pos: 'WheelAbort',
                 Bpod.Events.Tup: 'CueComplete',
             },
             output_actions=[])
@@ -510,11 +548,13 @@ while True:
             state_change_conditions={Bpod.Events.Tup: 'AbortPunish'},
             output_actions=[(hifi_channel, hifi_stop_msg_id)])
 
+        # SoftCode on entry so the screen flash lands in near-lockstep with the native LED pulse --
+        # a hardware signal, instead of the render loop's own threshold comparison.
         cue_sma.add_state(
             state_name='AbortPunish',
             state_timer=VAR_ERROR_FLASH_S,
             state_change_conditions={Bpod.Events.Tup: 'AbortITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255), ('SoftCode', SOFTCODE_PUNISH)])
 
         cue_sma.add_state(
             state_name='AbortITI',
@@ -528,82 +568,6 @@ while True:
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[(hifi_channel, hifi_stop_msg_id)])
 
-        # Run cue_sma on a background thread (same thread/Event/SystemExit/finally shape as the
-        # choice period's own decision_thread below) so the main thread can poll rotary position
-        # concurrently and fire the punishment screen flash in near-lockstep with the native LED
-        # pulse above -- naively waiting for cue_sma to return would show the flash 1-2+ seconds
-        # late, after the randomized AbortITI had already elapsed too.
-        cue_result = {}
-        cue_done = threading.Event()
-
-        def _run_cue():
-            try:
-                cue_result['ran'] = runner.run_trial_state_machine(cue_sma)
-            except SystemExit:
-                cue_result['killed'] = True
-            finally:
-                cue_done.set()
-
-        cue_thread = threading.Thread(target=_run_cue, daemon=True)
-        cue_thread.start()
-
-        abort_flash_triggered = False
-        while not cue_done.is_set():
-            with runner.rotary_lock:
-                pos = rotary.current_position()
-            if not abort_flash_triggered and (pos <= -VAR_CUE_ABORT_THRESHOLD_DEG
-                                               or pos >= VAR_CUE_ABORT_THRESHOLD_DEG):
-                dot.flash_white(VAR_ERROR_FLASH_S)
-                abort_flash_triggered = True
-            dot.pump()
-            camera.pump()
-            time.sleep(render_interval)
-
-        cue_thread.join(timeout=3.0)
-        if cue_thread.is_alive():
-            print("WARNING: cue-period Bpod thread did not stop within 3s -- continuing "
-                  "anyway.", flush=True)
-
-        if cue_result.get('killed'):
-            print("Bpod Kill received -- ending session.", flush=True)
-            _cleanup_and_export()
-            sys.exit(0)
-
-        if not cue_result.get('ran', False):
-            print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
-                  "{0}.".format(trial), flush=True)
-            break
-
-        cue_visited = my_bpod.session.current_trial.states_durations
-        aborted = was_visited(cue_visited, 'WheelAbort')
-
-        cue_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
-        cue_lick_times_abs = [cue_send_t + t for t in cue_events.get('Port1In', [])]
-
-        total_attempts += 1
-
-        if aborted:
-            total_aborts += 1
-            consecutive_aborts += 1
-            abort_time_abs = cue_send_t + cue_visited['WheelAbort'][-1][0]
-            abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
-            runner.register('ABORT', abort_time_abs)
-            runner.register('ABORT_EPOCH', abort_epoch)
-            runner.register('INCLUDED', False)
-
-            pending_repeat = True
-            repeat_side = side
-
-            print("Trial {0}: Abort ({1} epoch) -- re-offering side {2} next trial.".format(
-                trial, abort_epoch, side), flush=True)
-
-            bench_plots.add_trial(side, 0.0, cur_response_threshold_deg, 'Abort',
-                                   lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target, quiescence_s=cur_quiescence_s)
-            continue
-
-        consecutive_aborts = 0
-
         # Confirmed on real hardware: the correct response is turning the wheel OPPOSITE to the
         # click side, not toward it -- left_event/right_event's own left/right naming is purely a
         # raw-rotary-sign convention (see ALL_THRESHOLDS_DEG above), not guaranteed to match
@@ -613,15 +577,6 @@ while True:
         rewarded_event = left_event if side == 'R' else right_event
         unrewarded_event = right_event if rewarded_event == left_event else left_event
 
-        dot_onset_delay = random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
-        disappear_delay_s = random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
-
-        send_epoch = time.time()
-        send_t = send_epoch - log_python_t0
-        runner.register('SM_SEND_TIME', send_t)
-
-        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
-
         # Geometry-aware gain -- recomputed each trial since cur_response_threshold_deg can move
         # (the response staircase, when active, updates between trials).
         screen_width_px = dot.get_screen_width_px()
@@ -629,7 +584,34 @@ while True:
             (VAR_DOT_EDGE_FRACTION * (screen_width_px / 2.0)) / cur_response_threshold_deg)
         dot.set_deg_to_px_gain(dot_gain)
 
+        # Built now (everything it needs is already known) so it can be uploaded and run the moment
+        # cue_sma ends, from the same thread -- see _run_cue_then_choice() below.
         sma = StateMachine(my_bpod)
+
+        # The choice window opens only once the PC confirms the dot is painted (same handshake as
+        # Stage 1/2); a turn before that ends the trial as MovedBeforeDot.
+        sma.add_state(
+            state_name='DotOn',
+            state_timer=VAR_DOT_HANDSHAKE_TIMEOUT_S,
+            state_change_conditions={
+                PC_EVENT_DOT_SHOWN: 'WheelDotPeriod',
+                rewarded_event: 'MovedBeforeDot',
+                unrewarded_event: 'MovedBeforeDot',
+                Bpod.Events.Tup: 'DotTimeout',
+            },
+            output_actions=[('SoftCode', SOFTCODE_DOT_ON)])
+
+        sma.add_state(
+            state_name='MovedBeforeDot',
+            state_timer=0,
+            state_change_conditions={Bpod.Events.Tup: 'ITI'},
+            output_actions=[])
+
+        sma.add_state(
+            state_name='DotTimeout',
+            state_timer=0,
+            state_change_conditions={Bpod.Events.Tup: 'ITI'},
+            output_actions=[])
 
         sma.add_state(
             state_name='WheelDotPeriod',
@@ -645,7 +627,7 @@ while True:
             state_name='Reward',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'Consumption'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1), ('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
             state_name='Consumption',
@@ -657,13 +639,13 @@ while True:
             state_name='ErrorConsumption',
             state_timer=0.5,
             state_change_conditions={'Port1In': 'ErrorPunish', Bpod.Events.Tup: 'ErrorPunish'},
-            output_actions=[])
+            output_actions=[('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
             state_name='ErrorPunish',
             state_timer=VAR_ERROR_FLASH_S,
             state_change_conditions={Bpod.Events.Tup: 'IncorrectITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255)])
+            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255), ('SoftCode', SOFTCODE_PUNISH)])
 
         sma.add_state(
             state_name='IncorrectITI',
@@ -683,59 +665,84 @@ while True:
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[])
 
-        decision_result = {}
-        decision_done = threading.Event()
+        runner.upload(cue_sma)
+        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
+        camera.pump()
 
-        def _run_decision():
+        # cue_sma and then (unless it aborted) `sma` run back-to-back on ONE background thread, so
+        # there's no unwatched gap between the cue ending and the choice period starting. cue_sma's
+        # own rows are registered from that thread, right after it returns and before `sma` runs,
+        # so they land in the CSV between the two machines' rows, as always.
+        cue_result = {}
+        decision_result = {}
+        cue_done = threading.Event()
+        choice_started = threading.Event()
+        decision_done = threading.Event()
+        cue_audio = {}
+
+        def _start_cue_audio():
+            # Called by the render loop the moment quiescence is met and the cue machine has been
+            # told to enter CuePeriod -- the audio starts within milliseconds of CuePeriod.
+            hifi.play(0)
+            cue_audio['t'] = time.time() - log_python_t0
+
+        def _run_cue_then_choice():
             try:
-                decision_result['ran'] = runner.run_trial_state_machine(sma)
+                cue_result['ran'] = runner.run_trial_state_machine(cue_sma, expect_marker=False)
+                cue_result['anchor_t'] = runner.last_run_t
+                cue_result['return_t'] = runner.last_return_t
+                proceed = False
+                if cue_result['ran']:
+                    trial_obj = my_bpod.session.current_trial
+                    cue_result['visited'] = trial_obj.states_durations
+                    cue_result['events'] = trial_obj.get_all_timestamps_by_event()
+                    runner.register('SM_SEND_TIME', cue_result['anchor_t'])
+                    if 't' in cue_audio:
+                        runner.register('CUE_ONSET_TIME',
+                                        cue_audio['t'] + click_train.CLICK_START_OFFSET_S)
+                    cue_result['lick_times_abs'], _cue_lick_times_out = \
+                        runner.register_port_events('CUE_LICK', cue_result['events'],
+                                                    cue_result['anchor_t'])
+                    proceed = was_visited(cue_result['visited'], 'CueComplete')
+                if proceed:
+                    runner.begin_trial()   # fresh signal window for the choice machine
+                    choice_started.set()
+                cue_done.set()
+                if proceed:
+                    decision_result['ran'] = runner.run_trial_state_machine(
+                        sma, arm_rotary=True, marker_state='WheelDotPeriod')
             except SystemExit:
                 decision_result['killed'] = True
+            except Exception:
+                decision_result['error'] = traceback.format_exc()
             finally:
+                cue_done.set()
                 decision_done.set()
 
-        decision_thread = threading.Thread(target=_run_decision, daemon=True)
+        decision_thread = threading.Thread(target=_run_cue_then_choice, daemon=True)
+        prev_return_t = runner.last_return_t
+        runner.begin_trial()   # main thread, BEFORE the Bpod thread -- see its docstring
+        runner.start_quiescence(quiescence_duration_this_trial, VAR_STEADY_THRESHOLD_DEG)
         decision_thread.start()
 
-        dot_visible = False
-        frozen = False
-        frozen_at = None
-
-        while not decision_done.is_set():
-            now = time.time()
-            if not dot_visible and (now - send_epoch) >= dot_onset_delay:
-                dot_visible = True
-
-            with runner.rotary_lock:
-                pos = rotary.current_position()
-
-            if dot_visible and not frozen:
-                if pos <= -cur_response_threshold_deg or pos >= cur_response_threshold_deg:
-                    frozen = True
-                    frozen_at = now
-                    crossed_event = (left_event if pos <= -cur_response_threshold_deg
-                                      else right_event)
-                    if crossed_event == unrewarded_event:
-                        dot.flash_white(VAR_ERROR_FLASH_S)
-                else:
-                    dot.set_position_deg(pos)
-
-            if frozen and (now - frozen_at) >= disappear_delay_s:
-                dot.clear()
-
-            dot.pump()
-            camera.pump()
-            time.sleep(render_interval)
+        render = run_trial_render_loop(
+            runner, dot, camera, decision_done, cur_response_threshold_deg, disappear_delay_s,
+            render_interval, SOFTCODE_DOT_ON, (SOFTCODE_CROSSED,),
+            quiescence=(quiescence_duration_this_trial, VAR_STEADY_THRESHOLD_DEG),
+            punish_softcode=SOFTCODE_PUNISH, punish_flash_s=VAR_ERROR_FLASH_S,
+            on_quiescence_met=_start_cue_audio, dot_phase_event=choice_started)
+        n_breaks = runner.quiescence_breaks
+        last_initiation_time = time.time()
+        if active_staircase == 'quiescence':
+            quiescence_obj.record_outcome(success=(n_breaks == 0))
 
         decision_thread.join(timeout=3.0)
         if decision_thread.is_alive():
-            print("WARNING: decision-period Bpod thread did not stop within 3s -- continuing "
-                  "anyway.", flush=True)
+            print("WARNING: trial Bpod thread did not stop within 3s -- continuing anyway.",
+                  flush=True)
 
         dot.clear()
         dot.pump()
-
-        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
         camera.pump()
 
         if decision_result.get('killed'):
@@ -743,10 +750,69 @@ while True:
             _cleanup_and_export()
             sys.exit(0)
 
+        if decision_result.get('error'):
+            # Reported as what it is -- it used to fall through to the "Stop/Kill" message below.
+            print("Trial {0} CRASHED in the Bpod thread -- ending session:\n{1}".format(
+                trial, decision_result['error']), flush=True)
+            runner.register('SESSION_ERROR', decision_result['error'].strip().splitlines()[-1])
+            session_end_reason = 'error'
+            break
+
+        if not cue_result.get('ran', False) or 'visited' not in cue_result:
+            print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
+                  "{0}.".format(trial), flush=True)
+            break
+        if prev_return_t is not None:
+            runner.register('INTER_TRIAL_GAP_MS', (cue_result['anchor_t'] - prev_return_t) * 1e3)
+
+        cue_send_t = cue_result['anchor_t']
+        cue_visited = cue_result['visited']
+        aborted = was_visited(cue_visited, 'WheelAbort')
+        cue_lick_times_abs = cue_result['lick_times_abs']
+
+        total_attempts += 1
+
+        if aborted:
+            total_aborts += 1
+            consecutive_aborts += 1
+            abort_time_abs = cue_send_t + cue_visited['WheelAbort'][-1][0]
+            abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
+            runner.register('ABORT', abort_time_abs)
+            runner.register('ABORT_EPOCH', abort_epoch)
+            # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
+            # ErrorConsumption)? False here (and for NoResponse) -- analysis applies its own
+            # filters downstream, this is not a second, redundant filter.
+            runner.register('INCLUDED', False)
+            register_trial_timing(runner, render, quiescence_duration_this_trial, n_breaks, None,
+                                  cue_visited, cue_send_t, response_state='WheelDotPeriod')
+
+            pending_repeat = True
+            repeat_side = side
+
+            print("Trial {0}: Abort ({1} epoch) -- re-offering side {2} next trial.".format(
+                trial, abort_epoch, side), flush=True)
+
+            bench_plots.add_trial(side, 0.0, cur_response_threshold_deg, 'Abort',
+                                   lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
+                                   p_right_target=p_right_target, quiescence_s=cur_quiescence_s)
+            continue
+
+        consecutive_aborts = 0
+
         if not decision_result.get('ran', False):
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
             break
+
+        # Host anchor for every choice-period Bpod-relative time below: captured right before RUN
+        # (see TrialRunner.run_trial_state_machine()).
+        send_t = runner.last_run_t
+        runner.register('SM_RUN_TIME', send_t)
+        runner.register('DOT_ONSET_JITTER_S', dot_onset_jitter_s)
+        runner.register('CUE_TO_CHOICE_GAP_MS', (send_t - cue_result['return_t']) * 1e3)
+        register_trial_timing(runner, render, quiescence_duration_this_trial, n_breaks, None,
+                              my_bpod.session.current_trial.states_durations, send_t,
+                              response_state='WheelDotPeriod')
 
         visited = my_bpod.session.current_trial.states_durations
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
@@ -757,6 +823,10 @@ while True:
             outcome_state, outcome, rewarded = 'ErrorConsumption', 'NoReward', False
         elif was_visited(visited, 'NoResponse'):
             outcome_state, outcome, rewarded = 'NoResponse', 'NoResponse', False
+        elif was_visited(visited, 'MovedBeforeDot'):
+            outcome_state, outcome, rewarded = 'MovedBeforeDot', 'Abort', False
+        elif was_visited(visited, 'DotTimeout'):
+            outcome_state, outcome, rewarded = 'DotTimeout', 'Abort', False
         else:
             outcome_state, outcome, rewarded = 'Unknown', 'Unknown', False
 
@@ -794,11 +864,9 @@ while True:
         runner.register('INCLUDED', response is not None)
         runner.register('CONSUMPTION_LICKED', consumption_licked)
 
-        led_on_t = send_t
-        dot_onset_t = led_on_t + dot_onset_delay
-        runner.register('LED_ON_TIME', led_on_t)
-        runner.register('DOT_ONSET_JITTER_S', dot_onset_delay)
-        runner.register('DOT_ONSET_TIME', dot_onset_t)
+        # DOT_ONSET_TIME (WheelDotPeriod's start = the dot confirmed on screen) is registered by
+        # register_trial_timing() above. LED_ON_TIME is no longer registered: the LED stopped being
+        # a go cue (punishment signal only).
 
         if outcome_state in ('Reward', 'ErrorConsumption'):
             threshold_crossing_t = send_t + visited[outcome_state][-1][0]
@@ -813,7 +881,8 @@ while True:
         print("Trial {0} ({1}): side={2}, {3}{4}".format(
             trial, trial_type, side, outcome, ' -> reward' if rewarded else ''), flush=True)
 
-        choice_lick_times_abs = [send_t + t for t in choice_events.get('Port1In', [])]
+        choice_lick_times_abs, _choice_lick_times_out = runner.register_port_events(
+            'CHOICE_LICK', choice_events, send_t)
         lick_times_abs = sorted(cue_lick_times_abs + choice_lick_times_abs)
 
         reward_time_abs = None

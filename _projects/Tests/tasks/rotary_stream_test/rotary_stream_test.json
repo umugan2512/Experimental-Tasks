@@ -1,0 +1,11 @@
+{
+    "__CREATED-ON__": "2026-10-22 00:00:00.000000",
+    "__DEF-TEXT__": "This file contains information about a PyBpod protocol.",
+    "__DEF-URL__": "http://pybpod.readthedocs.org",
+    "__SOFTWARE__": "PyBpod GUI API v1.8.2",
+    "__UPDATED-ON__": "2026-10-22 00:00:00.000000",
+    "__UUID4__": "5b7f4a8e-2c1d-4e39-9f60-3a8d71c2e4b5",
+    "commands": [],
+    "name": "rotary_stream_test",
+    "trigger-softcodes": false
+}

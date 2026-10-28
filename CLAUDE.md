@@ -68,6 +68,31 @@ upstream, so both are pinned to a fork (not the official repo) on a branch liter
   restructuring, `cd` into it and run `git status`/`git diff` directly** — a submodule flagged dirty
   in the parent's own `git status` may be carrying real, load-bearing, never-upstreamed work.
 
+**`pybpod/base/pybpod-api` is NOT forked, and is pinned to the official v1.8.2 release
+(`4c9ced5`)** — its `origin` is the official `github.com/pybpod/pybpod-api.git`, with no push
+access, so **never pin it to a local commit**. It used to be pinned to a local-only
+`save-local-changes` commit (`df47a22`, `add_message(msg, flush)` + `register_value(flush=)`),
+which exists on no remote: every other computer failed `git submodule update` with "pointing to a
+commit that doesn't exist" (fixed 2026-10-28). What that commit provided now lives in this repo:
+`_shared/bpod_trial_helpers.install_session_lock()` installs a locked `Session.add_message(msg,
+flush)` (with a `SESSION_FLUSH_INTERVAL_S = 0.05` forced-flush floor) and routes `Session.__add__`
+through it, on stock and patched pybpod-api alike, and `TrialRunner.register()` writes through it.
+`df47a22` stays on that submodule's local branch for history only. The offline suite passes
+against stock `4c9ced5` (checked by putting a `git archive` copy of it first on `PYTHONPATH`).
+
+**Pushing order: forked submodules first, then `main`.** `records/sync_training_log.py`
+(Sync Training Log) does it: `push_forked_submodules()` pushes the rotary fork's, then `pybpod`'s,
+current branch if it is ahead of its remote. `pinned_commits_pushed()` then refuses to push a
+`main` whose `pybpod`, `pybpod-api` or rotary gitlink isn't on GitHub. For a plain `git push`
+by hand, push the same order yourself:
+`git -C pybpod/plugins/pybpod-gui-plugin-rotaryencoder push origin save-local-changes`, then
+`git -C pybpod push origin save-local-changes`, then `git push origin main`.
+**Don't use `push.recurseSubmodules=on-demand`:** it reuses the superproject's refspec (`main`)
+inside the submodules, which have no `main` branch, and the push fails ("src refspec main must
+name a ref"). After pulling on another box: `git submodule update --init --recursive`. The rotary
+fork's untested, never-pushed `12853a4` (display-rate decoupling) sits on its own local branch,
+`display-rate-decouple`, not on `save-local-changes`.
+
 Each fork's own remotes: `origin` = the fork (push access), `upstream` = the official repo (`git
 fetch upstream` to pull in future official releases without losing the local branch). Each fork's
 own `.gitmodules` entry in its *parent* repo (`Experimental-Tasks/pybpod/.gitmodules` for the
@@ -279,11 +304,20 @@ Durable facts/gotchas about this module layer and Bpod hardware in general:
 - The rotary encoder board resets when a new serial connection opens and needs ~2s before it
   reliably responds to a handshake (`pybpod/plugins/pybpod-gui-plugin-rotaryencoder/
   pybpod_rotaryencoder_module/module_api.py`'s `BOOT_DELAY_S`/`HANDSHAKE_RETRIES`).
-- Rotary encoder firmware disables a threshold the instant it fires, and crossing any *one*
-  threshold disarms the *whole* configured set (not just that one) until
-  `enable_all_thresholds()` is called again — see `module.py`'s
-  `RotaryEncoder.create_resetpositions_trigger()`, which bundles `SETZEROPOS` +
-  `ENABLE_ALLTHRESHOLDS` for exactly this reason.
+- Rotary encoder firmware disables a threshold the instant it fires, until
+  `enable_all_thresholds()` (or `;` with a bitmask) re-arms it — **only the crossed threshold, not
+  the whole set** (corrected 2026-10-22; this file used to say the whole set disarms). Confirmed
+  in real Stage 1 session CSVs: after `RotaryEncoder1_2` (+threshold) fired, `RotaryEncoder1_1`
+  (−threshold) still fired later in the same trial, while the wheel went to +66° with no second
+  +event. MATLAB's `RotaryEncoderModule.enableThresholds()` doc says the same ("Thresholds are
+  automatically disabled when crossed"). Consequence: a crossing during a state that isn't
+  listening for it silently uses up that side for the rest of the trial — see the Stage 1
+  `PreDotDelay` bug below.
+- **A relay serial message (`load_serial_message`/`BpodModule.load_message`) is capped at 3 bytes**
+  by `pybpod-api` (`_bpodcom_load_serial_message` raises past that). So `[Z, '#', code]` fits but
+  `[Z, E, '#', code]` doesn't, which is why the stage scripts' first state sends `[Z, '#', code]`
+  and the thresholds are re-armed over the rotary's USB (`rotary_setup.arm_for_trial()`) right
+  before RUN.
 - The rotary encoder's own firmware threshold-crossing *events* have shown an unexplained drift
   from what `current_position()` itself reports (which has been reliable and internally
   consistent) — don't depend on the firmware comparator for anything precision-sensitive; poll
@@ -399,10 +433,65 @@ Durable facts/gotchas from building this:
   for Stop/Kill, not usable by a same-process background thread. Consequence: anything a
   background thread alone can detect (a Python-computed condition with no native Bpod event behind
   it) can only be *acted on* once the current call returns — never mid-call.
-- **`Port1In` (a lick sensor) has no "read current state" API outside a running state machine** —
-  checked `bpod_base.py`/`bpod_com_protocol.py`: `manual_override`/`trigger_input` only *set*
+- **Wheel position now comes from the rotary's own USB stream, not polling** (since 2026-10-22, all
+  5 AuditoryEvidenceAccum stages; `_shared/rotary_stream.py`, `TrialRunner(use_stream=True)`) —
+  MATLAB Bpod_Gen2's own approach (`RotaryEncoderModule.m` `startUSBStream()`/
+  `readUSBStream(eventCode)`). The firmware pushes 7-byte `P` (position + module-clock time) and
+  `E` (type, code, time) messages. A reader thread that **only ever reads** the port parses them,
+  so it can't collide with anything (the reason the poll thread below crashed was that it WROTE).
+  Consequences and rules:
+  - **No logging gap at trial onset any more.** Sample times come from the module clock, mapped to
+    host time via the minimum observed USB latency (`WHEEL_CLOCK_OFFSET` rows, logged per flush).
+  - **While streaming, never send a rotary command that reads a reply byte** — `current_position()`,
+    `set_zero_position()` (it verifies with `Q`), `set_thresholds()`,
+    `enable/disable_evt_transmission()`. Either the stream eats the ack or the ack read eats stream
+    bytes. MATLAB enforces the same rule (`assertNotUSBStreaming`). Use `runner.current_position()`,
+    and wrap the rare ack command in `with runner.stream.paused():` (between trials only).
+    `rotary_setup.set_and_enable_thresholds(..., stream=runner.stream)` does that for you.
+    No-reply commands (`Z`, `E`, relay `#`) are safe at any time.
+  - Event transmission is enabled once per session and never toggled per trial (MATLAB's
+    `sendThresholdEvents`).
+  - The stream tick unit (µs on fw v6 per MATLAB, ms per pybpod's own `read_stream()`) is
+    auto-detected against host time. **None of this is verified on hardware yet** — run
+    `_projects/Tests/tasks/rotary_stream_test/` (it prints PASS/FAIL per assumption) before the
+    first real session on this code.
+  - Every `Tests/` script still uses the old polling path (`use_stream=False`, the default),
+    untouched.
+- **(Historical, polling mode only) Never run a continuous background poll thread on the rotary's
+  serial connection.** Confirmed
+  the hard way: a session-long `WHEEL_POS` poll thread (replacing the per-call-scoped one
+  `TrialRunner.run_trial_state_machine()` spawns and joins around each Bpod call) crashed real
+  sessions with `SerialTimeoutException: Write timeout` raised from the *main* thread's own
+  `rotary.enable_evt_transmission()` -> `module_api.py` -> `arcom.write_array()`, in 4 of 6
+  consecutive attempts (traced in those sessions' own CSV error rows). The rotary's USB connection
+  has no request/response multiplexing of any kind, so a poll thread writing `COM_GETCURRENTPOS`
+  continuously genuinely collides with every main-thread write (`set_zero_position()`,
+  `set_thresholds()`, `enable_evt_transmission()`), and `rotary_lock` does not save you — it
+  serializes the writes but the poll thread still holds it often enough to push a main-thread write
+  past its own serial timeout. Polling only *inside* a `run_state_machine()` call (the original
+  design, reverted back to) works because the main thread is blocked in that call and issues no
+  rotary writes for its duration. The known cost of that design is a real wheel-logging blind
+  window (~0.1-0.6s) at every trial onset, where the per-trial rotary re-zero/threshold writes
+  happen and nothing is polling — a deliberate, accepted trade-off, not an oversight. Same episode
+  also re-established that `TrialRunner.wait_for_held_steady()`'s `require_no_lick=True` branch is
+  **dead code on purpose**: every one of the 5 stage scripts passes `False`, and flipping them to
+  `True` (to restore native lick visibility during the hold-wait by sending a retrying
+  `HoldCheck`/`LickDuringHold` machine) was part of the same reverted change. Don't flip it back
+  without testing it in isolation, on hardware, as its own change.
+- **`Port1In` (a lick sensor) has no "read current state" API outside a running state machine in
+  `pybpod-api` — but the firmware itself does support one, which `pybpod-api` simply never wraps.**
+  Checked `bpod_base.py`/`bpod_com_protocol.py`: `manual_override`/`trigger_input` only *set*
   outputs; a digital input is only observable while some state machine is actively listening via
-  `state_change_conditions`. Rotary encoder *threshold-crossing events* are the same way (need a
+  `state_change_conditions`. MATLAB Bpod (`sanworks/Bpod_Gen2`,
+  `Functions/Internal Functions/ReadBpodInput.m`) shows the state machine accepts an `'I'` opcode
+  plus a channel number and returns that input's instantaneous high/low state over USB with no
+  state machine running at all — so an any-time input *query* is a real, unused firmware
+  capability here. It is NOT equivalent to event reporting, though: `Functions/RunStateMachine.m`
+  confirms timestamped In/Out *edges* still only arrive inside its own
+  `while BpodSystem.Status.InStateMatrix` loop, with no background streaming mode anywhere. Polling
+  `'I'` from Python would therefore sample state at the poll rate and miss any contact shorter than
+  one interval, and would put continuous traffic on the main Bpod connection (see the rotary hazard
+  directly above for how that class of thing has already gone wrong once). Rotary encoder *threshold-crossing events* are the same way (need a
   running machine *and* `enable_evt_transmission()`), but the rotary's own `current_position()` is
   independently pollable from Python at any time via its separate USB connection, regardless of
   Bpod. This is why this task's cue-period abort detection could go **fully native** once a second
@@ -575,7 +664,7 @@ Durable facts/gotchas from building this:
   completely unaffected by which preview mode (or neither) is active.
 - **`dot_display.create_dot_display()`** is now the one place every dot-coupled task script across
   both projects constructs its dot display — added after confirming a real, already-happened drift
-  bug: `stage2_threshold_staircase.py`, `stage3_clicks_direction.py`, `stage4_resume_staircases.py`,
+  bug: `stage2_threshold_staircase.py`, `stage4_clicks_direction.py`, `stage5_resume_staircases.py`,
   and `dot_wheel_test.py` were all still constructing a plain, full-spanned `DotDisplay` (silently
   showing the dot smeared across all three physical monitors on this rig), never updated to match
   the `MiddleScreenDotDisplay` fix already applied to `stage1_wheel_shaping.py` and
@@ -598,21 +687,46 @@ Durable facts/gotchas from building this:
   wanted directly rather than assuming either direction is "the fix" — this specific pixel has now
   been deliberately flipped in both directions once already.
 
-## Wheel-shaping training stages (Stage 1/2, `AuditoryEvidenceAccum`)
+## Wheel-shaping training stages (Stages 1-5, `AuditoryEvidenceAccum`)
 
 `training_protocol.md` (in `_projects/docs_local/design_docs/`, alongside
 `mouse_auditory_accumulation_paradigm.md` — gitignored, local-machine-only, see "Local project
 data" above) is the full staged training curriculum (Part 4: Stage 1 through Stage 8) for the
-wheel-turn/dot variant of the evidence-accumulation task. Stage 1 ("Wheel unlocked, spout close, small movements rewarded")
-and Stage 2 ("Threshold staircase, ITI growth, spout retraction") are built in
-`_projects/AuditoryEvidenceAccum/tasks/` — the **real** project, not `Tests/`. `Tests/` stays what it
-always was (bench-test/dry-run scripts, `full_protocol_lookback_test.py` etc.) and is untouched by
-this work; `AuditoryEvidenceAccum` is where actual animal training happens going forward. Neither
-stage has any auditory stimulus, correct-side concept, or error condition yet — those start at
-Stage 3 — but the dot **is** coupled to the wheel from Stage 1 onward (no wheel-only, dot-less phase
-anywhere in the curriculum).
+wheel-turn/dot variant of the evidence-accumulation task. **Five stages are built**, each its own
+task folder under `_projects/AuditoryEvidenceAccum/tasks/` — the **real** project, not `Tests/`:
+`stage1_wheel_shaping`, `stage2_threshold_staircase`, `stage3_tone_side_association`,
+`stage4_clicks_direction`, `stage5_resume_staircases`. `Tests/` stays what it always was
+(bench-test/dry-run scripts, `full_protocol_lookback_test.py` etc.) and is untouched by this work;
+`AuditoryEvidenceAccum` is where actual animal training happens. **Stage 3 (tone/side association)
+was inserted after the other four already existed, shifting the two downstream stages up by one** —
+anything referring to a `stage3_clicks_direction.py` or `stage4_resume_staircases.py` predates that
+and means today's `stage4_`/`stage5_` files. Stage 1 and 2 still have no auditory stimulus,
+correct-side concept, or error condition (those start at Stage 3), but the dot **is** coupled to the
+wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curriculum).
 
-- `AuditoryEvidenceAccum/tasks/_wheel_shaping_shared/` is shared *within these two stages only* —
+- **`parameter_progression.md`** (in `_wheel_shaping_shared/` — and unlike the gitignored
+  `docs_local/` design docs, it IS committed) is the written record of how every staircased/stepped
+  parameter moves within and across sessions, per stage. Check it before changing any
+  threshold/ITI/gain/duration progression, and update it alongside the code.
+- **The LED (`VAR_GO_CUE_LED_CHANNEL = 'PWM1'`) is NOT a go cue anywhere any more — it is a
+  punishment signal only.** Stages 3-5 fire it for `VAR_ERROR_FLASH_S` (0.35s) together with a
+  full-white screen (`DotDisplay.flash_white()`, pumped concurrently so the screen flash lands in
+  near-lockstep with the native LED output) from their own `AbortPunish`/`ErrorPunish` states —
+  i.e. on aborts and incorrect choices only, never on a correct trial and never as a trial-start
+  cue. Stage 1/2 have no error condition at all, so they never flash.
+- **A session's hard trial cap and its advancement-qualifying trial count are two different
+  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (200 in Stage 1, 250 in Stage 2) ends the session, checked against every *attempted*
+  trial, as does 1.5 mL of water **consumed** or 30 min. Consumed = licked after delivery, a later
+  trial's lick included (`_wheel_shaping_shared/water_tracker.py`, `SESSION_WATER_CONSUMED_UL`);
+  the training log's `Water Consumed (uL)`/`Water Delivered (uL)` columns use the same rule; `VAR_TRIAL_COUNT_ADVANCE` (100) is only the qualifying threshold for advancing a subject,
+  and counts only trials where the animal actually did something — **incorrect trials DO count;
+  aborts, no-movement trials and response timeouts do NOT** (per explicit instruction). Stage 1
+  implements that as `if rewarded:` (its only genuine-response outcome); Stage 2 as
+  `if staircase_success:`, which deliberately includes a debiasing-*withheld* trial (a real
+  movement that simply wasn't rewarded) while excluding `NoMovement`. Stage 3-5's pre-existing
+  `if trial_type == 'main' and correct is not None:` already matched this rule and was left alone.
+
+- `AuditoryEvidenceAccum/tasks/_wheel_shaping_shared/` is shared *within these five stages only* —
   same "shared within this paradigm, not generic enough for `_shared/`" placement convention as
   `Tests/tasks/poisson_clicks_test/`. It deliberately does NOT import from `Tests/` (the real project
   shouldn't depend on the bench-test one) — `_style_axes()`/`_capped_figsize()` in
@@ -727,6 +841,171 @@ anywhere in the curriculum).
   data structure — animal ID, protocol run, equipment on/off checklist, pre-session checks, outcome
   summary; purely physical record-keeping, never auto-populated, since none of it has a digital
   source).
+- **Every trial is now ONE Bpod state machine, start to end, with a PC<->Bpod SoftCode handshake
+  (2026-10-23).** This replaced the 2026-10-22 design described in the next bullet, which still had
+  two problems on the rig (session `20261022-162023`):
+  - 4 of 36 trials were rewarded before the dot was painted.
+  - 24% of the session ran with no state machine at all (the hold-to-init wait plus bookkeeping),
+    so licks went unlogged and Stop was ignored then.
+
+  The machine, MATLAB Bpod's model:
+  ```
+  WaitQuiescence -> (PC: still for hold+J1; re-arm rotary; inject PC_QuiescenceMet) -> DotOn
+  DotOn -> SoftCode 1 to PC; PC draws the dot, pumps Qt, re-arms, injects PC_DotShown -> WheelPeriod/WheelDotPeriod
+  ```
+  - A crossing in `DotOn` -> `MovedBeforeDot`; no PC answer within 1 s -> `DotTimeout`. Both are
+    `aborted_states` in `PROTOCOL_CONFIG`.
+  - Stage 3–5 cue machines start in `WaitQuiescence` too; the audio starts when quiescence is met.
+    Cue and choice machines run back to back on one thread.
+  - The PC side lives in one shared place, `_shared/trial_render.py` (`run_trial_render_loop()`,
+    `register_trial_timing()`), so the five stages can't drift.
+  - **PC -> Bpod mid-trial is thread-safe only through pybpod's stdin command channel.**
+    `run_state_machine()` polls `self.stdin` every loop iteration, and a `SoftCodeN` line makes
+    *that* loop send soft code N. `TrialRunner` wraps `bpod.stdin` in `_InjectableStdin` (injected
+    lines first, then the GUI's real Stop/Kill). `inject_softcode()` sends no trailing newline,
+    because `handle_inline` parses `int(inline[-1]) - 1`. As in MATLAB's `SendBpodSoftCode`, line
+    `SoftCodeN` sends byte N-1, raising event `SoftCodeN`. `TrialRunner` renames those entries of
+    `bpod.hardware.channels.event_names` to what they mean (`PC_EVENT_CODES`: `SoftCode1` ->
+    `PC_QuiescenceMet`, `SoftCode2` -> `PC_DotShown`). Names are positional, so only the label
+    changes, in state machines and in every CSV `EVENT` row. Bpod->PC SoftCodes can't be renamed
+    (pybpod logs them as bare numbers), so each session registers `SOFTCODE_MAP`.
+  - **Re-arm the rotary when quiescence is met, not at RUN.** Thresholds armed during
+    `WaitQuiescence` would be silently disarmed by any turn there (the `PreDotDelay` bug class).
+  - **`runner.begin_trial()` must run on the main thread BEFORE the Bpod thread starts.**
+    Resetting SoftCodes/marker inside the Bpod thread let the render loop's first frames act on the
+    PREVIOUS trial's signals: the dot froze before its trial began on 10 of 13 trials in session
+    `20261022-150327`.
+  - **pybpod's `Session.add_message()` is not thread-safe, and that crashed a real session.** It
+    does `self.current_trial += msg`, a property get then set. When the Bpod thread appends a new
+    `Trial` between another thread's get and set, the set writes the PREVIOUS trial back over the
+    new one. That trial's events then land in the old trial's list, and pybpod's
+    `__update_timestamps()` raises `IndexError` (session `20261023-120425`, trial 5; reproduced
+    with the real classes: 24/3000 trials corrupted). Any main-thread `register_value()` or `print()`
+    during a trial can trigger it. `TrialRunner` calls `install_session_lock()`, which wraps
+    `add_message` in one lock (runtime patch, no pybpod-api edit). `TRIAL_INIT_START` is now
+    registered before the Bpod thread starts.
+  - **A crash in the Bpod thread ends the session as an error, not a "Stop/Kill".** It is caught
+    in the stage's `_run_decision()`, printed with its traceback, and registered as
+    `SESSION_ERROR` + `SESSION_END_REASON='error'`. `audit_session.py` fails on it, and also on
+    any traceback text in the CSV.
+  - **The dot widgets repaint only the dot's footprint (dirty rect), and nothing when it didn't
+    move.** A full repaint of the rig's 6144x1536 bonded window took ~19 ms in Python's
+    `paintEvent` while holding the GIL, and the render loop asked for one every frame. That gave
+    43 ms frames, 19 ms dot-onset latency and up to 123 ms reader-thread stalls (session
+    `20261023-122212`). With dirty-rect repaints it's ~0.1-0.3 ms per frame and a median 1 ms
+    onset, checked pixel-for-pixel on screen for no leftover dot pixels. Only `set_punish_active()`
+    (the white flash) still repaints everything.
+  - **The dashboard reads the session CSV incrementally**
+    (`session_csv_parser.IncrementalSessionParser`, only appended bytes, complete lines only; the
+    same per-row code as `parse_session_csv()`, so their output is identical).
+    - It feeds a trial to the plots as soon as its last post-trial row (`*LICK_TIMES_OUT`) is in.
+    - The old full re-parse (twice per 2 s poll) cost 114 ms at 3 min and grew with the file.
+    - The old "hold back the last trial" rule, on top of `real_trials()` already dropping the
+      running trial, kept the plots ~2 trials behind.
+    - A replay of a real session shows 0 trials of lag at every 500 ms poll, at a flat ~22 ms.
+  - **pybpod's run loop sleeps `BPOD_LOOP_SLEEP_S` (5 ms) per iteration** (`TrialRunner._loop_sleep`,
+    installed as `bpod.loop_handler`). Measured on the rig (scratchpad `stall_diag.py`, 120 s of
+    Bpod + dot render + camera):
+    - Previously, polling the Bpod's USB serial port continuously made *every* thread in the
+      process wake 25–93 ms late (74 stalls > 25 ms per 120 s, including a thread only doing
+      `sleep(1ms)`). These were the audit's "rotary reader stalls"; garbage collection, the camera
+      and the serial read itself were ruled out.
+    - With the 5 ms sleep: 0–2 stalls per 120 s, all ≤ 41 ms.
+    - Cost: the dot handshake `DotOn` → response is 20 ms on the Bpod clock, instead of 7 ms.
+      Event timing is unaffected (hardware timestamps).
+  - **`SM_RUN_TIME` is taken where pybpod writes the RUN byte.** `TrialRunner._hook_run_write()`
+    wraps the instance's `_bpodcom_run_state_machine()`. It used to be taken before
+    `run_state_machine()`, which first adds the Trial to the (locked) session log, so RUN sometimes
+    left ms later: one 8 ms clock-fit outlier in session `20261027-095504`. On the rig: 50 trials,
+    max residual 0.83 ms, SD 0.32 ms; the RUN write itself takes ~0.7 ms.
+  - **The host->Bpod clock fit is outlier-resistant** (`session_csv_parser.fit_host_to_bpod()`):
+    a Theil-Sen start, anchors beyond max(1 ms, 4 x MAD) dropped, then least squares on the rest.
+    It reports `n_outliers`/`outliers`. The audit lists each outlier and only estimates drift for
+    sessions ≥ 120 s; a plain least-squares start let one bad anchor hide itself in a 5-trial fit.
+  - **The task process runs at HIGH priority class and the rotary reader thread at ABOVE_NORMAL**
+    (Windows, `TrialRunner.start()`/`stop()`). The stalls left after the loop sleep hit all threads
+    at once (OS scheduling). Back to back on the rig, 120 s each: normal priority gave 4 stalls/max
+    60 ms and 2/27 ms; high gave 2/33.5 ms and 0/25 ms. Not REALTIME, which can starve the OS's own
+    USB handling.
+  - **On Windows/Python 3.6, `threading.Event.wait(timeout)` has a ~15.6 ms timeout floor, even
+    with `timeBeginPeriod(1)`** (`wait(0.005)` measured 15.4 ms; `time.sleep(0.005)` 5.0 ms). Don't
+    use an Event timeout for anything finer than ~16 ms. `TrialRunner.wait_signal()` subtracts
+    one tick, so a 33 ms frame isn't stretched to 47 ms (measured 32 frames/s).
+  - **Known, not fixed: `Bpod()` can fail its handshake with `UnicodeDecodeError`** when a stray
+    byte is left in the port by a previous run that ended moments before. pybpod doesn't flush the
+    input before the handshake. Seen twice while starting diagnostic runs back to back; it doesn't
+    occur mid-session.
+  - **Embedded plots (dashboard launch) are `headless=True` in the task process.** Their deferred
+    `draw_idle()` redraw (~200 ms here) ran inside the first `dot.pump()` of every trial, delaying the
+    dot by 300–470 ms on the rig. The dashboard draws its own copy from the CSV.
+  - **Windows timer resolution is set to 1 ms for the session** (`timeBeginPeriod`, in
+    `TrialRunner.start()`). With the default 15.6 ms every sleep/wait quantized reaction times to
+    16/32/48 ms. The rotary reader blocks in the driver instead of sleep-polling.
+  - **Wheel logging is continuous.** `WHEEL_POS` keepalive rows at 50 ms while the wheel is still
+    (the firmware only streams changes). Rows are `t,pos,t_module`, so
+    `wheel_samples_bpod_time()` places each one on the Bpod clock exactly. The module->PC map is a
+    never-reset lower envelope (it used to restart high after still periods: 30 ms jitter).
+  - **Follow-ups from the independent QC of `20261027-102843` (2026-10-28):**
+    - The audit's wheel clock-map check is detrended. The module and PC crystals differ by
+      ~20 ppm, so the raw offset ramps over a session (82→95 ms), and undetrended it failed every
+      session longer than ~4 min. Residual spread: 0.41 ms. The reader-stall check excludes
+      trial 1 (stream start-up) and names any trial over budget.
+    - Keepalive `WHEEL_POS` rows' module time (an estimate, host − offset) is clamped between the
+      previous row's and the next real sample's, so the third field never steps backward.
+    - Parser: `TRIAL_INIT_START` (`PRE_TRIAL_KEYS`) registered between `END-TRIAL` and the next
+      `TRIAL` is filed under the next trial. It used to land one trial early. Stream rows logged
+      before trial 1 are filed under trial 1, instead of collapsing to a `session_vals` scalar.
+    - **Lick sensor chatter:** ~17% of inter-lick intervals are 25–30 ms, an In ~15 ms after the
+      previous Out (one contact broken in two). `session_csv_parser.merge_lick_chatter()`
+      (`LICK_CHATTER_GAP_S = 0.040`) / `trial_licks()` merge them for derived counts: the
+      training log's `Licks` and the dashboard rasters. Raw `EVENT`/`LICK_TIMES_*` rows are
+      untouched.
+    - **Known, not fixed: ~48 ms per trial with no lick logging**, at the ITI→next-machine
+      handover, because pybpod can't load the next machine while one runs. Mask that window in
+      lick analyses (0.559–0.607 s post-reward in that session). `INTER_TRIAL_GAP_MS` is the
+      host-side gap and runs ~22 ms shorter than the Bpod's own dead time.
+  - **To check a session: `python records/audit_session.py <session_folder>`.** It gives PASS/FAIL
+    for: dot before reward, dot never frozen early, state-machine coverage ≥ 97%, no wheel/CSV
+    gaps, clock fit, camera gaps, and render/onset/freeze/between-machine/reader-stall budgets. The
+    dashboard runs it when a session it launched ends, writing `<session>/audit_report.txt`.
+  - **Hardware-free test:** scratchpad `soak.py` drives a real stage script against a fake Bpod that
+    interprets any state machine (timers, injected stdin SoftCodes, rotary events, relay/SoftCode
+    outputs) plus fake firmware. All 5 stages pass the full audit there. It is not a substitute for
+    the rig: run `Tests/tasks/rotary_stream_test` (now incl. the injected-SoftCode round trip)
+    first.
+  - Still host-timed: Stage 3–5 audio onset (`hifi.play()` the moment quiescence is met).
+- **The `PreDotDelay` state described in the next bullet was itself a bug, and is gone (2026-10-22).**
+  Its thresholds were armed but nothing listened for them, and the firmware disarms a crossed
+  threshold (see "Hardware module notes"). So a turn during the 100–200ms delay used up that side,
+  and the trial was later rewarded by the *opposite* crossing, often seconds later and far from
+  where the dot had frozen. This happened in 64 of 341 rewarded trials across 2026-10-21/22.
+  Many "NoMovement" trials were the same bug (9 of 10 in one session): the mouse kept turning the
+  dead side. It also mislabeled `MOVEMENT_DIRECTION` on exactly those trials (the side logic
+  picked the earliest crossing) and in `session_csv_parser.classify_trial()`, so the training log's
+  L/R turn counts were wrong too.
+  Replaced, per explicit instruction ("the dot can only appear if there has been a quiescence ...
+  the wheel needs to be zeroed the moment the dot appears"):
+  - J1 is now part of the hold-to-init requirement (`QUIESCENCE_HOLD_S` = quiescence + J1).
+  - The trial's first state (`WheelPeriod`/`WheelDotPeriod`) is the dot onset. It re-zeroes the
+    rotary, sends the `#` marker and fires `SoftCode` 1; the render loop draws the dot on that
+    signal.
+  - The outcome state fires `SoftCode` 2 to freeze the dot.
+  - Side = the crossing whose timestamp equals the outcome state's start
+    (`bpod_trial_helpers.triggering_event()` / `session_csv_parser.side_of_outcome()`).
+  - Separately, the dot used to be drawn at a host-timed `send_epoch + J1`, but the hardware trial
+    started 0.23–1.4s after `send_epoch` (median 370/583ms), so the dot was routinely on screen,
+    moving and even frozen before Bpod had started the trial. That's fixed by the same SoftCode
+    onset, and by uploading each trial's machine *before* the hold-wait (`runner.upload()`), so RUN
+    follows quiescence within ms.
+  - Stages 3–5 had the same host-timed dot onset (with `WheelDotPeriod` already listening for the
+    choice before the dot appeared) plus an unwatched gap between `cue_sma` and `sma`. Both
+    machines now run back-to-back on one thread, J1 is a native abort-guarded `DotOnsetDelay` at
+    the end of `cue_sma`, and the abort/error screen flash is driven by `SoftCode` 3 from
+    `AbortPunish`/`ErrorPunish` (truly in lockstep with the LED now).
+  - **Still host-timed in Stages 3–5:** audio onset (`hifi.play(0)` from Python, now ms before
+    RUN). Triggering it from the state machine would need a second HiFi relay output in the same
+    machine as `WheelAbort`'s STOP — exactly the "module output twice in one trial" hang hazard —
+    so it was left alone.
 - **Stage 1 bench-test fixes (real bugs found via actual bench testing, not just code review)**:
   starting threshold raised `VAR_THRESHOLD_STARTING_FRACTION` 0.05→0.10 (1.75deg→3.5deg — only
   affects a subject's very first Stage 1 session). A real "reward given when the dot isn't moving"
@@ -748,7 +1027,7 @@ anywhere in the curriculum).
   over from the previous trial's frozen spot.
 - **Stage 3's real startup freeze (confirmed via a real bench-test log, `log-stage3.txt`) — root
   cause was a Windows-specific `subprocess`/pipe hang, not what it first looked like.** The
-  session-startup `_git_commit()` helper (`stage3_clicks_direction.py`/`stage4_resume_staircases.py`,
+  session-startup `_git_commit()` helper (`stage4_clicks_direction.py`/`stage5_resume_staircases.py`,
   identical copy in both) originally used `subprocess.check_output(['git', 'rev-parse', 'HEAD'],
   timeout=N)` — this `timeout=` is **not reliably enforced on Windows** in this scenario: CPython's
   `Popen.communicate(timeout=...)`, on hitting the timeout, calls `kill()` then does a SECOND,
@@ -800,6 +1079,80 @@ anywhere in the curriculum).
   reduced for panels that are now half-width, since the earlier layout rework otherwise left
   several titles/legends visibly overflowing their own panel (confirmed by rendering real preview
   PNGs and reading them back, not just running headless-without-inspecting).
+- **The rotary really does wrap at +/-180deg, and the two consumers of `WHEEL_POS` deliberately
+  disagree about whether to unwrap it.** Verified empirically rather than assumed: across every
+  session recorded on this rig (50k+ samples) not one raw `WHEEL_POS` value falls outside +/-180,
+  so the firmware wrap is real and the raw stream is bounded by construction. What a consumer
+  should do with that differs:
+  - `_wheel_shaping_shared/derive_intrial_threshold.py` (`_session_wheel_trace()`) **does** unwrap,
+    per trial segment, because its sliding-window excursion percentile needs true cumulative
+    rotation — a window straddling a wrap would otherwise report a spurious ~360deg excursion for a
+    tiny real movement. It must never unwrap across a segment boundary (each trial re-zeros via
+    `rotary.set_zero_position()`), and its anchor lookup tries `SM_SEND_TIME` then `TRIAL_START`:
+    checking only the former, as an earlier version did, silently sent every Stage 1/2 session down
+    the session-wide fallback that unwraps straight across those resets (measurably worse on a real
+    session: -865..+1900deg vs -1635..+895deg).
+  - `run_session.py` (`parse_wheel_position_series()`) deliberately does **not** unwrap, and plots
+    the raw wrapped degrees. It did unwrap briefly, added on the same reasoning as the above, and
+    that was a real reported bug: on a real session it drove the dashboard panel to -1635..+895deg,
+    because every genuine wrap crossing of a briskly-turned wheel accumulates into true total
+    rotation (one trial there crossed the boundary 5 times in 5.5s, ~4.5 rotations). Cumulative
+    rotation is the right quantity for an excursion percentile and the wrong one for a monitoring
+    panel whose threshold reference lines sit at single-digit degrees. **Before "fixing" a wheel
+    trace in either direction, decide which of these two questions the consumer is asking.**
+- **Clocks: MATLAB Bpod's convention is to put everything on the state machine's own clock**
+  (`TrialStartTimestamp` + trial-relative state/event times; external devices are synced to it,
+  never to the PC clock). Here:
+  - The parser now reads each trial's `TRIAL-BPOD-TIME` INFO row (`BPOD-INITIAL-TIME` is that
+    trial's `TrialStartTimestamp`) into `bpod_start`.
+  - `session_csv_parser.fit_host_to_bpod()` fits host→Bpod linearly from each trial's host anchor.
+    Measured on real sessions: 6–16ppm drift, ~4ms residual SD, 10ms max.
+  - `wheel_samples_bpod_time()` places stream-mode wheel samples exactly, via the per-trial
+    `ROTARY_MARKER` (module clock) vs the first state's start (Bpod clock).
+  - `session_struct_export` writes `TrialStartTimestamp`, `WHEEL_POS_bpod_t`, `camera.bpod_t` and
+    the fit into every struct.
+  - The host anchor is now `SM_RUN_TIME` (= `runner.last_run_t`, taken right before RUN), registered
+    by every stage for every choice machine; Stage 3–5's cue machine keeps `SM_SEND_TIME`. Older
+    sessions with neither get an anchor recovered from `THRESHOLD_CROSSING_TIME`/`LICK_TIMES_IN`
+    (`derived_host_anchor()`).
+  - **Never use `TRIAL_START` as a per-trial anchor.** It is registered before the trial's own
+    TRIAL row, so the parser files it under the *previous* trial. `run_session.py` did exactly this
+    for Stage 1/2 lick/reward times until 2026-10-22, offsetting them by roughly one trial. Use
+    `session_csv_parser.trial_host_anchor()`.
+- **`SM_SEND_TIME`-style host-clock anchors must be captured AFTER `send_state_machine()`, not
+  before the state machine is built.** Bpod's own event offsets are hardware-relative, zeroed at
+  the real (later) hardware trial start, so anchoring them to a `time.time()` taken before SM
+  construction + USB upload added that whole gap as drift — measured at 0.22-0.48s on a real
+  session. `TrialRunner.run_trial_state_machine()` now records `self.last_send_t` immediately after
+  the upload returns, and every stage script reassigns `send_t = runner.last_send_t` (and
+  `cue_send_t` likewise, for stage3-5's separate cue-period machine) right after the corresponding
+  thread's `join()`, before deriving anything from it. Every derived VAL in all 5 stages uses that
+  anchor — `SM_SEND_TIME`, `THRESHOLD_CROSSING_TIME`, `LED_ON_TIME`, `DOT_ONSET_TIME`,
+  `DOT_DISAPPEAR_TIME`, `ABORT`, `TIMED_OUT`, the reward time, and the port-event times below. Two
+  deliberate exceptions: `CUE_ONSET_TIME` stays tied to the real `hifi.play()` moment, and the
+  *early* `send_t` the render loop uses for its own dot-onset-delay comparison is left alone (it is
+  a UX timing decision, not an arithmetic anchor). The residual RUN/install-ack latency inside the
+  blocking call is still unaccounted for — expect this to shrink the drift, not zero it.
+- **Lick events are registered as both edges, via one shared helper.**
+  `TrialRunner.register_port_events(prefix, events_dict, anchor_t)` registers
+  `{prefix}_TIMES_IN`/`{prefix}_TIMES_OUT` (comma-joined, same convention as `CLICK_TIMES_L/R`) and
+  returns both lists — prefixes `LICK` in stage1/2, `CUE_LICK`/`CHOICE_LICK` in stage3-5. Pairing
+  In with Out makes per-contact duration auditable directly, which is what a suspected sensor
+  debounce/threshold problem needs; there is no software knob for debounce anywhere in `pybpod-api`,
+  so diagnosing that is a physical check on the behavior port, not a code change.
+- **`CAMERA_FPS` is nominal and `CAMERA_FPS_REALIZED` is what actually happened** — both are
+  registered. `CameraRecorder`'s throttle can only ever slow *toward* the nominal rate, never catch
+  up past it, so the realized rate is routinely well below it (30.0 nominal vs ~21.3 measured);
+  `compute_realized_fps()` derives it from the per-frame timestamps already being collected. Use
+  the realized value for any analysis that converts frame indices to time.
+- **(Polling mode only — the Tests/ scripts; the stages now stream, see "Hardware module notes")
+  The `WHEEL_POS` poll rate is ~33Hz no matter what `VAR_POLL_HZ` says** (100 requested). The
+  per-iteration rotary serial round-trip plus a synchronous CSV flush dominates, and
+  `_trial_poll_loop`'s `time.sleep(self.poll_interval)` is additive on top of that work rather than
+  sleeping only the remainder. Both the elapsed-adjusted sleep and the batched-flush work aimed at
+  raising this ceiling were part of the reverted change described under "Hardware module notes", so
+  the ~33Hz figure stands — treat `VAR_POLL_HZ` as a request, and take the real sample spacing from
+  the data.
 
 ## Multi-box training-log sync (`AuditoryEvidenceAccum/records/build_training_log.py`)
 
@@ -1075,7 +1428,7 @@ Python Bpod stack):
   hifi_singleside_test, hifi_alternating_easy_test, hifi_alternating_easy_gabor_test,
   gabor_wheel_test, camera_test, wheel_turn_reward, lick_reward, lick_timer}` and
   `AuditoryEvidenceAccum/tasks/{stage1_wheel_shaping, stage2_threshold_staircase,
-  stage3_clicks_direction, stage4_resume_staircases}` (stage2 has two reward states,
+  stage4_clicks_direction, stage5_resume_staircases}` (stage2 has two reward states,
   `RewardL`/`RewardR`, that already shared one `VAR_REWARD_DURATION` variable, so one substitution
   covers both). Each script sets its own `VAR_REWARD_UL` (target volume, `4.0` by default — the
   same magnitude the fallback's 0.1s was already approximating) and computes
@@ -1089,7 +1442,7 @@ Python Bpod stack):
 - **`get_reward_duration_s(VAR_REWARD_UL)` (drives the valve) and `register_value('REWARD_UL',
   VAR_REWARD_UL)` (drives the training log's "Reward Amount (uL)" column) are two SEPARATE
   integration points — using one does not give you the other.** Confirmed as a real, already-shipped
-  gap: `stage3_clicks_direction.py`/`stage4_resume_staircases.py` both computed and used
+  gap: `stage4_clicks_direction.py`/`stage5_resume_staircases.py` both computed and used
   `VAR_REWARD_UL` for the valve (and for their own `SESSION_WATER_UL` VAL) but never actually called
   `my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)` the way `stage1_wheel_shaping.py`/
   `stage2_threshold_staircase.py` already did — so `build_training_log.py`'s
@@ -1170,7 +1523,7 @@ the waveform's own peak-amplitude scale, a `[0, 1]` multiplier applied before `l
   added to `hifi_setup.py` (all 8 HiFi-using scripts already import it) for the same "one place this
   computation lives, can't drift between scripts" reasoning as `create_dot_display()` above. Wired
   into all 8 HiFi-using task scripts across both projects:
-  `AuditoryEvidenceAccum/tasks/{stage3_clicks_direction, stage4_resume_staircases}` and
+  `AuditoryEvidenceAccum/tasks/{stage4_clicks_direction, stage5_resume_staircases}` and
   `Tests/tasks/{full_protocol_lookback_test, hifi_singleside_gabor_test, hifi_singleside_dot_test,
   hifi_alternating_easy_gabor_test, hifi_singleside_test, hifi_alternating_easy_test}` — each sets
   its own `VAR_TARGET_SPL_DB = 70.0` (flagged tunable, no doc-specified value) and registers it plus
@@ -1181,8 +1534,8 @@ the waveform's own peak-amplitude scale, a `[0, 1]` multiplier applied before `l
   uncalibrated amplitude) — the only script with this extra layering; the other 7 apply the
   calibrated amplitudes directly. `build_training_log.py` reads `TARGET_SPL_DB`/`LEFT_FREQ_HZ`/
   `RIGHT_FREQ_HZ` the same session-level-VAL way as `GIT_COMMIT`, as three new columns — populated
-  only for the 3 protocols with a `PROTOCOL_CONFIG` entry (`stage3_clicks_direction`,
-  `stage4_resume_staircases`, `full_protocol_lookback_test`), blank elsewhere.
+  only for the 3 protocols with a `PROTOCOL_CONFIG` entry (`stage4_clicks_direction`,
+  `stage5_resume_staircases`, `full_protocol_lookback_test`), blank elsewhere.
 
 ## Architecture notes
 

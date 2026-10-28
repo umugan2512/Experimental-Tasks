@@ -27,20 +27,94 @@ import numpy as np
 import session_csv_parser
 
 
-def _session_wheel_trace(trials):
+def _unwrap_deg(pos_array):
+    """ Standard circular unwrap for a ±180deg-wrapped signal, via deg->rad->unwrap->deg -- not
+    np.unwrap(..., period=360) directly, since this environment's NumPy may predate the `period`
+    kwarg (added in 1.21). """
+    return np.degrees(np.unwrap(np.radians(pos_array)))
+
+
+# Each entry is a GROUP of keys whose values together mark every reset; groups are tried in order
+# and the first that yields anything wins. Stream-mode sessions (2026-10-22 on) re-zero the rotary
+# right before EVERY Bpod RUN, logged as SM_RUN_TIME (and, for stage3-5's cue machine,
+# SM_SEND_TIME) -- so both together are the reset times. Older stage3-5 sessions logged only
+# SM_SEND_TIME, older stage1/2 only TRIAL_START.
+ANCHOR_KEYS = (('SM_RUN_TIME', 'SM_SEND_TIME'), ('TRIAL_START',))
+
+
+def _trial_anchors(trials, anchor_keys=ANCHOR_KEYS):
+    """ (sorted anchor times, the key group they came from) -- each anchor marks one rotary
+    re-zero (session-elapsed seconds, the same basis WHEEL_POS uses). Tries each key group in
+    order and takes the first that any trial actually carries (see ANCHOR_KEYS). Older stage1/2
+    sessions register TRIAL_START instead (a few ms after their own reset, which is close enough --
+    nothing polled the wheel in between). Checking only SM_SEND_TIME, as an earlier version did,
+    silently sent every stage1/2 session down the session-wide fallback below; that path is
+    measurably worse on real data, since it unwraps straight across the per-trial resets. Trials
+    missing the keys (e.g. a trailing incomplete trial) are skipped. """
+    for group in anchor_keys:
+        group = (group,) if isinstance(group, str) else group
+        anchors = []
+        for trial in trials:
+            for key in group:
+                value = trial['vals'].get(key)
+                if value is None:
+                    continue
+                try:
+                    anchors.append(float(value[-1]) if isinstance(value, list) else float(value))
+                except (TypeError, ValueError):
+                    continue
+        if anchors:
+            return sorted(anchors), group
+    return [], None
+
+
+def _session_wheel_trace(trials, anchor_keys=ANCHOR_KEYS):
     """ Concatenates every trial's own WHEEL_POS stream (session-elapsed-time, degrees) into one
-    time-sorted (t, pos) pair of arrays spanning the whole session -- excursion/drift is a
-    continuous phenomenon, not scoped to trial boundaries, so this deliberately does not respect
-    trial edges. Trials with no WHEEL_POS rows at all (state-machine-only, e.g. a trailing
-    incomplete trial -- see session_csv_parser.real_trials()) simply contribute nothing. """
-    times, positions = [], []
+    time-sorted (t, pos) pair of arrays spanning the whole session, unwrapping the ±180deg-wrapped
+    position WITHIN each trial's own segment (bounded by its anchor_key reset time) but NEVER
+    across a segment boundary -- a sliding-window excursion straddling a rotary.set_zero_position()
+    reset or an in-trial wrap would otherwise register a spurious excursion equal to roughly the
+    pre-reset position magnitude, directly contaminating the percentile-based threshold this tool
+    derives. This reverses an earlier, deliberate version of this function that concatenated the
+    whole session with no regard for trial edges at all -- that choice predated the discovery that
+    the rotary re-zeros every single trial and wraps at ±180deg, both of which are a real problem
+    for a *session-wide* sliding window specifically (reasoning that still holds for drift/
+    excursion being a continuous, not trial-scoped, phenomenon in general -- just not across a
+    hard reset). Trials with no WHEEL_POS rows at all (state-machine-only, e.g. a trailing
+    incomplete trial -- see session_csv_parser.real_trials()) simply contribute nothing.
+
+    Buckets by each sample's own timestamp against the sorted anchor list, NOT by which trial dict
+    a WHEEL_POS row happens to be grouped under in the CSV -- robust to a continuously-polling
+    poll thread (see bpod_trial_helpers.py's TrialRunner) logging a sample that logically belongs
+    to "the gap before trial N" under trial N-1's own row group. """
+    raw_times, raw_positions = [], []
     for trial in trials:
         for raw in trial['vals'].get('WHEEL_POS', []):
-            t_str, pos_str = raw.split(',')
-            times.append(float(t_str))
-            positions.append(float(pos_str))
-    order = np.argsort(times)
-    return np.asarray(times)[order], np.asarray(positions)[order]
+            t_str, pos_str = raw.split(',')[:2]   # stream rows add a 3rd field (module time)
+            raw_times.append(float(t_str))
+            raw_positions.append(float(pos_str))
+    if not raw_times:
+        return np.asarray([]), np.asarray([])
+    order = np.argsort(raw_times)
+    raw_times = np.asarray(raw_times)[order]
+    raw_positions = np.asarray(raw_positions)[order]
+
+    anchors, _anchor_key = _trial_anchors(trials, anchor_keys)
+    if not anchors:
+        print("WARNING: none of the per-trial anchors {0} were found in this session -- falling "
+              "back to session-wide unwrap (the old behavior); per-trial segmentation is NOT "
+              "applied, so a sliding window straddling a rotary reset may still register a "
+              "spurious excursion.".format(list(anchor_keys)), file=sys.stderr)
+        return raw_times, _unwrap_deg(raw_positions)
+
+    anchors_arr = np.asarray(anchors)
+    bucket_idx = np.clip(np.searchsorted(anchors_arr, raw_times, side='right') - 1,
+                          0, len(anchors_arr) - 1)
+    out_positions = np.empty_like(raw_positions)
+    for b in np.unique(bucket_idx):
+        mask = bucket_idx == b
+        out_positions[mask] = _unwrap_deg(raw_positions[mask])
+    return raw_times, out_positions
 
 
 def compute_window_excursions(times, positions, window_s):

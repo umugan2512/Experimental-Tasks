@@ -74,6 +74,7 @@ def _load_subject_aliases():
 
 sys.path.insert(0, os.path.join(_PROJECT_DIR, 'tasks', '_wheel_shaping_shared'))
 import session_csv_parser     # noqa: E402 -- same-project import (records/ -> tasks/_wheel_shaping_shared/)
+from water_tracker import ConsumedWaterTracker   # noqa: E402 -- same folder as session_csv_parser
 import session_struct_export  # noqa: E402
 import staircase               # noqa: E402
 
@@ -116,15 +117,19 @@ def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_r
     return None
 
 
-def summarize_session(path):
+def summarize_session(path, parsed=None):
     """ Parses one session CSV and returns a flat dict of everything the training log wants for
     one row, or None if the file has no recognizable protocol name OR the protocol has no
     PROTOCOL_CONFIG entry. The latter matters now that scan_all_sessions() also scans the Tests
     project (see its own docstring) -- that folder has many bench-test protocols (dot_wheel_test,
     camera_test, lick_reward, ...) with no meaningful outcome taxonomy to report; only protocols
     explicitly configured (currently: stage1-5 and full_protocol_lookback_test) generate a row, so
-    the log doesn't fill up with all-'unknown'-outcome noise from every bench script ever run. """
-    info, session_vals, trials = session_csv_parser.parse_session_csv(path)
+    the log doesn't fill up with all-'unknown'-outcome noise from every bench script ever run.
+
+    `parsed` = an already-parsed (info, session_vals, trials) for this file (e.g. from the live
+    dashboard's IncrementalSessionParser), to avoid reading the whole CSV again. """
+    info, session_vals, trials = (parsed if parsed is not None
+                                  else session_csv_parser.parse_session_csv(path))
     protocol_name = info.get('PROTOCOL-NAME')
     if not protocol_name or protocol_name not in session_csv_parser.PROTOCOL_CONFIG:
         return None
@@ -149,8 +154,20 @@ def summarize_session(path):
     main_trial_total = main_trial_correct_count = 0
     aborts_quiescence = aborts_cue = aborts_delay = aborts_response = 0
 
+    # Consumed water uses the same rule as the Stage 1/2 water cap (water_tracker.py): a drop counts
+    # once the animal licks after it was delivered, even if that lick lands in a later trial.
+    water = ConsumedWaterTracker(1.0)   # counts drops; scaled by reward_ul below
     for trial in trials:
         outcome, side, _reward_duration, consumed = session_csv_parser.classify_trial(trial, config)
+        reward_start = None
+        if outcome == 'rewarded':
+            for st in config.get('rewarded_states', ()):
+                occ = trial['states'].get(st)
+                occ = occ[-1] if occ and isinstance(occ[0], (list, tuple)) else occ
+                if occ and not session_csv_parser._isnan(occ[0]):
+                    reward_start = occ[0]
+                    break
+        water.record_trial(trial['events'].get('Port1In', []), reward_start)
         trial_type = trial['vals'].get('TRIAL_TYPE')   # Stage 3/4/5's own custom VAL -- absent (None)
                                                           # for Stage 1/2 and full_protocol_lookback_test
         if outcome == 'rewarded':
@@ -183,7 +200,7 @@ def summarize_session(path):
             l_count += 1
         elif side == 'R':
             r_count += 1
-        lick_count += len(trial['events'].get('Port1In', []))
+        lick_count += len(session_csv_parser.trial_licks(trial))   # chatter merged
 
         if trial_type == 'warmup':
             warmup_trial_count += 1
@@ -247,7 +264,8 @@ def summarize_session(path):
     ended_dt = session_csv_parser.session_end_datetime(info, started_dt, session_duration_s)
     time_of_day = started_dt.strftime('%H:%M') if started_dt is not None else ''
 
-    consumed_volume_ul = (reward_ul * consumed_reward_count) if reward_ul is not None else None
+    consumed_volume_ul = (reward_ul * water.consumed_ul) if reward_ul is not None else None
+    delivered_volume_ul = (reward_ul * water.delivered_ul) if reward_ul is not None else None
 
     struct_mat_path = os.path.splitext(path)[0] + '_struct.mat'
     session_struct_path = struct_mat_path if os.path.exists(struct_mat_path) else None
@@ -275,6 +293,7 @@ def summarize_session(path):
         'aborts': aborts,
         'reward_ul': reward_ul,
         'consumed_volume_ul': consumed_volume_ul,
+        'delivered_volume_ul': delivered_volume_ul,
         'threshold_start_deg': threshold_start_deg,
         'threshold_end_deg': threshold_end_deg,
         'threshold_final_deg': threshold_final_deg,
@@ -462,6 +481,8 @@ def combine_group(group):
     duration_s = sum(durations) if durations else None
 
     consumed_vals = [s['consumed_volume_ul'] for s in group if s['consumed_volume_ul'] is not None]
+    delivered_vals = [s.get('delivered_volume_ul') for s in group
+                      if s.get('delivered_volume_ul') is not None]
     water_vals = [s['session_water_ul'] for s in group if s['session_water_ul'] is not None]
 
     # accuracy_aos/abort_rate are session-level RATES, not counts -- can't just sum them across a
@@ -492,6 +513,7 @@ def combine_group(group):
         'session_duration_s': duration_s,
         'reward_ul': last['reward_ul'],
         'consumed_volume_ul': sum(consumed_vals) if consumed_vals else None,
+        'delivered_volume_ul': sum(delivered_vals) if delivered_vals else None,
         'aborts': sum(s['aborts'] for s in group),
         'withheld_count': sum(s['withheld_count'] for s in group),
         'no_movement_count': sum(s['no_movement_count'] for s in group),
@@ -575,7 +597,9 @@ COLUMNS = [
     ('trial_count', 'Trials'),
     ('session_duration_s', 'Duration (s)'),
     ('reward_ul', 'Reward Amount (uL)'),            # auto, from the REWARD_UL VAL
-    ('consumed_volume_ul', 'Total Volume (uL)'),    # auto, only counts licked/consumed rewards
+    ('consumed_volume_ul', 'Water Consumed (uL)'),  # auto, licked after delivery (same rule as the
+                                                     # Stage 1/2 water cap, water_tracker.py)
+    ('delivered_volume_ul', 'Water Delivered (uL)'),  # auto, every reward the valve gave
     ('aborts', 'Aborts'),
     ('withheld_count', 'Withheld'),
     ('no_movement_count', 'No-movement'),

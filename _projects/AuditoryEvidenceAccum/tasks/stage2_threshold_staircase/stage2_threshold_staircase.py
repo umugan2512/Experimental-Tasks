@@ -62,13 +62,15 @@ _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '_wheel_shaping_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
+from water_tracker import ConsumedWaterTracker
 import staircase
 import session_state
 import session_struct_export
 import session_csv_parser
 from direction_tracker import DirectionRatioTracker
 from wheel_shaping_plots import WheelShapingPlots
-from bpod_trial_helpers import TrialRunner, was_visited
+from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
+from trial_render import run_trial_render_loop, register_trial_timing
 import rotary_setup
 import dot_display
 from camera_recorder import CameraRecorder
@@ -97,7 +99,12 @@ def _cleanup_and_export():
     skipped regardless of how the session ended -- fixes a real gap: an unhandled exception used
     to `raise` straight out of the trial loop, skipping this teardown (and the Kill/final-cleanup
     code below used to duplicate this by hand in three places instead of sharing it). """
+    runner.stop()   # writes the last buffered wheel samples, then stops the rotary's USB stream --
+                     # before rotary.close() and my_bpod.close(), which it needs.
     camera.close()
+    realized_fps = camera.compute_realized_fps()
+    if realized_fps is not None:
+        my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
     dot.close()
     rotary.close()
     csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
@@ -142,13 +149,21 @@ VAR_STEADY_THRESHOLD_DEG = 4
 VAR_RESPONSE_TIMEOUT_S = 10.0       # same flagged/tunable placeholder as Stage 1
 
 VAR_THRESHOLD_FINAL_DEG = 35        # matches Stage 1 / this project's established final-task value
-VAR_TRIAL_COUNT_ADVANCE = 200       # ALSO now the session's own hard trial cap (see the trial
-                                     # loop below): the session deliberately ends once this many
-                                     # trials complete, it isn't just an advancement threshold
-                                     # checked after an otherwise-longer session anymore.
+VAR_TRIAL_COUNT_ADVANCE = 100       # The QUALIFYING threshold only (lowered from the doc's
+                                     # original 200, per explicit instruction) -- how many
+                                     # trials with a genuine movement (rewarded or withheld; see
+                                     # staircase_success below) this session needs for
+                                     # advancement purposes. Deliberately NOT the same thing as
+                                     # the session's own hard trial cap any more (see
+                                     # VAR_TRIAL_CAP below) -- those two numbers used to share
+                                     # one variable/value, but per explicit instruction they're
+                                     # now independent.
+VAR_TRIAL_CAP = 250                 # The session's own hard trial-count cap (one of three --
+                                     # see below), checked against every ATTEMPTED trial, not
+                                     # the qualifying count above.
 VAR_SESSION_WATER_CAP_UL = 1500.0   # per explicit instruction: three caps on the session --
-                                     # 200 trials, 1.5mL delivered, or 30 minutes elapsed --
-                                     # whichever comes first.
+                                     # VAR_TRIAL_CAP trials, 1.5mL consumed, or 30 minutes
+                                     # elapsed -- whichever comes first.
 VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
@@ -173,11 +188,15 @@ VAR_SPOUT_STEP_MM = 2.5             # doc: "~2-3mm per session" -- midpoint, fla
                                      # printed as a manual-action reminder only, no actuator exists
 
 VAR_ROTARY_USB_PORT = None
-VAR_STILL_POLL_HZ = 100              # additions.txt T4: raised 50->100. NEEDS ON-RIG CONFIRMATION
-VAR_POLL_HZ = 100                    # that the poll thread keeps up without delaying state-machine
-                                      # handling -- if not, fall back to 50/50 (still a real
-                                      # improvement over the old 50/10 split) and note which rate
-                                      # was actually used when reporting results from a real session.
+VAR_STILL_POLL_HZ = 100              # how often the hold-to-init check re-evaluates the streamed
+                                      # samples. The wheel's own sample rate is set by the rotary
+                                      # firmware's USB stream, not by this (see rotary_stream.py).
+VAR_POLL_HZ = 100                    # unused in stream mode (polling-mode TrialRunner only)
+
+SOFTCODE_DOT_ON = 1                  # sent by DotOn's entry: draw the dot (and answer once painted)
+SOFTCODE_CROSSED = 2                 # sent by RewardL/R and NoRewardL/R's entry: freeze the dot
+VAR_DOT_HANDSHAKE_TIMEOUT_S = 1.0    # DotOn -> DotTimeout if the PC hasn't confirmed the dot by then
+VAR_WAIT_QUIESCENCE_MAX_S = 3600.0   # WaitQuiescence's own timer ("as long as it takes")
 
 VAR_CAMERA_INDEX = None                      # None = auto-discover, see
                                               # camera_recorder.discover_camera()
@@ -242,13 +261,30 @@ my_bpod = Bpod()
 print("Connected to Bpod on {0}".format(my_bpod.serial_port), flush=True)
 
 rotary, rotary_bpod_module = rotary_setup.connect_rotary(my_bpod, usb_port=VAR_ROTARY_USB_PORT)
-reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(rotary_bpod_module)
+reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(
+    rotary_bpod_module, marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
+
+# Thresholds are armed once here, before the stream starts; the trial loop only re-sets them (inside
+# stream.paused()) when the staircase actually moves. Event names never change (two thresholds).
+cur_threshold_deg_at_start = staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG
+neg_event, pos_event = rotary_setup.set_and_enable_thresholds(
+    rotary, [-cur_threshold_deg_at_start, cur_threshold_deg_at_start])
+rotary.enable_evt_transmission()   # once per session, never toggled (MATLAB's sendThresholdEvents)
 
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
+# What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
+# session's quota) -- registered so a surprisingly short session is traceable to its cause.
+my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.get('used_trials', 0))
+my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
+                       ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 
 log_python_t0 = time.time()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
-                      poll_hz=VAR_POLL_HZ)
+                      poll_hz=VAR_POLL_HZ, use_stream=True,
+                      marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
+runner.start()   # starts the rotary's own session-long USB stream (see rotary_stream.py) -- from
+                  # here on, never call an ack-reading rotary command directly.
 
 dot = dot_display.create_dot_display()
 dot.show()
@@ -287,56 +323,49 @@ bench_plots = WheelShapingPlots(
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
-    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
+    embed=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'),
+    headless=(os.environ.get('RUN_SESSION_DASHBOARD') == '1'))
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting up to {0} trials, capped at {1} trials, {2:.1f}mL delivered, or {3:.0f}min "
-      "elapsed -- whichever first (current threshold {4:.1f}deg = {5:.0%} of final, "
-      "ITI {6:.2f}s)".format(
-          VAR_MAX_TRIALS, VAR_TRIAL_COUNT_ADVANCE, VAR_SESSION_WATER_CAP_UL / 1000.0,
-          VAR_SESSION_DURATION_CAP_S / 60.0,
+print("Starting up to {0} trials, capped at {1} attempted trials, {2:.1f}mL consumed, or "
+      "{3:.0f}min elapsed -- whichever first ({4} genuine-movement trials targeted for "
+      "advancement; current threshold {5:.1f}deg = {6:.0%} of final, ITI {7:.2f}s)".format(
+          VAR_MAX_TRIALS, VAR_TRIAL_CAP, VAR_SESSION_WATER_CAP_UL / 1000.0,
+          VAR_SESSION_DURATION_CAP_S / 60.0, VAR_TRIAL_COUNT_ADVANCE,
           staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG, staircase_obj.current_fraction,
           cur_iti_s), flush=True)
 
 session_trial_count = 0
 session_reward_ul_total = 0.0
+water = ConsumedWaterTracker(VAR_REWARD_UL)   # the water cap counts CONSUMED water
 session_start_time = time.time()
 session_end_reason = None
+
+applied_threshold_deg = cur_threshold_deg_at_start   # what the rotary is currently armed with
 
 for trial in range(1, VAR_MAX_TRIALS + 1):
     try:
         cur_threshold_deg = staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG
+        if cur_threshold_deg != applied_threshold_deg:
+            # set_thresholds() reads an ack byte, so it runs inside stream.paused() -- between
+            # trials, before this trial's hold-to-init wait, never while a machine is running.
+            rotary_setup.set_and_enable_thresholds(
+                rotary, [-cur_threshold_deg, cur_threshold_deg], stream=runner.stream)
+            applied_threshold_deg = cur_threshold_deg
 
-        rotary.disable_evt_transmission()
         if quiescence_unlocked:
             quiescence_duration_this_trial = float(np.clip(
                 np.random.exponential(quiescence_obj.current_s),
                 staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
         else:
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
-        n_breaks = runner.wait_for_held_steady(quiescence_duration_this_trial,
-                                                VAR_STEADY_THRESHOLD_DEG, require_no_lick=False)
-        if n_breaks is None:
-            print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
-                  "{0}.".format(trial), flush=True)
-            break
-        trial_start_t = time.time() - log_python_t0
-
-        with runner.rotary_lock:
-            rotary.set_zero_position()
-            event_names = rotary_setup.set_and_enable_thresholds(
-                rotary, [-cur_threshold_deg, cur_threshold_deg])
-        rotary.enable_evt_transmission()
-        neg_event, pos_event = event_names[0], event_names[1]
-
-        runner.register('TRIAL_START', trial_start_t)
-        runner.register('QUIESCENCE_BREAKS', n_breaks)
-        runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
-        runner.register('THRESHOLD_DEG', cur_threshold_deg)
-        dot.clear()
-        dot.pump()
-        camera.pump()
+        # J1 lives INSIDE the quiescence requirement (see stage1_wheel_shaping.py): the dot may only
+        # appear after quiescence, and the whole trial is one Bpod machine (_shared/trial_render.py).
+        dot_onset_jitter_s = np.random.uniform(VAR_DOT_ONSET_JITTER_MIN_S,
+                                               VAR_DOT_ONSET_JITTER_MAX_S)
+        quiescence_hold_s = quiescence_duration_this_trial + dot_onset_jitter_s
+        disappear_delay_s = np.random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
 
         # Known BEFORE the trial starts -- depends only on the last ~40 trials' recorded
         # directions, not on anything that happens this trial (see module docstring for why this
@@ -344,15 +373,26 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         withhold_left = direction_tracker.should_withhold('L')
         withhold_right = direction_tracker.should_withhold('R')
 
-        dot_onset_delay = np.random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
-        disappear_delay_s = np.random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
-
-        send_epoch = time.time()
-        send_t = send_epoch - log_python_t0
-
-        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
-
         sma = StateMachine(my_bpod)
+
+        sma.add_state(
+            state_name='WaitQuiescence',
+            state_timer=VAR_WAIT_QUIESCENCE_MAX_S,
+            state_change_conditions={PC_EVENT_QUIESCENCE_MET: 'DotOn', Bpod.Events.Tup: 'exit'},
+            output_actions=[])
+
+        # Same handshake as stage1_wheel_shaping.py's DotOn: the response window opens only once the
+        # PC confirms the dot is painted; a turn before that ends the trial as MovedBeforeDot.
+        sma.add_state(
+            state_name='DotOn',
+            state_timer=VAR_DOT_HANDSHAKE_TIMEOUT_S,
+            state_change_conditions={
+                PC_EVENT_DOT_SHOWN: 'WheelPeriod',
+                neg_event: 'MovedBeforeDot',
+                pos_event: 'MovedBeforeDot',
+                Bpod.Events.Tup: 'DotTimeout',
+            },
+            output_actions=[('SoftCode', SOFTCODE_DOT_ON)])
 
         sma.add_state(
             state_name='WheelPeriod',
@@ -368,28 +408,40 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             state_name='RewardL',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1), ('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
             state_name='RewardR',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1), ('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
             state_name='NoRewardL',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[])
+            output_actions=[('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
             state_name='NoRewardR',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[])
+            output_actions=[('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
             state_name='NoMovement',
+            state_timer=0,
+            state_change_conditions={Bpod.Events.Tup: 'ITI'},
+            output_actions=[])
+
+        sma.add_state(
+            state_name='MovedBeforeDot',
+            state_timer=0,
+            state_change_conditions={Bpod.Events.Tup: 'ITI'},
+            output_actions=[])
+
+        sma.add_state(
+            state_name='DotTimeout',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
             output_actions=[])
@@ -400,46 +452,33 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[])
 
+        runner.upload(sma)
+
         # Thread-inverted, same pattern as stage1_wheel_shaping.py/full_protocol_lookback_test.py.
         decision_result = {}
         decision_done = threading.Event()
 
         def _run_decision():
             try:
-                decision_result['ran'] = runner.run_trial_state_machine(sma)
+                decision_result['ran'] = runner.run_trial_state_machine(
+                    sma, marker_state='WheelPeriod')
             except SystemExit:
                 decision_result['killed'] = True
+            except Exception:
+                decision_result['error'] = traceback.format_exc()
             finally:
                 decision_done.set()
 
         decision_thread = threading.Thread(target=_run_decision, daemon=True)
+        prev_return_t = runner.last_return_t
+        runner.begin_trial()   # main thread, BEFORE the Bpod thread -- see its docstring
+        runner.start_quiescence(quiescence_hold_s, VAR_STEADY_THRESHOLD_DEG)
         decision_thread.start()
 
-        dot_visible = False
-        frozen = False
-        frozen_at = None
-
-        while not decision_done.is_set():
-            now = time.time()
-            if not dot_visible and (now - send_epoch) >= dot_onset_delay:
-                dot_visible = True
-
-            with runner.rotary_lock:
-                pos = rotary.current_position()
-
-            if dot_visible and not frozen:
-                if pos <= -cur_threshold_deg or pos >= cur_threshold_deg:
-                    frozen = True
-                    frozen_at = now
-                else:
-                    dot.set_position_deg(pos)
-
-            if frozen and (now - frozen_at) >= disappear_delay_s:
-                dot.clear()
-
-            dot.pump()
-            camera.pump()
-            time.sleep(render_interval)
+        render = run_trial_render_loop(
+            runner, dot, camera, decision_done, cur_threshold_deg, disappear_delay_s,
+            render_interval, SOFTCODE_DOT_ON, (SOFTCODE_CROSSED,),
+            quiescence=(quiescence_hold_s, VAR_STEADY_THRESHOLD_DEG))
 
         decision_thread.join(timeout=3.0)
         if decision_thread.is_alive():
@@ -448,8 +487,6 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
 
         dot.clear()
         dot.pump()
-
-        camera.show_snippet(VAR_CAMERA_SNIPPET_S)
         camera.pump()
 
         if decision_result.get('killed'):
@@ -457,33 +494,63 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             _cleanup_and_export()
             sys.exit(0)
 
+        if decision_result.get('error'):
+            # Reported as what it is -- it used to fall through to the "Stop/Kill" message below.
+            print("Trial {0} CRASHED in the Bpod thread -- ending session:\n{1}".format(
+                trial, decision_result['error']), flush=True)
+            runner.register('SESSION_ERROR', decision_result['error'].strip().splitlines()[-1])
+            session_end_reason = 'error'
+            break
+
         if not decision_result.get('ran', False):
             print("Bpod stopped running trials (Stop/Kill) -- ending session early after trial "
                   "{0}.".format(trial), flush=True)
             break
 
+        # Host anchor for every Bpod-relative time below: captured right before RUN (see
+        # TrialRunner.run_trial_state_machine()).
+        send_t = runner.last_run_t
+        n_breaks = runner.quiescence_breaks
         visited = my_bpod.session.current_trial.states_durations
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
+        runner.register('SM_RUN_TIME', send_t)
+        runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
+        runner.register('THRESHOLD_DEG', cur_threshold_deg)
+        runner.register('DOT_ONSET_JITTER_S', dot_onset_jitter_s)
+        register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_return_t,
+                              visited, send_t)
+
+        early = next((s for s in ('MovedBeforeDot', 'DotTimeout') if was_visited(visited, s)), None)
         outcome_state = next(
-            (name for name in ('RewardL', 'RewardR', 'NoRewardL', 'NoRewardR', 'NoMovement')
+            (name for name in ('RewardL', 'RewardR', 'NoRewardL', 'NoRewardR', 'NoMovement',
+                               'MovedBeforeDot', 'DotTimeout')
              if was_visited(visited, name)), 'Unknown')
 
         side = outcome_state[-1] if outcome_state in ('RewardL', 'RewardR', 'NoRewardL',
                                                         'NoRewardR') else None
         rewarded = outcome_state in ('RewardL', 'RewardR')
-        staircase_success = outcome_state != 'NoMovement'   # cleared the threshold at all,
-                                                              # independent of reward withholding
-        outcome = 'Rewarded' if rewarded else ('Withheld' if side is not None else 'NoMovement')
+        staircase_success = side is not None   # cleared the threshold at all, independent of
+                                                 # reward withholding
+        outcome = ('Rewarded' if rewarded else 'Withheld' if side is not None
+                   else early if early else 'NoMovement')
 
-        session_trial_count += 1
+        # Per explicit instruction: a genuine movement counts toward the qualifying/session-cap
+        # threshold even if reward was withheld (debiasing) -- only a true NoMovement trial (no
+        # response at all) is excluded, same "disengagement vs. genuine attempt" line Stage 3/4/5
+        # already draw via their own trial_type=='main' and correct is not None gate. A trial that
+        # ended before the dot (MovedBeforeDot/DotTimeout) never offered a response window, so it
+        # is no movement-threshold staircase outcome either way -- but it IS a failed hold.
+        if staircase_success:
+            session_trial_count += 1
         if rewarded:
             session_reward_ul_total += VAR_REWARD_UL
-        fraction_before_step = staircase_obj.current_fraction
-        staircase_obj.record_outcome(success=staircase_success)
-        if staircase_obj.current_fraction > fraction_before_step:
-            session_saw_threshold_step_up = True
+        if not early:
+            fraction_before_step = staircase_obj.current_fraction
+            staircase_obj.record_outcome(success=staircase_success)
+            if staircase_obj.current_fraction > fraction_before_step:
+                session_saw_threshold_step_up = True
         if quiescence_unlocked:
-            quiescence_obj.record_outcome(success=(n_breaks == 0))
+            quiescence_obj.record_outcome(success=(n_breaks == 0 and early != 'MovedBeforeDot'))
         if side is not None:
             direction_tracker.record(side)
 
@@ -491,38 +558,42 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         runner.register('MOVEMENT_DIRECTION', side if side is not None else 'None')
         runner.register('OUTCOME', outcome)
         runner.register('DIRECTION_RATIO', direction_tracker.right_fraction())
-        if outcome_state in ('RewardL', 'RewardR', 'NoRewardL', 'NoRewardR'):
+        if side is not None:
             runner.register('THRESHOLD_CROSSING_TIME', send_t + visited[outcome_state][-1][0])
 
         print("Trial {0}: threshold={1:.1f}deg, {2}, direction_ratio={3:.2f}".format(
             trial, cur_threshold_deg, outcome, direction_tracker.right_fraction()), flush=True)
 
-        # Port1In licks are already natively logged as raw EVENT rows in the session CSV (see
-        # CLAUDE.md) -- extracted here only for the LIVE plot's own in-memory use, same technique
-        # full_protocol_lookback_test.py already uses, not a new VAL registration.
-        lick_times_abs = [send_t + t for t in choice_events.get('Port1In', [])]
+        # Port1In/Port1Out licks are already natively logged as raw EVENT rows in the session CSV
+        # (see CLAUDE.md) -- register_port_events() also explicitly registers both edges as their
+        # own VALs (per explicit instruction: always report port in AND out times, not just in).
+        lick_times_abs, _lick_times_out = runner.register_port_events('LICK', choice_events, send_t)
+        water.record_trial(choice_events.get('Port1In', []), visited[outcome_state][-1][0] if rewarded else None)
+        runner.register('SESSION_WATER_CONSUMED_UL', water.consumed_ul)
         reward_time_abs = send_t + visited[outcome_state][-1][0] if rewarded else None
 
         magnitude_deg = cur_threshold_deg if staircase_success else 0.0
         bench_plots.add_trial(side if side is not None else 'R', magnitude_deg, cur_threshold_deg,
-                               outcome, iti_s=cur_iti_s,
+                               'Abort' if early else outcome, iti_s=cur_iti_s,
                                direction_ratio=direction_tracker.right_fraction(),
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs)
 
-        # Deliberate session cap, per explicit instruction: stop at 200 trials, 1.5mL delivered,
-        # or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400) above is only a
-        # further-out safety backstop, not the real target. Checked at trial end (not trial
-        # start) so the trial that actually crosses a cap still completes and gets logged.
-        if session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
+        # Deliberate session cap, per explicit instruction: stop at VAR_TRIAL_CAP ATTEMPTED
+        # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold),
+        # 1.5mL CONSUMED (licked after delivery), or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400)
+        # above is only a further-out safety backstop, not the real target. Checked at trial end
+        # (not trial start) so the trial that actually crosses a cap still completes and gets
+        # logged.
+        if trial >= VAR_TRIAL_CAP:
             session_end_reason = 'trial_count_cap'
-        elif session_reward_ul_total >= VAR_SESSION_WATER_CAP_UL:
+        elif water.consumed_ul >= VAR_SESSION_WATER_CAP_UL:
             session_end_reason = 'water_cap'
         elif (time.time() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
             session_end_reason = 'duration_cap_30min'
         if session_end_reason is not None:
-            print("Session cap reached ({0} trials, {1:.1f}uL delivered, {2:.1f}min elapsed) -- "
-                  "ending session.".format(
-                      session_trial_count, session_reward_ul_total,
+            print("Session cap reached ({0} trials attempted, {1} qualifying, {2:.1f}uL consumed of "
+                  "{3:.1f}uL delivered, {4:.1f}min elapsed) -- ending session.".format(
+                      trial, session_trial_count, water.consumed_ul, session_reward_ul_total,
                       (time.time() - session_start_time) / 60.0), flush=True)
             break
 
@@ -544,9 +615,9 @@ if session_end_reason is not None:
 
 # --- session-end bookkeeping: staircase/ITI/spout persistence + advancement gates -------------------
 
-# >= , not > -- a session is now deliberately capped AT VAR_TRIAL_COUNT_ADVANCE trials (see the
-# cap check above), so it can never exceed that count; the qualifying check has to recognize
-# exactly reaching it.
+# >= , not > -- the session's own hard cap is now VAR_TRIAL_CAP (a separate, larger number), not
+# this qualifying threshold, so session_trial_count can legitimately exceed VAR_TRIAL_COUNT_ADVANCE
+# by the time the session actually ends; >= still correctly recognizes "met or exceeded."
 cleared_this_session = session_trial_count >= VAR_TRIAL_COUNT_ADVANCE
 
 if cleared_this_session:

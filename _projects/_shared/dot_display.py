@@ -33,7 +33,7 @@ import time
 
 from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QtGui import QPainter, QColor
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QRect
 
 
 def visual_deg_to_px(visual_deg, screen_width_px, screen_width_mm, viewing_distance_mm):
@@ -57,6 +57,11 @@ def visual_deg_to_px(visual_deg, screen_width_px, screen_width_mm, viewing_dista
     return visual_deg * px_per_deg
 
 
+def _dot_bounds(cx, cy, diameter_px, margin=2):
+    r = diameter_px // 2
+    return QRect(cx - r - margin, cy - r - margin, diameter_px + 2 * margin, diameter_px + 2 * margin)
+
+
 class _DotWidget(QWidget):
     def __init__(self, diameter_px, background_gray, dot_gray):
         super(_DotWidget, self).__init__()
@@ -67,13 +72,30 @@ class _DotWidget(QWidget):
         self._visible_dot = False
         self._punish_active = False
 
+    def _dot_rect(self, x_offset_px):
+        """ Widget-local bounding box of the dot at x_offset_px, with a small margin for
+        antialiasing -- the only pixels a dot move can change. """
+        return _dot_bounds(self.width() // 2 + int(round(x_offset_px)), self.height() // 2,
+                           self._diameter_px)
+
     def set_x_offset(self, x_offset_px):
+        """ Repaints only the dot's old and new footprint, and nothing if it didn't move: a
+        full-window repaint of the rig's 6144x1536 bonded screen took ~19ms in paintEvent (holding
+        the GIL) on every frame, starving the rotary reader thread and delaying the dot's onset
+        (session 20261023-122212); the dirty-rect repaint takes ~0.1ms. """
+        if int(round(x_offset_px)) == int(round(self._x_offset_px)):
+            self._x_offset_px = x_offset_px
+            return
+        old = self._dot_rect(self._x_offset_px)
         self._x_offset_px = x_offset_px
-        self.update()
+        if self._visible_dot:
+            self.update(old.united(self._dot_rect(x_offset_px)))
 
     def set_dot_visible(self, visible):
+        if visible == self._visible_dot:
+            return
         self._visible_dot = visible
-        self.update()
+        self.update(self._dot_rect(self._x_offset_px))
 
     def set_punish_active(self, active):
         """ Orthogonal overlay flag -- when True, paintEvent below paints a full-white (255)
@@ -194,13 +216,27 @@ class _MiddleOnlyDotWidget(QWidget):
         self._x_offset_px = 0
         self._visible_dot = False
 
+    def _dot_rect(self, x_offset_px):
+        """ Widget-local bounding box of the dot at x_offset_px (see _DotWidget._dot_rect()). """
+        x0, w = self._active_rect()
+        return _dot_bounds(x0 + w // 2 + int(round(x_offset_px)), self.height() // 2,
+                           self._diameter_px)
+
     def set_x_offset(self, x_offset_px):
+        """ Repaints only the dot's old and new footprint -- see _DotWidget.set_x_offset(). """
+        if int(round(x_offset_px)) == int(round(self._x_offset_px)):
+            self._x_offset_px = x_offset_px
+            return
+        old = self._dot_rect(self._x_offset_px)
         self._x_offset_px = x_offset_px
-        self.update()
+        if self._visible_dot:
+            self.update(old.united(self._dot_rect(x_offset_px)))
 
     def set_dot_visible(self, visible):
+        if visible == self._visible_dot:
+            return
         self._visible_dot = visible
-        self.update()
+        self.update(self._dot_rect(self._x_offset_px))
 
     def _active_rect(self):
         """ (x0, width) in widget-local px of the active_segment_index-th of n_segments equal

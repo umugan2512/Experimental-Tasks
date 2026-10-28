@@ -148,7 +148,8 @@ VAR_DEFAULT_REWARD_UL = 7.0    # default shown in the Launch Task reward field -
                                 # launch; passed to the task subprocess via RUN_SESSION_REWARD_UL
 
 VAR_SESSION_POLL_MS = 1000    # how often to look for a newer session folder on disk
-VAR_PLOTS_POLL_MS = 2000      # how often to re-parse the watched CSV and feed new trials
+VAR_PLOTS_POLL_MS = 500       # how often to read the watched CSV's new rows and feed new trials
+                              # (incremental -- see session_csv_parser.IncrementalSessionParser)
 VAR_CAMERA_POLL_MS = 1000     # how often to read the latest camera JPEG (see grab_latest_frame())
 VAR_STOP_GRACE_S = 8.0        # how long to wait for a graceful 'close' before escalating to kill
 VAR_QUICK_DEATH_CHECK_MS = 2000   # how long after launch to check whether the task subprocess has
@@ -184,14 +185,15 @@ _DASHBOARD_PROTOCOL_INFO = {
         'stage': 1,
         'anchor_key': 'TRIAL_START',
         'threshold_key': 'THRESHOLD_DEG',
-        'outcome_map': {'rewarded': 'Rewarded', 'no_movement': 'NoMovement'},
+        'outcome_map': {'rewarded': 'Rewarded', 'no_movement': 'NoMovement', 'aborted': 'Abort'},
         'crossed_outcomes': {'rewarded'},
     },
     'stage2_threshold_staircase': {
         'stage': 2,
         'anchor_key': 'TRIAL_START',
         'threshold_key': 'THRESHOLD_DEG',
-        'outcome_map': {'rewarded': 'Rewarded', 'withheld': 'Withheld', 'no_movement': 'NoMovement'},
+        'outcome_map': {'rewarded': 'Rewarded', 'withheld': 'Withheld', 'no_movement': 'NoMovement',
+                         'aborted': 'Abort'},
         'crossed_outcomes': {'rewarded', 'withheld'},
     },
     'stage3_tone_side_association': {
@@ -270,6 +272,77 @@ PYBPOD_VARSNAMES = []
 # --- project/board/subject/user discovery (mirrors what the PyBpod GUI itself already has on
 # disk -- never guessed/hardcoded) ------------------------------------------------------------
 
+def _subject_json_path(name):
+    return os.path.join(_PROJECT_DIR, 'subjects', name, name + '.json')
+
+
+def _subject_exists(name):
+    return os.path.exists(_subject_json_path(name))
+
+
+def _known_uuids():
+    """ Every __UUID4__ of a subject/board/task/user descriptor on disk (the files a setup's
+    __EXTERNAL-REF__ can point at) -- same "basename matches its parent folder" filter as
+    discover_subjects(). """
+    uuids = set()
+    for kind in ('subjects', 'boards', 'users'):
+        for path in glob.glob(os.path.join(_PROJECT_DIR, kind, '*', '*.json')):
+            if os.path.splitext(os.path.basename(path))[0] != os.path.basename(os.path.dirname(path)):
+                continue
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    uuids.add(json.load(f).get('__UUID4__'))
+            except Exception:
+                continue
+    for path in glob.glob(os.path.join(_TASKS_DIR, '*', '*.json')):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                uuids.add(json.load(f).get('__UUID4__'))
+        except Exception:
+            continue
+    uuids.discard(None)
+    return uuids
+
+
+def _prune_setup_data(setup_data, known_uuids):
+    """ Removes, in place, subject names with no subject JSON on disk and __EXTERNAL-REF__
+    UUIDs matching nothing on disk. Returns (removed_names, removed_uuids). """
+    names = setup_data.get('subjects') or []
+    removed_names = [n for n in names if not _subject_exists(n)]
+    setup_data['subjects'] = [n for n in names if _subject_exists(n)]
+    refs = setup_data.get('__EXTERNAL-REF__') or []
+    removed_uuids = [u for u in refs if u not in known_uuids]
+    if '__EXTERNAL-REF__' in setup_data:
+        setup_data['__EXTERNAL-REF__'] = [u for u in refs if u in known_uuids]
+    return removed_names, removed_uuids
+
+
+def prune_dangling_setup_refs():
+    """ Run once at dashboard startup: strips every setup JSON of subjects that were deleted
+    without being detached first (their names and dangling UUIDs). Setup JSONs are machine-local
+    and gitignored; recorded session data is never touched. Returns {setup_path: (names, uuids)}
+    for what was removed. """
+    known = _known_uuids()
+    removed = {}
+    pattern = os.path.join(_PROJECT_DIR, 'experiments', '*', 'setups', '*', '*.json')
+    for path in sorted(glob.glob(pattern)):
+        if os.path.splitext(os.path.basename(path))[0] != os.path.basename(os.path.dirname(path)):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        names, uuids = _prune_setup_data(data, known)
+        if names or uuids:
+            data['__UPDATED-ON__'] = datetime.datetime.now().isoformat(' ')
+            _write_pybpod_json(path, data)
+            removed[path] = (names, uuids)
+            print("Removed deleted subject(s) {0} ({1} dangling ref(s)) from setup {2}".format(
+                names, len(uuids), os.path.relpath(path, _PROJECT_DIR)), flush=True)
+    return removed
+
+
 def discover_stage_configs():
     """ Returns a list of {experiment, setup, board, task_name, task_script, subjects}, one per
     already-GUI-configured experiment/setup this project has on disk (scanned, not a hardcoded
@@ -295,7 +368,10 @@ def discover_stage_configs():
         results.append({
             'experiment': experiment, 'setup': setup, 'board': data.get('board'),
             'task_name': task_name, 'task_script': task_script,
-            'subjects': list(data.get('subjects') or []),
+            # Only subjects that still exist on disk -- a subject deleted outside this tool (or by
+            # an older version of it) stays listed in the setup JSON, and used to show up in every
+            # Stage dropdown as a ghost that couldn't be launched or detached.
+            'subjects': [n for n in (data.get('subjects') or []) if _subject_exists(n)],
         })
     results.sort(key=lambda c: build_training_log._stage_sort_key(c['task_name']))
     return results
@@ -537,11 +613,17 @@ def detach_subject_from_setup(experiment, setup, subject_name):
     if not os.path.exists(setup_path):
         raise ValueError('Setup "{0}/{1}" does not exist.'.format(experiment, setup))
     subject_path = os.path.join(_PROJECT_DIR, 'subjects', subject_name, subject_name + '.json')
-    if not os.path.exists(subject_path):
-        raise ValueError('Subject "{0}" does not exist.'.format(subject_name))
-
     with open(setup_path, 'r', encoding='utf-8') as f:
         setup_data = json.load(f)
+    if not os.path.exists(subject_path):
+        # Already deleted (outside this tool): drop the name and any UUID that matches nothing on
+        # disk any more, instead of refusing and leaving a permanent ghost entry.
+        if subject_name in setup_data.get('subjects', []):
+            setup_data['subjects'].remove(subject_name)
+        _prune_setup_data(setup_data, _known_uuids())
+        setup_data['__UPDATED-ON__'] = datetime.datetime.now().isoformat(' ')
+        _write_pybpod_json(setup_path, setup_data)
+        return
     with open(subject_path, 'r', encoding='utf-8') as f:
         subject_data = json.load(f)
     subject_uuid = subject_data['__UUID4__']
@@ -746,6 +828,19 @@ def _val_float(trial, key, session_vals=None):
         return None
 
 
+def _trial_anchor(trial, info, session_vals):
+    """ Host time this trial's Bpod machine ran (see session_csv_parser.trial_host_anchor()) --
+    what its Port1In/state times are added to. Falls back to the protocol's legacy anchor_key only
+    when the trial has nothing better. For Stage 1/2 that legacy key (TRIAL_START) was wrong in two
+    ways: it is registered BEFORE the trial's own TRIAL row, so the parser files it under the
+    PREVIOUS trial (every lick/reward time was offset by roughly one whole trial), and it is a
+    pre-upload host time, 0.2-1.4s before the hardware trial actually started. """
+    anchor = session_csv_parser.trial_host_anchor(trial)
+    if anchor is not None:
+        return anchor
+    return _val_float(trial, info['anchor_key'], session_vals)
+
+
 def _val_str(trial, key, session_vals=None):
     v = trial['vals'].get(key)
     if v is None and session_vals is not None:
@@ -809,28 +904,27 @@ class PlotFeeder(object):
         self._replay_prev_side = None
 
     def feed_new_trials(self, trials, session_ended=False):
-        """ Holds back the LAST entry in `trials` -- this dashboard's own file read races against
-        the task subprocess's own burst of STATE/EVENT/VAL row writes for whichever trial is
-        currently most recent (each trial's own rows are flushed as a tight burst, not atomically
-        -- confirmed directly by reading pybpod-api's own session.py: `Session.__add__()` flushes
-        after every single row, individually). A poll landing mid-burst can see that trial with a
-        partial states/vals dict and misclassify it (typically 'unknown', silently skipped by
-        _reconstruct_kwargs()) -- and since `self._n_fed` is a COUNT, not a per-trial identity
-        check, that trial would otherwise be marked "already fed" forever and never reconsidered
-        even once its real data lands on a later poll. Holding back the tail entry costs one poll
-        cycle (~2s) of display lag and fixes this permanently -- confirmed by a dedicated test
-        feeding the SAME trial index twice, first incomplete then complete.
+        """ Feeds every trial whose rows are complete, in order, exactly once. A poll can land while
+        the task is still writing the most recent trial's STATE/EVENT/VAL burst (pybpod flushes row
+        by row), and `self._n_fed` is a COUNT, so a half-written trial must never be fed: the last
+        trial is fed only once _trial_rows_complete() sees its final post-trial row; every earlier
+        trial is complete by construction. This replaced holding back the last entry
+        unconditionally, which -- on top of real_trials() already dropping the running trial --
+        kept the plots ~2 trials behind.
 
-        `session_ended=True` (the session's own SESSION-ENDED INFO row is present, i.e. Bpod.close()
-        already ran and the file is finalized -- no more trials are ever coming) skips holding
-        anything back, since there's no "next trial" left to ever supersede a final held-back one --
-        without this, the very last trial of a finished session would stay permanently unfed. """
-        stable_trials = trials if session_ended or not trials else trials[:-1]
-        for trial in stable_trials[self._n_fed:]:
+        `session_ended=True` (SESSION-ENDED is present, i.e. Bpod.close() already ran) feeds
+        everything that's left. """
+        n_ready = 0
+        for i, trial in enumerate(trials):
+            if session_ended or i < len(trials) - 1 or _trial_rows_complete(trial):
+                n_ready = i + 1
+            else:
+                break
+        for trial in trials[self._n_fed:n_ready]:
             kwargs = self._reconstruct_kwargs(trial)
             if kwargs is not None:
                 self.plots.add_trial(**kwargs)
-        self._n_fed = len(stable_trials)
+        self._n_fed = max(self._n_fed, n_ready)
 
     def _reconstruct_kwargs(self, trial):
         info = self.info
@@ -844,14 +938,14 @@ class PlotFeeder(object):
 
         threshold_deg = _val_float(trial, info['threshold_key'], self.session_vals)
         magnitude_deg = (threshold_deg or 0.0) if outcome_raw in info['crossed_outcomes'] else 0.0
-        anchor = _val_float(trial, info['anchor_key'], self.session_vals)
+        anchor = _trial_anchor(trial, info, self.session_vals)
 
         kwargs = dict(side=side, magnitude_deg=magnitude_deg, threshold_deg=threshold_deg or 0.0,
                       outcome=outcome)
 
         lick_times_abs = []
         if anchor is not None:
-            lick_times_abs = [anchor + t for t in trial['events'].get('Port1In', [])]
+            lick_times_abs = [anchor + t for t in session_csv_parser.trial_licks(trial)]
         kwargs['lick_times_abs'] = lick_times_abs
 
         reward_state_name = _OUTCOME_STATE_NAME.get(self.protocol_name, {}).get('rewarded')
@@ -906,29 +1000,81 @@ class PlotFeeder(object):
         return kwargs
 
 
+def _trial_rows_complete(trial):
+    """ True once a finished trial's post-trial rows are all in the CSV: register_port_events()
+    (a `*LICK_TIMES_OUT` VAL) is the last thing every stage registers per Bpod machine. Lets the
+    feeder show a trial the moment it is complete instead of holding it back until the NEXT trial
+    exists -- that hold-back, on top of real_trials() already excluding the running trial, kept the
+    live plots ~2 trials behind (session 20261023-122212). """
+    return any(key.endswith('LICK_TIMES_OUT') for key in trial['vals'])
+
+
+class WheelSeriesCache(object):
+    """ parse_wheel_position_series() for a growing session, without redoing finished trials:
+    a trial's WHEEL_POS rows are complete once a later trial exists, so those are decimated once
+    and kept; only the last trial is recomputed each poll. """
+
+    def __init__(self, decimate_s=0.5):
+        self.decimate_s = decimate_s
+        self._n_done = 0
+        self._xs, self._ys = [], []
+
+    def series(self, trials):
+        done = trials[:-1]
+        if len(done) > self._n_done:
+            xs, ys = parse_wheel_position_series(done[self._n_done:], self.decimate_s)
+            last_t = self._xs[-1] if self._xs else None
+            for x, y in zip(xs, ys):
+                if last_t is None or x - last_t >= self.decimate_s:
+                    self._xs.append(x)
+                    self._ys.append(y)
+                    last_t = x
+            self._n_done = len(done)
+        tail_x, tail_y = parse_wheel_position_series(trials[-1:], self.decimate_s) if trials else ([], [])
+        start = self._xs[-1] if self._xs else None
+        keep = [(x, y) for x, y in zip(tail_x, tail_y) if start is None or x > start]
+        return self._xs + [x for x, _ in keep], self._ys + [y for _, y in keep]
+
+
 def parse_wheel_position_series(trials, decimate_s=0.5):
     """ Every WHEEL_POS VAL across all trials, as (elapsed_s, position_deg) pairs -- WHEEL_POS is
     never collapsed to the last sample per trial (see session_csv_parser.STREAM_KEYS), so the full
     stream survives. Decimated to at most one sample per `decimate_s` seconds, same principle as
     the real "Wheel Position" plot's own DISPLAY_SAMPLE_INTERVAL_S, so a long session doesn't force
-    an ever-growing full-resolution redraw every poll. """
-    xs, ys = [], []
-    last_t = None
+    an ever-growing full-resolution redraw every poll.
+
+    Plots the RAW, +/-180deg-wrapped position exactly as the rotary reports it -- deliberately NOT
+    per-trial-unwrapped the way derive_intrial_threshold.py's own trace is. A previous version of
+    this function did unwrap (added at the same time as that one, on the same reasoning); measured
+    against a real session it drove this panel's y-range to -1635..+895deg, because every genuine
+    wrap crossing of a briskly-turned wheel accumulates into true total rotation (one trial there
+    crossed the boundary 5 times in 5.5s, ~4.5 rotations). That cumulative total is the right
+    quantity for a sliding-window excursion percentile; it is the wrong one for a monitoring panel
+    whose threshold reference lines sit at single-digit degrees. The rotary itself really does wrap
+    at +/-180 (verified across every session recorded on this rig: zero samples beyond it), so raw
+    values are bounded by construction and a wrap reads as an obvious full-height vertical jump.
+    """
+    samples = []
     for trial in trials:
         raw = trial['vals'].get('WHEEL_POS')
         if not raw:
             continue
         for entry in raw:
             try:
-                t_str, pos_str = entry.split(',')
-                t, pos = float(t_str), float(pos_str)
+                t_str, pos_str = entry.split(',')[:2]   # stream rows add a 3rd field (module time)
+                samples.append((float(t_str), float(pos_str)))
             except (ValueError, AttributeError):
                 continue
-            if last_t is not None and (t - last_t) < decimate_s:
-                continue
-            xs.append(t)
-            ys.append(pos)
-            last_t = t
+    samples.sort()
+
+    xs, ys = [], []
+    last_t = None
+    for t, pos in samples:
+        if last_t is not None and (t - last_t) < decimate_s:
+            continue
+        xs.append(t)
+        ys.append(pos)
+        last_t = t
     return xs, ys
 
 
@@ -946,7 +1092,7 @@ def build_trial_markers(trials, protocol_name, session_vals):
     info = _DASHBOARD_PROTOCOL_INFO[protocol_name]
     points = []
     for trial in trials:
-        anchor = _val_float(trial, info['anchor_key'], session_vals)
+        anchor = _trial_anchor(trial, info, session_vals)
         if anchor is None:
             continue
         threshold = _val_float(trial, info['threshold_key'], session_vals)
@@ -1892,6 +2038,7 @@ class SessionRunnerWindow(QWidget):
 
     def _on_stop_task(self):
         if not self.launcher.is_running:
+            self._on_task_finished()   # already exited on its own: just reset the UI
             return
         self.launcher.stop(graceful=True)
         self.stop_button.setEnabled(False)
@@ -1912,11 +2059,43 @@ class SessionRunnerWindow(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.launch_status_label.setText('Finished.')
+        self._audit_finished_session(self.launcher.session_path)
+
+    def _audit_finished_session(self, session_path):
+        """ Runs records/audit_session.py on the session that just ended (once per session):
+        writes its report to <session>/audit_report.txt and shows any FAIL lines -- so a timing or
+        logging regression (dot before the trial, reward before the dot, logging gaps, stalls) is
+        visible right after the run instead of only on a later hand analysis. Never blocks or
+        raises: an audit problem must not get in the way of the session itself. """
+        if not session_path or getattr(self, '_audited_path', None) == session_path:
+            return
+        self._audited_path = session_path
+        try:
+            import audit_session
+            name, results = audit_session.audit(session_path)
+        except Exception as err:
+            self.launch_status_label.setText('Finished (audit could not run: {0}).'.format(err))
+            return
+        lines = ['[{0:4}] {1}  --  {2}'.format(st, check, detail) for check, st, detail in results]
+        try:
+            with open(os.path.join(session_path, 'audit_report.txt'), 'w', encoding='utf-8') as f:
+                f.write('AUDIT {0}\n'.format(name) + '\n'.join(lines) + '\n')
+        except Exception:
+            pass
+        fails = [l for l in lines if l.startswith('[FAIL]')]
+        self.launch_status_label.setText('Finished -- timing audit: {0}.'.format(
+            'all checks pass' if not fails else '{0} FAIL (see audit_report.txt)'.format(len(fails))))
+        if fails:
+            QMessageBox.warning(self, 'Session timing audit',
+                                'This session failed {0} timing/logging check(s):\n\n{1}'.format(
+                                    len(fails), '\n'.join(fails)))
 
     # --- session watching --------------------------------------------------------------------
 
     def _watch_session(self, csv_path):
         self._watched_csv_path = csv_path
+        self._parser = session_csv_parser.IncrementalSessionParser(csv_path)
+        self._wheel_cache = WheelSeriesCache()
         self._feeder = None
         self.session_data_label.setText(csv_path)
         self.summary_label.setText('Watching -- waiting for trial data...')
@@ -1940,7 +2119,10 @@ class SessionRunnerWindow(QWidget):
         # Deliberately does NOT auto-watch whatever session is newest on disk -- the window opens
         # to a blank slate; only Start Task or "Watch Latest Session" ever picks a session to
         # watch. This only tracks whether a task THIS dashboard itself launched has finished.
-        if self.launcher.is_running and self.launcher.proc.poll() is not None:
+        # A task that ends on its own (trial/water/time cap, crash) must reset the UI too. The old
+        # test here (`is_running and proc.poll() is not None`) could never be true, since
+        # is_running itself requires poll() is None -- so the dashboard stayed "running" forever.
+        if self.launcher.proc is not None and not self.launcher.is_running                 and self.stop_button.isEnabled():
             self._on_task_finished()
 
     def _on_watch_latest(self):
@@ -1957,7 +2139,7 @@ class SessionRunnerWindow(QWidget):
         if self._watched_csv_path is None or not os.path.exists(self._watched_csv_path):
             return
         try:
-            info, session_vals, trials = session_csv_parser.parse_session_csv(self._watched_csv_path)
+            info, session_vals, trials = self._parser.update()
         except Exception:
             print(traceback.format_exc(), flush=True)
             return
@@ -1967,7 +2149,8 @@ class SessionRunnerWindow(QWidget):
         summary = None
         if protocol_name in session_csv_parser.PROTOCOL_CONFIG:
             try:
-                summary = build_training_log.summarize_session(self._watched_csv_path)
+                summary = build_training_log.summarize_session(
+                    self._watched_csv_path, parsed=(info, session_vals, trials))
             except Exception:
                 print(traceback.format_exc(), flush=True)
         if summary is not None:
@@ -1997,8 +2180,8 @@ class SessionRunnerWindow(QWidget):
         panel, cheap redraw" convention already used elsewhere for low-cardinality panels; only
         the FULL WheelShapingPlots raster needs persistent artists, since that one redraws every
         single trial rather than every ~2s poll). """
-        xs, ys = parse_wheel_position_series(real)
         starts, segments = build_trial_markers(real, protocol_name, session_vals)
+        xs, ys = self._wheel_cache.series(real)
         self._wheel_ax.cla()
         for x in starts:
             self._wheel_ax.axvline(x, color='#dddddd', linewidth=0.6, zorder=0)
@@ -2146,6 +2329,7 @@ class SessionRunnerWindow(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    prune_dangling_setup_refs()
     window = SessionRunnerWindow()
     window.showMaximized()
     sys.exit(app.exec_())

@@ -73,6 +73,69 @@ def git_bytes(*args, stdin=None):
     return proc.stdout
 
 
+# Submodules whose pinned commits this lab makes itself, so they have to reach GitHub BEFORE a main
+# that points at them -- otherwise every other computer's `git submodule update` fails with
+# "...points to a commit that does not exist". Deepest first: each one's parent pins it.
+# (pybpod/base/pybpod-api is not here: it has no lab fork and stays pinned to an official
+# release.) push.recurseSubmodules=on-demand would do this too, but it reuses the superproject's
+# refspec (main) inside the submodules, which have no main branch, and the push fails.
+FORKED_SUBMODULES = ['pybpod/plugins/pybpod-gui-plugin-rotaryencoder', 'pybpod']
+CHECKED_PINS = [('pybpod', 'pybpod'), ('pybpod', 'pybpod/base/pybpod-api'),
+                ('pybpod', 'pybpod/plugins/pybpod-gui-plugin-rotaryencoder')]
+
+
+def git_in(path, *args, check=True):
+    """ git run inside repo_root()/path (a submodule checkout). """
+    proc = subprocess.run(['git', '-C', os.path.join(repo_root(), path)] + list(args),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if check and proc.returncode != 0:
+        raise SyncError('git -C {0} {1} failed:\n{2}{3}'.format(path, ' '.join(args), proc.stdout,
+                                                              proc.stderr))
+    return proc
+
+
+def push_forked_submodules():
+    """ Pushes each forked submodule's current branch if it has commits its remote lacks. """
+    for path in FORKED_SUBMODULES:
+        if not os.path.isdir(os.path.join(repo_root(), path)):
+            continue
+        branch = git_in(path, 'symbolic-ref', '-q', '--short', 'HEAD', check=False).stdout.strip()
+        if not branch:
+            continue   # detached: nothing of ours to push from here; pinned_commits_pushed() decides
+        git_in(path, 'fetch', 'origin', check=False)
+        ahead = git_in(path, 'rev-list', '--count', 'origin/{0}..HEAD'.format(branch),
+                       check=False).stdout.strip()
+        if ahead and ahead != '0':
+            print('Pushing submodule {0} ({1}, {2} commit(s))...'.format(path, branch, ahead),
+                  flush=True)
+            if git_in(path, 'push', 'origin', branch, check=False).returncode != 0:
+                raise SyncError('git push of submodule {0} failed. Nothing on {1} was pushed.'
+                                .format(path, MAIN))
+
+
+def pinned_commits_pushed(rev):
+    """ Every lab-relevant gitlink that `rev` (directly, or via pybpod) pins is on its remote. """
+    pins = {}
+    for parent, path in CHECKED_PINS:
+        if parent == path:   # pinned by this repo itself
+            line = git_in('.', 'ls-tree', rev, '--', path, check=False).stdout.strip()
+        else:
+            sub = path[len(parent) + 1:]
+            parent_pin = pins.get(parent)
+            if parent_pin is None:
+                continue
+            line = git_in(parent, 'ls-tree', parent_pin, '--', sub, check=False).stdout.strip()
+        if not line:
+            continue
+        commit = line.split()[2]
+        pins[path] = commit
+        remote = git_in(path, 'branch', '-r', '--contains', commit, check=False).stdout.strip()
+        if not remote:
+            raise SyncError('{0} pins {1} at {2}, which is not on its GitHub remote -- other '
+                            'computers could not check it out, so {0} was not pushed.'
+                            .format(MAIN, path, commit[:7]))
+
+
 def is_ancestor(a, b):
     return git('merge-base', '--is-ancestor', a, b, check=False).returncode == 0
 
@@ -378,6 +441,8 @@ def sync():
     reconcile_with_origin(branch)
 
     if git_out('rev-parse', MAIN) != git_out('rev-parse', REMOTE_MAIN):
+        push_forked_submodules()
+        pinned_commits_pushed(MAIN)
         print('Pushing {0}...'.format(MAIN), flush=True)
         if git('push', 'origin', '{0}:refs/heads/{0}'.format(MAIN), check=False).returncode != 0:
             raise SyncError('git push to {0} failed -- another computer probably pushed in the '

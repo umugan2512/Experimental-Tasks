@@ -309,6 +309,24 @@ class CameraRecorder(object):
         if self._preview_widget is not None:
             self._preview_widget.close()
 
+    def compute_realized_fps(self):
+        """ The REALIZED delivered frame rate, from this recorder's own per-frame timestamps --
+        as opposed to self.fps (the nominal/requested rate passed to the constructor). The capture
+        loop's own throttle (see _capture_loop's comment) can only ever slow the loop DOWN toward
+        self.fps when an iteration finishes early; it cannot speed the loop up past self.fps when
+        real per-iteration cost (cap.read() + writer + GIL contention) exceeds 1/fps -- confirmed
+        as the cause of a real nominal-vs-realized gap on hardware (30.0 nominal, ~21.3Hz
+        realized). Call after close() (once self._timestamps is complete) -- returns None if
+        fewer than 2 frames were captured. """
+        if len(self._timestamps) < 2:
+            return None
+        first_t = self._timestamps[0][1]
+        last_t = self._timestamps[-1][1]
+        elapsed = last_t - first_t
+        if elapsed <= 0:
+            return None
+        return (len(self._timestamps) - 1) / elapsed
+
     def _save_timestamps(self):
         stem, _ext = os.path.splitext(self.output_path)
         ts_path = stem + '_timestamps.csv'
