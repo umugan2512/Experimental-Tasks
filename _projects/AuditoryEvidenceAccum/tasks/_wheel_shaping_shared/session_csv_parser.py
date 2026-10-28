@@ -758,3 +758,54 @@ def compute_remaining_quota(sessions_dir, this_session_name, protocol_name, subj
     remaining_cap_s = (max(60.0, full_cap_s - used_duration_s)
                         if full_cap_s is not None else None)
     return remaining_max_trials, remaining_cap_s
+
+
+# --- daily water cap (Stage 1/2) -------------------------------------------------------------------
+# 1.5 mL consumed per animal per CALENDAR DAY, shared by all of that animal's sessions (per explicit
+# instruction, 2026-10-28: two back-to-back sessions had given UM001 2.1 mL in 9 min, because each
+# session started with a fresh cap). Same consumed-water rule as the in-session cap
+# (water_tracker.ConsumedWaterTracker), replayed over every earlier session of that day.
+
+def session_water_consumed(info, session_vals, trials):
+    """ uL this session's animal consumed, or None if its protocol/reward volume is unknown. """
+    from water_tracker import ConsumedWaterTracker
+    config = PROTOCOL_CONFIG.get(info.get('PROTOCOL-NAME'))
+    trials = real_trials(trials)
+    reward_ul = find_val_backward(trials, session_vals, 'REWARD_UL')
+    if config is None or reward_ul is None:
+        return None
+    water = ConsumedWaterTracker(reward_ul)
+    for trial in trials:
+        start = None
+        for name in config.get('rewarded_states', ()):
+            occ = trial['states'].get(name)
+            if occ and not _isnan(occ[0]):
+                start = occ[0]
+                break
+        water.record_trial(trial['events'].get('Port1In', []), start)
+    return water.consumed_ul
+
+
+def water_consumed_today(project_dir, subject_id, date_str, exclude_session=None):
+    """ (total_ul, [session names]) for subject_id's sessions in project_dir whose folder name starts
+    with date_str ('YYYYMMDD'), excluding exclude_session (the one now starting). """
+    total, names = 0.0, []
+    pattern = os.path.join(project_dir, 'experiments', '*', 'setups', '*', 'sessions', date_str + '-*')
+    for folder in sorted(glob.glob(pattern)):
+        name = os.path.basename(folder)
+        if name == exclude_session:
+            continue
+        csv_path = os.path.join(folder, name + '.csv')
+        if not os.path.isfile(csv_path):
+            continue
+        try:
+            info, session_vals, trials = parse_session_csv(csv_path)
+        except Exception:
+            continue
+        if parse_subject_name(info.get('SUBJECT-NAME', '')) != subject_id:
+            continue
+        ul = session_water_consumed(info, session_vals, trials)
+        if ul:
+            total += ul
+            names.append(name)
+    return total, names

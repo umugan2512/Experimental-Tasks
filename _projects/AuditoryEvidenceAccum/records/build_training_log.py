@@ -211,8 +211,19 @@ def summarize_session(path, parsed=None):
                     if main_trial_total else None)
     abort_rate = (wheel_abort_count / float(len(trials))) if trials else None
 
-    all_event_times = [t for trial in trials for times in trial['events'].values() for t in times]
-    session_duration_s = (max(all_event_times) - min(all_event_times)) if all_event_times else None
+    # Session length on the Bpod clock: first trial's start -> last trial's end (TRIAL-BPOD-TIME).
+    # It used to be max - min over every trial's EVENT times, but those are TRIAL-relative, so it
+    # came out as roughly the longest single trial (7.5 s for a 5-minute session).
+    session_duration_s = None
+    starts = [t['bpod_start'] for t in trials if t.get('bpod_start') is not None]
+    ends = [t['bpod_end'] for t in trials if t.get('bpod_end') is not None]
+    if starts and ends and max(ends) > min(starts):
+        session_duration_s = max(ends) - min(starts)
+    else:   # older sessions without TRIAL-BPOD-TIME rows: the session's own start/end stamps
+        _t0 = session_csv_parser.parse_datetime(info.get('SESSION-STARTED', ''))
+        _t1 = session_csv_parser.parse_datetime(info.get('SESSION-ENDED', ''))
+        if _t0 is not None and _t1 is not None and _t1 > _t0:
+            session_duration_s = (_t1 - _t0).total_seconds()
 
     threshold_start_deg = session_csv_parser.find_val_forward(trials, session_vals, 'THRESHOLD_DEG')
     threshold_end_deg = session_csv_parser.find_val_backward(trials, session_vals, 'THRESHOLD_DEG')

@@ -715,10 +715,24 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   i.e. on aborts and incorrect choices only, never on a correct trial and never as a trial-start
   cue. Stage 1/2 have no error condition at all, so they never flash.
 - **A session's hard trial cap and its advancement-qualifying trial count are two different
-  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (200 in Stage 1, 250 in Stage 2) ends the session, checked against every *attempted*
-  trial, as does 1.5 mL of water **consumed** or 30 min. Consumed = licked after delivery, a later
-  trial's lick included (`_wheel_shaping_shared/water_tracker.py`, `SESSION_WATER_CONSUMED_UL`);
-  the training log's `Water Consumed (uL)`/`Water Delivered (uL)` columns use the same rule; `VAR_TRIAL_COUNT_ADVANCE` (100) is only the qualifying threshold for advancing a subject,
+  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (250, per session) ends the session, checked against
+  every *attempted* trial, as does 30 min.
+  - **Water is capped per animal per calendar DAY, not per session** (`VAR_DAILY_WATER_CAP_UL`,
+    1.5 mL **consumed**). This was explicit instruction on 2026-10-28, after two back-to-back
+    sessions gave UM001 2.1 mL in 9 min.
+  - At startup the task sums that animal's earlier sessions of the day
+    (`session_csv_parser.water_consumed_today()`, registered as
+    `WATER_CONSUMED_EARLIER_TODAY_UL`) and caps on that plus this session's water
+    (`DAY_WATER_CONSUMED_UL` per trial).
+  - Already over the cap at startup: `SESSION_END_REASON=water_cap` before trial 1, and no entry
+    in the advancement history. The dashboard warns and asks before launching such a session.
+  - Consumed = licked after delivery, a later trial's lick included
+    (`_wheel_shaping_shared/water_tracker.py`, `SESSION_WATER_CONSUMED_UL`). The training log's
+    `Water Consumed (uL)`/`Water Delivered (uL)` columns use the same rule.
+  - Advancement is deliberately unchanged (per explicit decision): every session with ≥ 100
+    rewarded trials qualifies, same-day and Stopped ones included.
+
+  `VAR_TRIAL_COUNT_ADVANCE` (100) is only the qualifying threshold for advancing a subject,
   and counts only trials where the animal actually did something — **incorrect trials DO count;
   aborts, no-movement trials and response timeouts do NOT** (per explicit instruction). Stage 1
   implements that as `if rewarded:` (its only genuine-response outcome); Stage 2 as
@@ -964,6 +978,13 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
       handover, because pybpod can't load the next machine while one runs. Mask that window in
       lick analyses (0.559–0.607 s post-reward in that session). `INTER_TRIAL_GAP_MS` is the
       host-side gap and runs ~22 ms shorter than the Bpod's own dead time.
+  - **The audit's coverage check excludes the normal machine-to-machine handovers** (gaps ≤ the
+    150 ms between-machine budget, which has its own check) and requires ≥ 99% of the rest. With
+    1.2 s trials the ~49 ms handover alone is 4%, so the old raw ≥ 97% check failed every
+    fast session. It still fails the old hold-wait-outside-a-machine design (76%).
+  - **The training log's `Duration (s)` is on the Bpod clock** (first trial start → last trial
+    end). It used to be max − min over trial-RELATIVE event times, i.e. roughly the longest single
+    trial (7.5 s for a 5-min session), for every row ever written.
   - **To check a session: `python records/audit_session.py <session_folder>`.** It gives PASS/FAIL
     for: dot before reward, dot never frozen early, state-machine coverage ≥ 97%, no wheel/CSV
     gaps, clock fit, camera gaps, and render/onset/freeze/between-machine/reader-stall budgets. The
