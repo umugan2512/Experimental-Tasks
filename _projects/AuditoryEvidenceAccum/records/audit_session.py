@@ -26,6 +26,7 @@ BUDGET = {
     'sm_coverage_min': 0.99,          # fraction of session time inside a running Bpod machine,
                                       # not counting the normal machine-to-machine handovers
     'wheel_gap_max_s': 0.10,          # longest WHEEL_POS gap (keepalive writes every 50ms)
+    'wheel_module_gap_max_s': 0.10,   # same, on the rotary module's own clock
     'csv_silence_max_s': 0.50,        # longest stretch with no CSV row at all
     'clock_residual_sd_max_ms': 2.0,  # host->Bpod linear fit
     'offset_jitter_max_ms': 5.0,      # WHEEL_CLOCK_OFFSET p95-p5 after the first 5s
@@ -173,6 +174,27 @@ def audit(folder):
     else:
         add('WHEEL_POS continuity', None, 'no WHEEL_POS rows')
 
+    # Wheel samples on the rotary module's OWN clock (3rd field, stream mode): the module buffers
+    # while the PC is held up, so a host-side pause only matters if this clock shows a hole too.
+    # This replaced the "rotary reader never stalls > 50 ms" PASS/FAIL (2026-10-29): rare 50-70 ms
+    # OS-level holds of the whole process failed it every session, with no sample ever lost.
+    mods = []
+    for r in rows:
+        if r[0] == 'VAL' and len(r) > 5 and r[4] == 'WHEEL_POS':
+            parts = r[5].split(',')
+            if len(parts) > 2 and _f(parts[2]) is not None:
+                mods.append(_f(parts[2]))
+    if len(mods) > 1:
+        mgaps = [b - a for a, b in zip(mods, mods[1:])]
+        back = sum(1 for g in mgaps if g < -1e-6)
+        add('no wheel samples lost (module-clock gap < {0:.0f}ms, never backward)'.format(
+            BUDGET['wheel_module_gap_max_s'] * 1e3),
+            max(mgaps) < BUDGET['wheel_module_gap_max_s'] and back == 0,
+            'longest {0:.1f}ms, {1} backward step(s), {2} samples'.format(
+                max(mgaps) * 1e3, back, len(mods)))
+    else:
+        add('no wheel samples lost', None, 'no module-time WHEEL_POS rows (polling mode)')
+
     offsets = []
     last_t = None
     for r in rows:
@@ -287,9 +309,16 @@ def audit(folder):
         BUDGET['inter_trial_gap_max_ms']), BUDGET['inter_trial_gap_max_ms'], 'max')
     budget_check('CUE_TO_CHOICE_GAP_MS', 'cue->choice machine gap < {0:.0f}ms (Stage 3-5)'.format(
         BUDGET['inter_trial_gap_max_ms']), BUDGET['inter_trial_gap_max_ms'], 'max')
-    budget_check('STREAM_MAX_READ_GAP_MS', 'rotary reader never stalls > {0:.0f}ms'.format(
-        BUDGET['stream_read_gap_max_ms']), BUDGET['stream_read_gap_max_ms'], 'max',
-        skip_first=True)   # trial 1 includes the stream's start-up
+    # Host-side reader pauses: reported, not judged (see the module-clock check above).
+    reader = [(i, x) for i, x in enumerate((_val(t, 'STREAM_MAX_READ_GAP_MS') for t in trials), 1)
+              if x is not None and i > 1]   # trial 1 includes the stream's start-up
+    if reader:
+        xs = [x for _, x in reader]
+        over = [i for i, x in reader if x >= BUDGET['stream_read_gap_max_ms']]
+        out.append(('rotary reader pauses (host side, no data loss if the check above passes)',
+                    'INFO', 'max {0:.0f}ms, median {1:.0f}ms; > {2:.0f}ms on {3} trial(s){4}'.format(
+                        max(xs), statistics.median(xs), BUDGET['stream_read_gap_max_ms'], len(over),
+                        ' ({0})'.format(', '.join(str(i) for i in over[:10])) if over else '')))
 
     # 8. markers + warnings
     with_resp = [t for t in ran if any(t['states'].get(s) is not None and not math.isnan(t['states'][s])

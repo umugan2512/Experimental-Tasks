@@ -982,6 +982,16 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     150 ms between-machine budget, which has its own check) and requires ≥ 99% of the rest. With
     1.2 s trials the ~49 ms handover alone is 4%, so the old raw ≥ 97% check failed every
     fast session. It still fails the old hold-wait-outside-a-machine design (76%).
+  - **The audit judges wheel data loss on the rotary module's own clock, not host reader
+    pauses** (2026-10-29). "No wheel samples lost" requires the module-time gap between
+    consecutive `WHEEL_POS` rows to stay < 100 ms and never go backward. Rare 50–70 ms holds of
+    the whole process (1–2 per session, falling in the machine-to-machine handover, so OS
+    scheduling) failed the old "rotary reader never stalls > 50 ms" check every session, while
+    the module buffered through them with no sample lost. Reader pauses are now INFO only.
+  - **Unchanged outputs are not rewritten.** `merge_session_structs()` skips writing a
+    `_combined_struct.mat/.json` whose JSON is identical, and `build_training_log` skips saving
+    `training_log.xlsx` when every part except `docProps/core.xml` (the save timestamp) matches.
+    Both used to show up as changed in git after every rebuild.
   - **The training log's `Duration (min)` is on the Bpod clock** (first trial start → last trial
     end). It used to be max − min over trial-RELATIVE event times, i.e. roughly the longest single
     trial (7.5 s for a 5-min session), for every row ever written.

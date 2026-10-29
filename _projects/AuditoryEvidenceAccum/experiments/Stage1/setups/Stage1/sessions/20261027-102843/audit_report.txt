@@ -5,6 +5,7 @@ AUDIT 20261027-102843
   [PASS] Bpod machine running >= 99% of the session, excluding handovers 100.0% (raw 98.1%); between-machine gaps median 48ms, max 99ms
   [PASS] WHEEL_POS has no gap > 100ms                               0 gaps; longest 0.05s at t=574.7s; 57 rows/s
   [PASS] WHEEL_POS rows in time order                               0 out of order
+  [FAIL] no wheel samples lost (module-clock gap < 100ms, never backward) longest 50.4ms, 5 backward step(s), 32808 samples
   [PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms) 0.41ms around a +21.5ppm drift
   [PASS] no CSV-wide silence > 0.5s                                 longest 0.07s after 10:30:01.683688
   [PASS] host->Bpod clock fit residual SD < 2ms (outliers <= 5%)    0.42ms (max 0.98ms) over 221 trials, drift -14.4ppm
@@ -14,7 +15,7 @@ AUDIT 20261027-102843
   [PASS] no render-loop frame > 100ms                               max 50.0ms (median 2.0ms, n=221)
   [PASS] between-machine gap < 150ms                                max 79.0ms (median 26.0ms, n=220)
   [N/A ] cue->choice machine gap < 150ms (Stage 3-5)                no CUE_TO_CHOICE_GAP_MS rows
-  [FAIL] rotary reader never stalls > 50ms                          max 55.0ms (median 8.0ms, n=220, trial 1 excluded); over budget on trial(s) 175
+  [INFO] rotary reader pauses (host side, no data loss if the check above passes) max 55ms, median 8ms; > 50ms on 1 trial(s) (175)
   [PASS] rotary '#' marker logged on every trial that reached the response state 0/221 missing
   [PASS] no crash in the task (SESSION_ERROR / stderr traceback)    none
   [INFO] Bpod->PC SoftCode numbers                                  1=DotOnRequest,2=OutcomeFreeze
