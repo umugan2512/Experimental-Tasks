@@ -1,0 +1,22 @@
+AUDIT 20261030-142131
+[PASS] reward only after the dot is painted  --  250 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[PASS] dot visible on every painted trial  --  ok
+[PASS] Bpod machine running >= 99% of the session, excluding handovers  --  99.8% (raw 98.4%); between-machine gaps median 48ms, max 1213ms
+[PASS] WHEEL_POS has no gap > 100ms  --  0 gaps; longest 0.05s at t=871.6s; 105 rows/s
+[PASS] WHEEL_POS rows in time order  --  0 out of order
+[PASS] no wheel samples lost (module-clock gap < 100ms, never backward)  --  longest 51.0ms, 0 backward step(s), 91728 samples
+[PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms)  --  0.55ms around a +49.3ppm drift
+[FAIL] no CSV-wide silence > 0.5s  --  longest 1.19s after 14:25:55.136124
+[FAIL] host->Bpod clock fit residual SD < 2ms (outliers <= 5%)  --  0.39ms (max 0.88ms) over 148 trials, drift -14.1ppm; outliers: trial 1 +1129.2ms, trial 2 +1130.3ms, trial 3 +1130.2ms, trial 4 +1130.1ms, trial 5 +1130.3ms, trial 6 +1130.0ms, trial 7 +1130.9ms, trial 8 +1130.3ms, trial 9 +1130.9ms, trial 10 +1129.6ms, trial 11 +1130.5ms, trial 12 +1130.4ms, trial 13 +1130.7ms, trial 14 +1130.7ms, trial 15 +1131.4ms, trial 16 +1130.8ms, trial 17 +1130.8ms, trial 18 +1130.9ms, trial 19 +1130.1ms, trial 20 +1131.8ms, trial 21 +1131.0ms, trial 22 +1131.4ms, trial 23 +1131.6ms, trial 24 +1130.6ms, trial 25 +1131.7ms, trial 26 +1131.3ms, trial 27 +1131.1ms, trial 28 +1131.6ms, trial 29 +1131.8ms, trial 30 +1131.5ms, trial 31 +1132.2ms, trial 32 +1131.7ms, trial 33 +1132.1ms, trial 34 +1132.2ms, trial 35 +1131.9ms, trial 36 +1132.6ms, trial 37 +1132.3ms, trial 38 +1132.3ms, trial 39 +1132.1ms, trial 40 +1132.6ms, trial 41 +1132.4ms, trial 42 +1132.7ms, trial 43 +1133.0ms, trial 44 +1132.4ms, trial 45 +1132.5ms, trial 46 +1133.5ms, trial 47 +1132.5ms, trial 48 +1132.9ms, trial 49 +1133.4ms, trial 50 +1134.0ms, trial 51 +1133.2ms, trial 52 +1133.4ms, trial 53 +1133.3ms, trial 54 +1134.1ms, trial 55 +1133.9ms, trial 56 +1133.1ms, trial 57 +1134.5ms, trial 58 +1133.8ms, trial 59 +1133.6ms, trial 60 +1133.9ms, trial 61 +1134.9ms, trial 62 +1134.5ms, trial 63 +1134.8ms, trial 64 +1135.2ms, trial 65 +1135.2ms, trial 66 +1135.0ms, trial 67 +1135.1ms, trial 68 +1135.1ms, trial 69 +1135.0ms, trial 70 +1135.7ms, trial 71 +1135.2ms, trial 72 +1135.4ms, trial 73 +1136.4ms, trial 74 +1136.4ms, trial 75 +1136.1ms, trial 76 +1136.4ms, trial 77 +1136.7ms, trial 78 +1136.3ms, trial 79 +1135.9ms, trial 80 +1136.6ms, trial 81 +1136.7ms, trial 82 +1136.9ms, trial 83 +1136.4ms, trial 84 +1136.8ms, trial 85 +1136.9ms, trial 86 +1136.5ms, trial 87 +1137.3ms, trial 88 +1137.5ms, trial 89 +1137.6ms, trial 90 +1138.2ms, trial 91 +1137.5ms, trial 92 +1138.3ms, trial 93 +1138.1ms, trial 94 +1138.3ms, trial 95 +1138.6ms, trial 96 +1137.4ms, trial 97 +1138.8ms, trial 98 +1138.5ms, trial 99 +1138.5ms, trial 100 +1138.6ms, trial 101 +1138.7ms, trial 102 +1138.7ms
+[FAIL] camera frame gap < 150ms  --  max 1193ms, 28.5fps realized
+[PASS] dot painted within 40ms of DotOn (p95)  --  p95 1.0ms (median 1.0ms, n=250)
+[PASS] dot frozen within 30ms of the outcome (p95)  --  p95 1.0ms (median 0.0ms, n=140)
+[FAIL] no render-loop frame > 100ms  --  max 703.2ms (median 2.0ms, n=250); over budget on trial(s) 181
+[PASS] between-machine gap < 150ms  --  max 128.0ms (median 26.0ms, n=249)
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[INFO] rotary reader pauses (host side, no data loss if the check above passes)  --  max 1165ms, median 8ms; > 50ms on 3 trial(s) (102, 144, 191)
+[PASS] rotary '#' marker logged on every trial that reached the response state  --  0/250 missing
+[PASS] no crash in the task (SESSION_ERROR / stderr traceback)  --  none
+[INFO] Bpod->PC SoftCode numbers  --  1=DotOnRequest,2=OutcomeFreeze
+[PASS] no warnings/errors logged  --  none
