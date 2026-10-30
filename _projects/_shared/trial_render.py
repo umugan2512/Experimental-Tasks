@@ -26,6 +26,7 @@ Every wait uses runner.wait_signal() (wakes on any SoftCode) instead of a fixed 
 """
 import time
 
+import host_clock
 import rotary_setup
 from bpod_trial_helpers import PC_EVENT_DOT_SHOWN, PC_EVENT_QUIESCENCE_MET
 
@@ -56,13 +57,13 @@ def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disapp
         runner.begin_trial()).
     """
     t0 = runner.log_python_t0
-    now_s = lambda: time.time() - t0
+    now_s = lambda: host_clock.now() - t0
     out = {'quiescence_met_t': None, 'dot_paint_t': None, 'freeze_t': None, 'freeze_source': None,
            'clear_t': None, 'render_max_frame_ms': 0.0, 'onset_latency_ms': None,
            'freeze_latency_ms': None}
     phase = 'quiescence' if quiescence is not None else 'await_dot'
     punished = False
-    last_frame = time.time()
+    last_frame = host_clock.now()
 
     while not done_event.is_set():
         if phase == 'quiescence' and runner.poll_quiescence():
@@ -108,10 +109,10 @@ def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disapp
         dot.pump()
         camera.pump()
         runner.pump()
-        t = time.time()
+        t = host_clock.now()
         out['render_max_frame_ms'] = max(out['render_max_frame_ms'], (t - last_frame) * 1e3)
         runner.wait_signal(render_interval)
-        last_frame = time.time()
+        last_frame = host_clock.now()
 
     return out
 

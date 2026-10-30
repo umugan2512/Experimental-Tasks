@@ -35,6 +35,8 @@ from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtCore import Qt, QRect
 
+import host_clock
+
 
 def visual_deg_to_px(visual_deg, screen_width_px, screen_width_mm, viewing_distance_mm):
     """
@@ -183,14 +185,14 @@ class DotDisplay(object):
         render_interval) clears it automatically once the deadline passes -- no caller-side timing
         needed. Re-arms (extends) if called again before a previous flash finishes; does not
         stack. Orthogonal to background_gray/dot_gray -- does not mutate either. """
-        self._punish_until = time.time() + duration_s
+        self._punish_until = host_clock.now() + duration_s
         self._widget.set_punish_active(True)
 
     def pump(self):
         """ Processes pending Qt events/repaints -- call repeatedly from an external polling loop
         instead of app.exec_() (which would block the calling thread). Also clears any active
         flash_white() overlay once its deadline has passed. """
-        if self._punish_until is not None and time.time() >= self._punish_until:
+        if self._punish_until is not None and host_clock.now() >= self._punish_until:
             self._widget.set_punish_active(False)
             self._punish_until = None
         self._app.processEvents()

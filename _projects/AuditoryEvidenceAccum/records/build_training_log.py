@@ -961,12 +961,28 @@ def build_workbook():
 
 
 
+def _xml_canon(data):
+    """ An XML part as a nested tuple with attributes sorted: openpyxl and the sheet merge
+    (records/xlsx_sheet_merge.py, used by the sync) write the same content with attributes in a
+    different order, which made every rebuild after a sync re-save an identical workbook. """
+    import xml.etree.ElementTree as ET
+
+    def walk(el):
+        return (el.tag, tuple(sorted(el.attrib.items())), (el.text or '').strip(),
+                (el.tail or '').strip(), tuple(walk(c) for c in el))
+    try:
+        return walk(ET.fromstring(data))
+    except ET.ParseError:
+        return data
+
+
 def _xlsx_parts(data):
-    """ {member name: bytes} of an .xlsx, without docProps/core.xml (it only holds the save time). """
+    """ {member name: canonical content} of an .xlsx, without docProps/ (save time, writer name). """
     import io as _io
     import zipfile
     with zipfile.ZipFile(_io.BytesIO(data)) as z:
-        return {n: z.read(n) for n in z.namelist() if n != 'docProps/core.xml'}
+        return {n: (_xml_canon(z.read(n)) if n.endswith(('.xml', '.rels')) else z.read(n))
+                for n in z.namelist() if not n.startswith('docProps/')}
 
 
 def _save_if_changed(wb, path):

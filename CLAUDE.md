@@ -988,6 +988,37 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     the whole process (1–2 per session, falling in the machine-to-machine handover, so OS
     scheduling) failed the old "rotary reader never stalls > 50 ms" check every session, while
     the module buffered through them with no sample lost. Reader pauses are now INFO only.
+  - **Host times come from `_shared/host_clock.now()`, not `time.time()`** (2026-10-30). It is
+    the wall time once at import plus `time.perf_counter()` elapsed: same epoch-like values, but
+    the Windows Time service can't step it. In Stage 2 session `20261030-142131` an NTP sync
+    stepped the wall clock +1.158 s mid-session (System log, Kernel-General event 1). Every host
+    time after that moved against the Bpod clock (clock fit: trials 1–102 as outliers), and the
+    camera, CSV and rotary reader all showed a 1.2 s "gap" that never happened. This rig's
+    hardware clock was 3 h 19 min off at boot, so Windows corrects it in big steps; check the
+    BIOS clock/CMOS battery. `time.monotonic()` is no alternative: it ticks at 15.6 ms on Windows.
+    pybpod's own CSV row stamps still use `datetime.now()`. The audit's CSV-silence check
+    recognizes a silence that the host_clock-stamped `WHEEL_POS` rows don't share, and labels
+    it a wall-clock step, not a stall. The clock-fit check names a run of outliers at one
+    offset as a host clock step.
+  - **The rotary firmware restarts its clock at 0 every time streaming is re-enabled**, so every
+    `stream.paused()` started a new module-clock epoch. Stage 2 pauses whenever its staircase
+    steps the threshold. The offset estimate could only creep up at 50 ppm after that, and
+    `flush_wheel_log()`'s never-backward clamp pinned every later sample to one timestamp: 77%
+    of `20261030-142131`'s wheel samples (everything after trial 22) have frozen times, and
+    that session's wheel timing can't be recovered beyond the ~30 ms CSV row stamps.
+    `RotaryStream._begin_epoch()` now shifts each new epoch to continue on the old offset, so
+    module times stay increasing and the host mapping stays right. A trial's `ROTARY_MARKER`
+    and its samples are always in the same epoch, so marker-relative placement stays exact.
+    The audit's "wheel module timestamps advance" check fails on 3+ rows sharing one module
+    time while the position changes (one repeat is the keepalive clamp, a few ms). The
+    "no wheel samples lost" gap check can't see a frozen clock. The soak's fake firmware now
+    restarts its clock on stream start too (`SOAK_P_NOMOVE=0 SOAK_P_EARLY=0` forces Stage 2
+    threshold steps).
+  - **A render-loop frame can block for ~0.5–1 s with nothing else wrong.** In `20261030-142131`
+    trial 181, the camera and the rotary reader ran normally, so it wasn't the GIL or the
+    process. Only the main thread stopped, inside Qt's `processEvents()`. That fits a task
+    window being clicked or dragged, which on Windows blocks the thread's message pump until
+    the mouse is released. Bpod timing is unaffected; the dot just doesn't move during it.
   - **Unchanged outputs are not rewritten.** `merge_session_structs()` skips writing a
     `_combined_struct.mat/.json` whose JSON is identical, and `build_training_log` skips saving
     `training_log.xlsx` when every part except `docProps/core.xml` (the save timestamp) matches.

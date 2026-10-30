@@ -1005,7 +1005,7 @@ ts = [r[0] for r in rows]
 max_gap = max(b - a for a, b in zip(ts, ts[1:]))
 keepalive_ok = max_gap <= _bth.WHEEL_LOG_MIN_INTERVAL_S + 1e-6 and ts == sorted(ts)
 three_field_ok = all(len(r) == 3 and abs(r[0] - r[2] - 0.25) < 1e-3 for r in rows)
-held_ok = all(r[1] == 3.0 for r in rows if t0 < r[0] < t0 + 0.65)
+held_ok = all(r[1] == 3.0 for r in rows if t0 < r[0] < t0 + 0.65 - 1e-3)   # rows are 4-decimal
 print("  still wheel + late flush -> no WHEEL_POS gap > {0:.0f}ms, rows in order: {1} (max gap "
       "{2:.0f}ms, {3} rows)".format(_bth.WHEEL_LOG_MIN_INTERVAL_S * 1e3, keepalive_ok,
                                      max_gap * 1e3, len(rows)))
@@ -1035,6 +1035,7 @@ st._lock = _threading.Lock(); st._carry = b''; st._raw_last = 0; st._rollover_ti
 st._scale = 1e-6; st._scale_probe = []; st._samples = _rs.deque(); st._events = _rs.deque()
 st._log_queue = []; st._offset_est = None; st._offset_t = None; st._latest = None
 st.n_resyncs = 0; st.max_buffer_s = 60.0; st._max_read_gap_s = 0.0
+st._epoch_base = 0.0; st._new_epoch = False; st._last_module_t = 0.0
 def _msg(module_s, ticks=0):
     return b'P' + int(ticks).to_bytes(2, 'little', signed=True) + int(module_s * 1e6).to_bytes(4, 'little')
 st._ingest(_msg(1.0), 11.010)      # latency 10ms
@@ -1046,6 +1047,34 @@ offset_ok = (abs(est_after_low - 10.002) < 1e-6
              and est_after_gap - est_after_low <= (41.130 - 11.102) * 50e-6 + 1e-9)
 print("  clock map keeps its lower envelope across a 30s still period (rise {0:.2f}ms, limit "
       "{1:.2f}ms): {2}".format((est_after_gap - est_after_low) * 1e3, 30 * 50e-3, offset_ok))
+# A stream pause restarts the firmware clock at 0 (20261030-142131: every Stage 2 threshold step).
+# The new epoch must continue on the old offset: module times keep increasing, host mapping right.
+st._begin_epoch()
+st._log_queue = []
+st._ingest(_msg(0.010, 5) + _msg(0.020, 9), 41.333)    # restarted clock; newest latency 2ms
+st._ingest(_msg(0.030, 12), 41.341)                    # latency 1ms -> offset lowered at once
+drained = st.drain_for_logging()
+mod_ts = [m for m, _, _ in drained]
+host_ts = [h for _, h, _ in drained]
+epoch_ok = (mod_ts == sorted(set(mod_ts)) and mod_ts[0] > 31.1
+            and all(abs(h - want) < 0.0015 for h, want in zip(host_ts, (41.320, 41.330, 41.340))))
+print("  stream restart (module clock back to 0) continues the module time and host map "
+      "(module {0}, host {1}): {2}".format(['%.4f' % m for m in mod_ts],
+                                           ['%.4f' % h for h in host_ts], epoch_ok))
+offset_ok = offset_ok and epoch_ok
+
+# host_clock: wall-anchored perf_counter, unaffected by a wall-clock step
+import host_clock as _hc
+_real_time = _rs.time.time
+_t1 = _hc.now()
+_hc.time.time = lambda: _real_time() + 3600.0     # the wall clock jumps an hour
+try:
+    _t2 = _hc.now()
+finally:
+    _hc.time.time = _real_time
+hc_ok = 0.0 <= _t2 - _t1 < 0.5
+print("  host_clock.now() ignores a wall-clock step: {0}".format(hc_ok))
+offset_ok = offset_ok and hc_ok
 tail_ok = [s[1] for s in _rs._tail_since(_rs.deque([(0, 1.0), (0, 2.0), (0, 3.0)]), 2.0)] == [2.0, 3.0]
 print("  tail scan returns exactly the items at/after the cutoff: {0}".format(tail_ok))
 

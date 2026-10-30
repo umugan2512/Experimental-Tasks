@@ -179,11 +179,20 @@ def audit(folder):
     # This replaced the "rotary reader never stalls > 50 ms" PASS/FAIL (2026-10-29): rare 50-70 ms
     # OS-level holds of the whole process failed it every session, with no sample ever lost.
     mods = []
+    frozen = 0
+    run = 0           # rows in a row sharing one module time
     for r in rows:
         if r[0] == 'VAL' and len(r) > 5 and r[4] == 'WHEEL_POS':
             parts = r[5].split(',')
             if len(parts) > 2 and _f(parts[2]) is not None:
                 mods.append(_f(parts[2]))
+                pos = _f(parts[1])
+                run = run + 1 if len(mods) > 1 and mods[-1] == mods[-2] else 1
+                # a single repeat is the keepalive clamp meeting the next real sample (a few ms);
+                # three or more rows on one time with the wheel moving is a frozen clock
+                if run >= 3 and pos != last_pos:
+                    frozen += 1
+                last_pos = pos
     if len(mods) > 1:
         mgaps = [b - a for a, b in zip(mods, mods[1:])]
         back = sum(1 for g in mgaps if g < -1e-6)
@@ -192,6 +201,12 @@ def audit(folder):
             max(mgaps) < BUDGET['wheel_module_gap_max_s'] and back == 0,
             'longest {0:.1f}ms, {1} backward step(s), {2} samples'.format(
                 max(mgaps) * 1e3, back, len(mods)))
+        # A moving wheel with an unchanging timestamp: the module clock restarted (every stream
+        # pause restarts it) and the never-backward clamp pinned later samples to the last old
+        # time (20261030-142131, fixed in RotaryStream._begin_epoch()). The gap check above
+        # can't see this -- a frozen clock has no gaps.
+        add('wheel module timestamps advance (no run of one time while moving)', frozen == 0,
+            '{0} sample(s) with a frozen timestamp'.format(frozen))
     else:
         add('no wheel samples lost', None, 'no module-time WHEEL_POS rows (polling mode)')
 
@@ -229,11 +244,30 @@ def audit(folder):
     # struct export) is not session time either
     first_trial = next((i for i, r in enumerate(rows) if r[0] == 'TRIAL'), len(rows))
     last_end = max([i for i, r in enumerate(rows) if r[0] == 'END-TRIAL'] or [len(rows) - 1])
-    pcs = [p for p in (_pc_time(r) for r in rows[first_trial:last_end + 1]) if p is not None]
+    pcs = []          # (row timestamp, host t of the latest WHEEL_POS row so far)
+    wheel_t = None
+    for r in rows[first_trial:last_end + 1]:
+        if r[0] == 'VAL' and len(r) > 5 and r[4] == 'WHEEL_POS':
+            wheel_t = _f(r[5].split(',')[0])
+        p = _pc_time(r)
+        if p is not None:
+            if pcs and pcs[-1][0] == p:
+                pcs[-1] = (p, wheel_t)   # one flush = one stamp; keep its LAST wheel row
+            else:
+                pcs.append((p, wheel_t))
     if len(pcs) > 1:
-        sil = max(((b - a).total_seconds(), a) for a, b in zip(pcs, pcs[1:]))
+        sil = max(((b[0] - a[0]).total_seconds(), a[0], a[1], b[1]) for a, b in zip(pcs, pcs[1:]))
+        # pybpod stamps rows with the wall clock (datetime.now()); the task's own times use the
+        # step-free host_clock. A row-stamp "silence" the WHEEL_POS host times don't share is the
+        # wall clock being stepped (Windows time sync), not the process stopping.
+        stepped = (sil[2] is not None and sil[3] is not None
+                   and sil[0] - (sil[3] - sil[2]) > BUDGET['csv_silence_max_s'])
         add('no CSV-wide silence > {0:.1f}s'.format(BUDGET['csv_silence_max_s']),
-            sil[0] <= BUDGET['csv_silence_max_s'], 'longest {0:.2f}s after {1}'.format(sil[0], sil[1].time()))
+            sil[0] <= BUDGET['csv_silence_max_s'] or stepped,
+            'longest {0:.2f}s after {1}{2}'.format(
+                sil[0], sil[1].time(),
+                ' -- a wall-clock step of {0:+.2f}s (host_clock rows continuous), not a stall'.format(
+                    sil[0] - (sil[3] - sil[2])) if stepped else ''))
 
     # 5. clock alignment -- same outlier-resistant fit as session_csv_parser.fit_host_to_bpod()
     pairs = [(_anchor(t), t['bpod'][0], i) for i, t in enumerate(trials, 1)
@@ -257,6 +291,19 @@ def audit(folder):
         sd = math.sqrt(sum(r * r for r in kres) / len(kres)) * 1e3
         span = pairs[-1][0] - pairs[0][0]
         max_out = max(1, int(0.05 * len(pairs)))
+        # A run of consecutive outliers at one shared offset is a step of the host clock itself,
+        # not timing noise: time.time() is the wall clock, which the Windows Time service steps
+        # (+1158 ms mid-session in 20261030-142131). Tasks now use host_clock.now() (step-free).
+        step = ''
+        shown = outl
+        if len(outl) >= 3:
+            idx = [i for i, _ in outl]
+            rs = [r for _, r in outl]
+            if idx == list(range(idx[0], idx[-1] + 1)) and max(rs) - min(rs) < 0.010:
+                step = '; host clock STEPPED {0:+.0f}ms between trials {1} and {2} '                        '(system time change, e.g. Windows time sync)'.format(
+                           statistics.median(rs) * 1e3 if idx[0] == 1 else -statistics.median(rs) * 1e3,
+                           idx[0] - 1 if idx[0] > 1 else idx[-1], idx[0] if idx[0] > 1 else idx[-1] + 1)
+                shown = outl[:3] + [(None, None)] + outl[-1:] if len(outl) > 5 else outl
         add('host->Bpod clock fit residual SD < {0:.0f}ms (outliers <= 5%)'.format(
             BUDGET['clock_residual_sd_max_ms']),
             sd < BUDGET['clock_residual_sd_max_ms'] and len(outl) <= max_out,
@@ -264,7 +311,8 @@ def audit(folder):
                 sd, max(map(abs, kres)) * 1e3, len(kept),
                 ', drift {0:.1f}ppm'.format((sl - 1) * 1e6) if span >= 120 else
                 ' (session < 120s: drift not estimated)',
-                '; outliers: ' + ', '.join('trial {0} {1:+.1f}ms'.format(i, r * 1e3) for i, r in outl)
+                step + '; outliers: ' + ', '.join(
+                    '...' if i is None else 'trial {0} {1:+.1f}ms'.format(i, r * 1e3) for i, r in shown)
                 if outl else ''))
 
     # 6. camera

@@ -55,6 +55,7 @@ try:
 except ImportError:   # a test double standing in for pybpodapi -- register() then uses register_value()
     ValueMessage = None
 
+import host_clock
 import rotary_setup
 from rotary_stream import RotaryStream
 
@@ -136,7 +137,7 @@ def install_session_lock():
             self.history.append(msg)
             if self.csvwriter:
                 self.csvwriter.writerow(msg.tolist())
-                now = time.time()
+                now = host_clock.now()
                 if flush or now - getattr(self, '_lab_last_flush', 0.0) >= SESSION_FLUSH_INTERVAL_S:
                     self.csvwriter.flush()
                     self._lab_last_flush = now
@@ -399,7 +400,7 @@ class TrialRunner(object):
         if self.stream is None:
             return
         with self._wheel_log_lock:
-            t_lock = time.time()
+            t_lock = host_clock.now()
             samples = self.stream.drain_for_logging()
             offset = self.stream.module_to_host(0.0)
             last = self._wheel_log_last
@@ -451,16 +452,16 @@ class TrialRunner(object):
             self._wheel_log_last_module_t = last_mod
             if offset is not None:
                 self.register('WHEEL_CLOCK_OFFSET', '{0:.6f}'.format(offset))
-            self._wheel_log_pumped_at = time.time()
+            self._wheel_log_pumped_at = host_clock.now()
             self.wheel_log_lock_max_ms = max(getattr(self, 'wheel_log_lock_max_ms', 0.0),
-                                             (time.time() - t_lock) * 1e3)
+                                             (host_clock.now() - t_lock) * 1e3)
 
     def pump(self):
         """ Call from any render/wait loop: writes buffered wheel samples at most every
         WHEEL_LOG_PUMP_INTERVAL_S, so the live dashboard's wheel plot keeps updating mid-trial.
         (Registering from the main thread while the decision thread runs the Bpod call is the same
         concurrency the old per-call poll thread always had.) """
-        if self.stream is not None and time.time() - self._wheel_log_pumped_at >= \
+        if self.stream is not None and host_clock.now() - self._wheel_log_pumped_at >= \
                 WHEEL_LOG_PUMP_INTERVAL_S:
             self.flush_wheel_log()
 
@@ -584,7 +585,7 @@ class TrialRunner(object):
         return in_times, out_times
 
     def _now(self):
-        return time.time() - self.log_python_t0
+        return host_clock.now() - self.log_python_t0
 
     def _publish_wheel_pos(self, pos, t=None):
         t = self._now() if t is None else t
@@ -629,7 +630,7 @@ class TrialRunner(object):
         and right before the actual RUN command -- the closest anchor to the real hardware
         trial-start instant reachable without instrumenting pybpod-api itself. Callers should
         re-anchor any send_t/cue_send_t-based VAL registration to `runner.last_send_t` once this
-        call returns, instead of whatever earlier time.time() they captured before building the
+        call returns, instead of whatever earlier host_clock.now() they captured before building the
         StateMachine -- that earlier value doesn't account for SM-construction + upload +
         RUN-handshake latency, a confirmed source of drift between derived event timestamps and
         the hardware-relative offsets they were added to.
@@ -701,13 +702,13 @@ class TrialRunner(object):
         """ (module_t, host_t_mapped) of this trial's '#' marker, waiting briefly for USB delivery.
         None if it never showed up (a trial that ended before its first state's output fired, or a
         firmware that doesn't report markers -- see Tests/tasks/rotary_stream_test/). """
-        deadline = time.time() + timeout
+        deadline = host_clock.now() + timeout
         while True:
             ev = self.stream.find_event(self.marker_code, after_host_t=self.trial_t0)
             if ev is not None:
                 host_t = self.stream.module_to_host(ev[0])
                 return ev[0], (ev[1] if host_t is None else host_t)
-            if time.time() >= deadline:
+            if host_clock.now() >= deadline:
                 return None
             time.sleep(0.005)
 
@@ -796,7 +797,7 @@ class TrialRunner(object):
 
         Registers 'TRIAL_INIT_START' once, right at entry (the moment this trial's quiescence-hold
         attempt begins), and a 'QUIESCENCE_RESET_TIME' row each time the trailing window is broken
-        by movement -- both on the same time.time() - log_python_t0 clock as every other VAL row,
+        by movement -- both on the same host_clock.now() - log_python_t0 clock as every other VAL row,
         so a trial's own initiation cost (and how many resets it took) is directly recoverable from
         the session CSV without having to reconstruct it from HoldCheck/LickDuringHold state times.
 
@@ -816,13 +817,13 @@ class TrialRunner(object):
 
         def wheel_watch():
             window = deque()
-            wait_start = time.time()
+            wait_start = host_clock.now()
             warned = [False]
             while not stop_wheel_watch.is_set():
                 time.sleep(1.0 / self.still_poll_hz)
                 with self.rotary_lock:
                     pos = self.rotary.current_position()
-                now = time.time()
+                now = host_clock.now()
                 if window and abs(pos - window[-1][1]) > steady_threshold_deg:
                     n_breaks_holder[0] += 1
                     self.register('QUIESCENCE_RESET_TIME', now - self.log_python_t0)
