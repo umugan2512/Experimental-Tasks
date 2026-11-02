@@ -20,6 +20,9 @@ if exist "%PY_EXE%" goto :run
 set PY_EXE=C:\Users\Gil\anaconda3\envs\UM-pybpod\python.exe
 if exist "%PY_EXE%" goto :run
 
+set PY_EXE=C:\Users\Gil\.conda\envs\UM-pybpod\python.exe
+if exist "%PY_EXE%" goto :run
+
 where python >nul 2>nul
 if %errorlevel%==0 (
     set PY_EXE=python
