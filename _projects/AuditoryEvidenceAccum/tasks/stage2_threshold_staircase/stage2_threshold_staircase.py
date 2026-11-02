@@ -234,6 +234,9 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
     'quiescence_consecutive_successes': 0,
     'quiescence_consecutive_failures': 0,
+    'recent_directions': [],         # the last DIRECTION_RATIO_WINDOW movement directions, oldest
+                                      # first -- seeds the debiasing window so withholding doesn't
+                                      # restart from an empty window every session
 })
 
 staircase_obj = staircase.ThresholdStaircase(
@@ -256,7 +259,7 @@ session_saw_threshold_step_up = False   # set True the first time this session's
                                          # staircase steps up at least once (see record_outcome call
                                          # below) -- drives the one-way unlock above.
 
-direction_tracker = DirectionRatioTracker()
+direction_tracker = DirectionRatioTracker(history=state.get('recent_directions'))
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -275,6 +278,9 @@ neg_event, pos_event = rotary_setup.set_and_enable_thresholds(
 rotary.enable_evt_transmission()   # once per session, never toggled (MATLAB's sendThresholdEvents)
 
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+# How many earlier-session directions seeded the debiasing window (0 = a fresh window, so no
+# withholding before trial DIRECTION_RATIO_MIN_TRIALS + 1).
+my_bpod.register_value('DIRECTION_HISTORY_SEEDED', direction_tracker.seeded_trials)
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.
@@ -650,6 +656,7 @@ state.set('consecutive_successes', staircase_obj.consecutive_successes)
 state.set('consecutive_failures', staircase_obj.consecutive_failures)
 state.set('iti_s', cur_iti_s)
 state.set('spout_position_mm', cur_spout_position_mm)
+state.set('recent_directions', direction_tracker.history())
 
 if not quiescence_unlocked and session_saw_threshold_step_up:
     quiescence_unlocked = True

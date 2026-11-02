@@ -813,6 +813,12 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   stays unchanged (still reports the real rolling value for logging/display regardless of window
   fullness), only the withhold-triggering `in_band()`/`over_used_side()`/`should_withhold()` chain
   is gated.
+  **Since 2026-11-02 the gate is 20 known directions, and the window carries over between
+  sessions** (`recent_directions` in the state file, `DIRECTION_HISTORY_SEEDED` VAL). The old
+  "full 40-trial window of this session" gate let UM001 turn left on 22/22 trials of
+  `20261102-160353`, all rewarded, with `DIRECTION_RATIO` sitting at 0.0. UM001's state was
+  seeded by hand from its last two Stage 2 sessions (right fraction 0.28, so left turns are
+  withheld from the next session's first trial).
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching

@@ -203,32 +203,58 @@ for _ in range(50):
 window_check = len(dt3._sides) == 40   # rolling window caps at 40, doesn't grow unbounded
 print("  rolling window caps at 40 entries after 50 records: {0}".format(window_check))
 
-# Regression check: before the window is full, even an extreme (all-one-side) ratio must NOT
-# trigger withholding -- confirmed on hardware that OUTCOME=Withheld fired as early as trial 2
-# before this gate existed (right_fraction() over 1-2 trials is pure noise, not a real bias).
+# Regression check: before DIRECTION_RATIO_MIN_TRIALS directions are known, even an extreme
+# (all-one-side) ratio must NOT trigger withholding -- confirmed on hardware that OUTCOME=Withheld
+# fired as early as trial 2 when there was no gate at all (right_fraction() over 1-2 trials is pure
+# noise, not a real bias).
 dt4 = DirectionRatioTracker()
 dt4.record('L')
-one_trial_not_full = not dt4.has_full_window()
+one_trial_not_enough = not dt4.has_enough_trials() and not dt4.has_full_window()
 one_trial_in_band = dt4.in_band() and not dt4.should_withhold('L') and not dt4.should_withhold('R')
-print("  1 trial recorded: has_full_window()=False: {0}".format(one_trial_not_full))
+print("  1 trial recorded: has_enough_trials()=False: {0}".format(one_trial_not_enough))
 print("  1 trial, all-'L' (extreme ratio): in_band=True, no withholding on either side "
       "(not enough data yet to trust it): {0}".format(one_trial_in_band))
 
+# Fresh window (no earlier sessions): withholding starts after DIRECTION_RATIO_MIN_TRIALS (20),
+# not after the full 40-trial window (UM001 20261102-160353: 22/22 left turns, none withheld).
 dt5 = DirectionRatioTracker()
-for _ in range(39):
+for _ in range(19):
     dt5.record('L')
-still_not_full_at_39 = not dt5.has_full_window()
-still_no_withhold_at_39 = dt5.in_band() and not dt5.should_withhold('L')
-print("  39/40 trials, all-'L': still has_full_window()=False, still no withholding: {0}".format(
-    still_not_full_at_39 and still_no_withhold_at_39))
+still_no_withhold_at_19 = not dt5.has_enough_trials() and not dt5.should_withhold('L')
+print("  fresh window, 19 trials all-'L': still no withholding: {0}".format(still_no_withhold_at_19))
 dt5.record('L')
-full_at_40_withholds = dt5.has_full_window() and dt5.should_withhold('L')
-print("  40th trial completes the window: has_full_window()=True, NOW withholds 'L': {0}".format(
-    full_at_40_withholds))
+withholds_at_20 = dt5.has_enough_trials() and not dt5.has_full_window() and dt5.should_withhold('L')
+print("  20th trial: has_enough_trials()=True, NOW withholds 'L': {0}".format(withholds_at_20))
+
+# Seeded from earlier sessions: withholding is live from this session's first trial.
+seed = ['R'] * 5 + ['L'] * 40          # 45 entries, oldest first; only the last 40 are kept
+dt6 = DirectionRatioTracker(history=seed)
+seeded_truncated = dt6.seeded_trials == 40 and dt6.history() == ['L'] * 40
+seeded_withholds_first_trial = dt6.should_withhold('L') and not dt6.should_withhold('R')
+print("  seeded with 45 earlier directions: keeps the last 40: {0}".format(seeded_truncated))
+print("  seeded all-'L' window: withholds 'L' on trial 1: {0}".format(seeded_withholds_first_trial))
+dt7 = DirectionRatioTracker(history=['R', 'L'] * 5)   # 10 earlier + 10 this session = 20
+for _ in range(9):
+    dt7.record('L')
+partial_seed_waits = not dt7.should_withhold('L')    # 19 known, 70% L... not enough yet
+dt7.record('L')
+partial_seed_counts = dt7.should_withhold('L')       # 20 known, 15/20 = 75% L -> withhold
+print("  10 seeded + 10 new (75% L): withholds once 20 are known, not before: {0}".format(
+    partial_seed_waits and partial_seed_counts))
+dt8 = DirectionRatioTracker(history=['L', 'None', None, 'R', 'x'])
+seed_filters_junk = dt8.history() == ['L', 'R'] and DirectionRatioTracker(history=None).seeded_trials == 0
+print("  seeding ignores anything but 'L'/'R' (and None history): {0}".format(seed_filters_junk))
+# round trip through StageState's JSON, the way Stage 2 persists it
+import json as _json
+dt9 = DirectionRatioTracker(history=_json.loads(_json.dumps(dt7.history())))
+seed_round_trip = dt9.history() == dt7.history() and dt9.right_fraction() == dt7.right_fraction()
+print("  history() survives a JSON round trip: {0}".format(seed_round_trip))
 
 section3_pass = (neutral_start and over_used_right and withhold_right and balanced_in_band and
-                  window_check and one_trial_not_full and one_trial_in_band and
-                  still_not_full_at_39 and still_no_withhold_at_39 and full_at_40_withholds)
+                  window_check and one_trial_not_enough and one_trial_in_band and
+                  still_no_withhold_at_19 and withholds_at_20 and seeded_truncated and
+                  seeded_withholds_first_trial and partial_seed_waits and partial_seed_counts and
+                  seed_filters_junk and seed_round_trip)
 print("Section 3 result: {0}".format("PASS" if section3_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

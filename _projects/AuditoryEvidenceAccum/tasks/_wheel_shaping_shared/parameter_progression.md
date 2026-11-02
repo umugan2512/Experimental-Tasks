@@ -89,6 +89,19 @@ furthest (as a normalized 0-1 fraction) from its own final value, tie-breaking b
 away from the previous session's pick (persisted as `stage5_last_staircase_advanced`). The
 *inactive* one is fully frozen that session — its counters don't move either.
 
+## Side-bias withholding (Stage 2 only)
+
+`DirectionRatioTracker` (`direction_tracker.py`): the right-turn fraction over the last 40
+movement directions (rewarded or withheld turns; no-movement trials don't count). Outside 30-70%,
+reward is withheld on the over-used side. Stage 1 and Stages 3-5 don't use it.
+
+| Within-session | Across-session |
+|---|---|
+| Recomputed every trial. No withholding until 20 directions are known (`DIRECTION_RATIO_MIN_TRIALS`), counting the carried-over ones. | The last 40 directions persist as `recent_directions`, so withholding is live from trial 1 for an animal with Stage 2 history. `DIRECTION_HISTORY_SEEDED` logs how many were carried over. |
+
+Before 2026-11-02 the window started empty every session and withholding waited for 40 trials of
+that session, so UM001 (`20261102-160353`) got 22/22 left turns rewarded.
+
 ## Session caps (Stage 1/2)
 
 | Cap | Scope | Value |
