@@ -273,6 +273,12 @@ class IncrementalSessionParser(object):
     def result(self):
         return self._state['info'], self._state['session_vals'], self._state['trials']
 
+    @property
+    def bytes_read(self):
+        """ How far into the file update() has read -- unchanged between two calls means nothing
+        new was appended (the dashboard skips its redraw then). """
+        return self._pos
+
 
 def parse_subject_name(raw):
     """ INFO's SUBJECT-NAME value looks like "['test', '7f6bd106-...']" -- a Python-list repr, not

@@ -138,6 +138,9 @@ def _cleanup_and_export():
     realized_fps = camera.compute_realized_fps()
     if realized_fps is not None:
         my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
+    # longest frame read / video write -- tells a camera frame gap's cause (see CameraRecorder)
+    my_bpod.register_value('CAMERA_MAX_READ_MS', camera.max_read_ms)
+    my_bpod.register_value('CAMERA_MAX_WRITE_MS', camera.max_write_ms)
     dot.close()
     hifi.close()
     rotary.close()

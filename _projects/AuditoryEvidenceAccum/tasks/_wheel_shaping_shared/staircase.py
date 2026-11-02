@@ -51,8 +51,13 @@ class ThresholdStaircase(object):
     consecutive_successes/consecutive_failures all round-trip through it), not reset to an initial
     value -- the whole point of the staircase is that it survives across days. """
 
-    def __init__(self, current_fraction, consecutive_successes=0, consecutive_failures=0):
+    def __init__(self, current_fraction, consecutive_successes=0, consecutive_failures=0,
+                 floor=0.0):
+        """ :param floor: lowest fraction a step-down can reach. Stage 2 passes its own starting
+        point (0.20) since 2026-11-02, when withheld turns started counting as failures. A value
+        already below the floor is never raised by a step-down. """
         self.current_fraction = current_fraction
+        self.floor = floor
         self.consecutive_successes = consecutive_successes
         self.consecutive_failures = consecutive_failures
 
@@ -69,7 +74,8 @@ class ThresholdStaircase(object):
             self.consecutive_failures += 1
             self.consecutive_successes = 0
             if self.consecutive_failures >= STAIRCASE_FAILURES_TO_STEP_DOWN:
-                self.current_fraction = max(0.0, self.current_fraction - STAIRCASE_STEP_DOWN)
+                self.current_fraction = max(min(self.floor, self.current_fraction),
+                                            self.current_fraction - STAIRCASE_STEP_DOWN)
                 self.consecutive_failures = 0
 
 

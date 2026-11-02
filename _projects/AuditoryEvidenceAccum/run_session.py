@@ -82,6 +82,7 @@ matplotlib.use('Qt5Agg')   # same fix already applied to full_protocol_lookback_
                             # event loop for the whole process, see CLAUDE.md's PyEval_RestoreThread
                             # crash note.
 
+from matplotlib.collections import LineCollection
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
@@ -2092,12 +2093,35 @@ class SessionRunnerWindow(QWidget):
         if not session_path or getattr(self, '_audited_path', None) == session_path:
             return
         self._audited_path = session_path
-        try:
-            import audit_session
-            name, results = audit_session.audit(session_path)
-        except Exception as err:
-            self.launch_status_label.setText('Finished (audit could not run: {0}).'.format(err))
+        # On a worker thread: parsing a 250-trial session's CSV takes ~5.5s, which froze the
+        # window right after every session when this ran on the GUI thread.
+        self.launch_status_label.setText('Finished -- running the timing audit...')
+        result = {}
+
+        def work():
+            try:
+                import audit_session
+                result['audit'] = audit_session.audit(session_path)
+            except Exception as err:
+                result['error'] = err
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+
+        def poll():
+            if thread.is_alive():
+                QTimer.singleShot(250, poll)
+                return
+            self._show_audit_result(session_path, result)
+
+        QTimer.singleShot(250, poll)
+
+    def _show_audit_result(self, session_path, result):
+        if 'audit' not in result:
+            self.launch_status_label.setText('Finished (audit could not run: {0}).'.format(
+                result.get('error')))
             return
+        name, results = result['audit']
         lines = ['[{0:4}] {1}  --  {2}'.format(st, check, detail) for check, st, detail in results]
         try:
             with open(os.path.join(session_path, 'audit_report.txt'), 'w', encoding='utf-8') as f:
@@ -2127,10 +2151,8 @@ class SessionRunnerWindow(QWidget):
         # frame/trial arrives.
         self.camera_label.setPixmap(QPixmap())
         self.camera_label.setText('No camera frame yet.')
-        self._wheel_ax.cla()
-        self._wheel_ax.set_xlabel('session time (s)', fontsize=8)
-        self._wheel_ax.set_ylabel('wheel pos (deg)', fontsize=8)
-        self._wheel_ax.tick_params(labelsize=7)
+        self._reset_wheel_axes()
+        self._plots_bytes_seen = None
         self._wheel_canvas.draw_idle()
         self.plots_placeholder_label.setText(
             'Watching this session -- the full outcome-panel set will appear here once it has at '
@@ -2165,6 +2187,12 @@ class SessionRunnerWindow(QWidget):
         except Exception:
             print(traceback.format_exc(), flush=True)
             return
+        # Nothing appended since the last poll (always the case once the session has ended):
+        # nothing to redraw. Redrawing anyway is what made the dashboard sluggish after a session
+        # -- the wheel panel alone took 0.62s per 500ms poll at 250 trials (20261102-161142).
+        if self._parser.bytes_read == self._plots_bytes_seen:
+            return
+        self._plots_bytes_seen = self._parser.bytes_read
         protocol_name = info.get('PROTOCOL-NAME')
         real = session_csv_parser.real_trials(trials)
 
@@ -2197,32 +2225,41 @@ class SessionRunnerWindow(QWidget):
             except Exception:
                 print(traceback.format_exc(), flush=True)
 
+    def _reset_wheel_axes(self):
+        """ Clears the wheel panel and creates its persistent artists: the trace (one Line2D), the
+        trial-start lines and the +/-threshold segments (one LineCollection each), updated in place
+        by _redraw_wheel_plot(). It used to cla() and add one artist per trial line every poll:
+        0.62s per redraw at 250 trials, longer than the 500ms poll interval. """
+        ax = self._wheel_ax
+        ax.cla()
+        self._wheel_starts = LineCollection([], colors='#dddddd', linewidths=0.6, zorder=0)
+        self._wheel_thresholds = LineCollection([], colors='black', linestyles=':',
+                                                linewidths=0.9, zorder=1)
+        ax.add_collection(self._wheel_starts)
+        ax.add_collection(self._wheel_thresholds)
+        self._wheel_line, = ax.plot([], [], linewidth=0.8, color='tab:blue', zorder=2)
+        ax.axhline(0, color='#888888', linewidth=0.5, zorder=0)
+        ax.set_xlabel('session time (s)', fontsize=8)
+        ax.set_ylabel('wheel pos (deg)', fontsize=8)
+        ax.tick_params(labelsize=7)
+
     def _redraw_wheel_plot(self, real, protocol_name, session_vals):
-        """ Small cla()+rebuild every poll -- cheap at this cadence/session length (same "small
-        panel, cheap redraw" convention already used elsewhere for low-cardinality panels; only
-        the FULL WheelShapingPlots raster needs persistent artists, since that one redraws every
-        single trial rather than every ~2s poll). """
+        """ Updates the persistent artists from _reset_wheel_axes() (called only when the CSV
+        grew -- see _on_plots_poll()). """
         starts, segments = build_trial_markers(real, protocol_name, session_vals)
         xs, ys = self._wheel_cache.series(real)
-        self._wheel_ax.cla()
-        for x in starts:
-            self._wheel_ax.axvline(x, color='#dddddd', linewidth=0.6, zorder=0)
-        for x_start, x_end, threshold in segments:
-            self._wheel_ax.plot([x_start, x_end], [threshold, threshold], color='black',
-                                 linestyle=':', linewidth=0.9, zorder=1)
-            self._wheel_ax.plot([x_start, x_end], [-threshold, -threshold], color='black',
-                                 linestyle=':', linewidth=0.9, zorder=1)
-        self._wheel_ax.plot(xs, ys, linewidth=0.8, color='tab:blue', zorder=2)
-        self._wheel_ax.axhline(0, color='#888888', linewidth=0.5, zorder=0)
-        self._wheel_ax.set_xlabel('session time (s)', fontsize=8)
-        self._wheel_ax.set_ylabel('wheel pos (deg)', fontsize=8)
-        self._wheel_ax.tick_params(labelsize=7)
+        self._wheel_line.set_data(xs, ys)
+        y_span = 5.0
         if xs or segments:
             all_x = xs + [s[0] for s in segments] + [s[1] for s in segments]
             all_y = ys + [s[2] for s in segments] + [-s[2] for s in segments]
             self._wheel_ax.set_xlim(min(all_x), max(all_x) + 1)
             y_span = max([abs(y) for y in all_y] + [5.0]) * 1.1
             self._wheel_ax.set_ylim(-y_span, y_span)
+        self._wheel_starts.set_segments([[(x, -y_span), (x, y_span)] for x in starts])
+        self._wheel_thresholds.set_segments(
+            [[(a, th), (b, th)] for a, b, th in segments]
+            + [[(a, -th), (b, -th)] for a, b, th in segments])
         self._wheel_canvas.draw_idle()
 
     def _embed_plots_canvas(self, canvas):

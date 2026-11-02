@@ -6,11 +6,13 @@ training_protocol.md Part 4, Stage 2 -- "Threshold staircase, ITI growth, spout 
 Aim: grow the movement threshold, ITI, and spout position to their final values BEFORE Stage 3
 introduces errors/clicks, so nothing else is still changing when clicks are introduced. Four
 concurrent processes: (a) threshold staircase, +10% per 20 consecutive successes / -10% per 5
-consecutive failures, ceiling at the final threshold; (b) ITI +0.1s/qualifying-session to a 1.5s
+consecutive failures, ceiling at the final threshold, floor at Stage 2's 20% start (a withheld turn
+counts as a failure since 2026-11-02, so an animal stuck on one side gets an easier threshold); (b) ITI +0.1s/qualifying-session to a 1.5s
 ceiling; (c) spout retraction ~2-3mm/qualifying-session (physical, manual -- this script can only
 remind/log the schedule, there's no spout actuator to command); (d) side-bias management -- track
 the direction ratio over the last ~40 trials, withhold reward on the over-used side if it leaves
-the 30-70% band.
+the 30-70% band. The ratio is recency-weighted (~10 effective trials; direction_tracker.py) and
+its window carries over from the previous session.
 
 Advancement is primarily a STATISTICAL test (bimodal movement distribution + rewarded-turn
 velocity clearly separated from drift) that the doc describes conceptually but doesn't fully
@@ -106,6 +108,9 @@ def _cleanup_and_export():
     realized_fps = camera.compute_realized_fps()
     if realized_fps is not None:
         my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
+    # longest frame read / video write -- tells a camera frame gap's cause (see CameraRecorder)
+    my_bpod.register_value('CAMERA_MAX_READ_MS', camera.max_read_ms)
+    my_bpod.register_value('CAMERA_MAX_WRITE_MS', camera.max_write_ms)
     dot.close()
     rotary.close()
     csv_path = my_bpod.session._path   # grab before close() -- close() deletes the Session object
@@ -153,7 +158,7 @@ VAR_THRESHOLD_FINAL_DEG = 35        # matches Stage 1 / this project's establish
 VAR_TRIAL_COUNT_ADVANCE = 100       # The QUALIFYING threshold only (lowered from the doc's
                                      # original 200, per explicit instruction) -- how many
                                      # trials with a genuine movement (rewarded or withheld; see
-                                     # staircase_success below) this session needs for
+                                     # `moved` below) this session needs for
                                      # advancement purposes. Deliberately NOT the same thing as
                                      # the session's own hard trial cap any more (see
                                      # VAR_TRIAL_CAP below) -- those two numbers used to share
@@ -167,6 +172,7 @@ VAR_DAILY_WATER_CAP_UL = 1500.0     # CONSUMED per animal per calendar DAY, acro
                                      # Per explicit instruction: three caps on the session --
                                      # VAR_TRIAL_CAP trials, 1.5mL consumed, or 30 minutes
                                      # elapsed -- whichever comes first.
+VAR_THRESHOLD_FLOOR_FRACTION = 0.20 # step-downs stop here (Stage 2's own starting point)
 VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
@@ -242,7 +248,8 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
 staircase_obj = staircase.ThresholdStaircase(
     current_fraction=state.get('threshold_fraction'),
     consecutive_successes=state.get('consecutive_successes'),
-    consecutive_failures=state.get('consecutive_failures'))
+    consecutive_failures=state.get('consecutive_failures'),
+    floor=VAR_THRESHOLD_FLOOR_FRACTION)
 cur_iti_s = state.get('iti_s')
 cur_spout_position_mm = state.get('spout_position_mm')
 
@@ -555,8 +562,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         side = outcome_state[-1] if outcome_state in ('RewardL', 'RewardR', 'NoRewardL',
                                                         'NoRewardR') else None
         rewarded = outcome_state in ('RewardL', 'RewardR')
-        staircase_success = side is not None   # cleared the threshold at all, independent of
-                                                 # reward withholding
+        moved = side is not None   # cleared the threshold at all, rewarded or withheld
         outcome = ('Rewarded' if rewarded else 'Withheld' if side is not None
                    else early if early else 'NoMovement')
 
@@ -566,13 +572,16 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         # already draw via their own trial_type=='main' and correct is not None gate. A trial that
         # ended before the dot (MovedBeforeDot/DotTimeout) never offered a response window, so it
         # is no movement-threshold staircase outcome either way -- but it IS a failed hold.
-        if staircase_success:
+        # The staircase itself counts only a REWARDED turn as a success (2026-11-02): a withheld
+        # turn is a failure, so 5 in a row step the threshold down. UM001 20261102-161142 sat at
+        # the 35deg ceiling for all 250 trials while 65 of its turns were withheld.
+        if moved:
             session_trial_count += 1
         if rewarded:
             session_reward_ul_total += VAR_REWARD_UL
         if not early:
             fraction_before_step = staircase_obj.current_fraction
-            staircase_obj.record_outcome(success=staircase_success)
+            staircase_obj.record_outcome(success=rewarded)
             if staircase_obj.current_fraction > fraction_before_step:
                 session_saw_threshold_step_up = True
         if quiescence_unlocked:
@@ -583,7 +592,8 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         runner.register('TRIAL_TYPE', 'stage2')
         runner.register('MOVEMENT_DIRECTION', side if side is not None else 'None')
         runner.register('OUTCOME', outcome)
-        runner.register('DIRECTION_RATIO', direction_tracker.right_fraction())
+        runner.register('DIRECTION_RATIO', direction_tracker.right_fraction())   # weighted: drives withholding
+        runner.register('DIRECTION_RATIO_FLAT', direction_tracker.plain_right_fraction())
         if side is not None:
             runner.register('THRESHOLD_CROSSING_TIME', send_t + visited[outcome_state][-1][0])
 
@@ -599,7 +609,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         runner.register('DAY_WATER_CONSUMED_UL', water_earlier_today_ul + water.consumed_ul)
         reward_time_abs = send_t + visited[outcome_state][-1][0] if rewarded else None
 
-        magnitude_deg = cur_threshold_deg if staircase_success else 0.0
+        magnitude_deg = cur_threshold_deg if moved else 0.0
         bench_plots.add_trial(side if side is not None else 'R', magnitude_deg, cur_threshold_deg,
                                'Abort' if early else outcome, iti_s=cur_iti_s,
                                direction_ratio=direction_tracker.right_fraction(),
