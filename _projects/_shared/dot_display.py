@@ -59,6 +59,22 @@ def visual_deg_to_px(visual_deg, screen_width_px, screen_width_mm, viewing_dista
     return visual_deg * px_per_deg
 
 
+def _stimulus_geometry(screens, screen_index, who):
+    """ The rectangle the stimulus window covers: screens[screen_index] united with every later
+    screen. Rigs differ in how Windows exposes the three dot panels: one rig bonds them into a
+    single 6144x1536 Qt screen (index 1 is then all three), another exposes them as three separate
+    2048x1536 screens (1, 2, 3). Spanning screen_index..last gives the same 6144px window on both,
+    centred on the middle panel, and changes nothing on the bonded rig. """
+    if screen_index >= len(screens):
+        print("WARNING: {0} requested screen index {1} but only {2} screen(s) detected -- "
+              "falling back to screen 0.".format(who, screen_index, len(screens)), flush=True)
+        screen_index = 0
+    rect = screens[screen_index].geometry()
+    for s in screens[screen_index + 1:]:
+        rect = rect.united(s.geometry())
+    return rect
+
+
 def _dot_bounds(cx, cy, diameter_px, margin=2):
     r = diameter_px // 2
     return QRect(cx - r - margin, cy - r - margin, diameter_px + 2 * margin, diameter_px + 2 * margin)
@@ -136,13 +152,7 @@ class DotDisplay(object):
         if self._app is None:
             self._app = QApplication(sys.argv)
 
-        screens = self._app.screens()
-        if screen_index >= len(screens):
-            print("WARNING: DotDisplay requested screen index {0} but only {1} screen(s) "
-                  "detected -- falling back to screen 0.".format(screen_index, len(screens)),
-                  flush=True)
-            screen_index = 0
-        screen_geometry = screens[screen_index].geometry()
+        screen_geometry = _stimulus_geometry(self._app.screens(), screen_index, 'DotDisplay')
 
         self._widget = _DotWidget(diameter_px, background_gray, dot_gray)
         self._widget.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -294,13 +304,8 @@ class MiddleScreenDotDisplay(object):
         if self._app is None:
             self._app = QApplication(sys.argv)
 
-        screens = self._app.screens()
-        if screen_index >= len(screens):
-            print("WARNING: MiddleScreenDotDisplay requested screen index {0} but only {1} "
-                  "screen(s) detected -- falling back to screen 0.".format(
-                      screen_index, len(screens)), flush=True)
-            screen_index = 0
-        screen_geometry = screens[screen_index].geometry()
+        screen_geometry = _stimulus_geometry(self._app.screens(), screen_index,
+                                             'MiddleScreenDotDisplay')
 
         self._widget = _MiddleOnlyDotWidget(diameter_px, background_gray, dot_gray,
                                              n_segments, active_segment_index)
@@ -366,11 +371,11 @@ DEFAULT_USE_MIDDLE_SCREEN_ONLY = False        # False = full combined-window spa
                                                # (MiddleScreenDotDisplay) -- see that class's own
                                                # docstring; flip back if the dot should again be
                                                # confined to the middle monitor only.
-DEFAULT_DOT_SCREEN_INDEX = 1                  # the combined spanned Qt screen (or a genuine second
-                                               # monitor if DEFAULT_USE_MIDDLE_SCREEN_ONLY is ever
-                                               # flipped True); falls back to 0 with a warning if
-                                               # not found (see DotDisplay/MiddleScreenDotDisplay's
-                                               # own __init__).
+DEFAULT_DOT_SCREEN_INDEX = 1                  # first dot screen; the window spans it and every
+                                               # later screen (_stimulus_geometry), so this works
+                                               # whether the panels are one bonded screen or three
+                                               # separate ones. Falls back to 0 with a warning if
+                                               # not found.
 DEFAULT_N_PHYSICAL_MONITORS_IN_SPAN = 3       # confirmed via screens(): the combined Qt screen on
                                                # this rig is 6144px wide, 6144/3 = 2048px/panel.
                                                # Only used when DEFAULT_USE_MIDDLE_SCREEN_ONLY=True.

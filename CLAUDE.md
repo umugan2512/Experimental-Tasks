@@ -609,7 +609,12 @@ Durable facts/gotchas from building this:
   column's width) to that one column — a drop-in replacement for `DotDisplay` (identical public
   method surface), used by `dot_wheel_midscreen_test.py` and, behind a `VAR_USE_MIDDLE_SCREEN_ONLY`
   flag, `hifi_singleside_dot_test.py`. Before assuming "N physical monitors = N `QScreen`s" on any
-  rig, check `screens()` directly rather than trusting the monitor count alone.
+  rig, check `screens()` directly rather than trusting the monitor count alone. **Other boxes
+  differ:** `training01` exposes the same three panels as three separate 2048x1536 `QScreen`s
+  (1, 2, 3, left to right), so a window on screen 1 alone put the dot's "centre" on the leftmost
+  panel. `dot_display._stimulus_geometry()` (2026-11-02) makes the window span
+  `screens[DEFAULT_DOT_SCREEN_INDEX:]`, which is the same 6144px window, centred on the middle
+  panel, on both kinds of box (verified on `training01` by screenshot).
 - **This rig's rotary encoder's raw positive-position direction is the physical direction that
   visually moves a wheel-coupled display element toward screen-LEFT, not screen-right** — confirmed
   directly on hardware (a user turning the wheel observed the dot moving opposite to the expected
