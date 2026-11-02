@@ -1030,6 +1030,24 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     - `add_message(flush=)` is accepted and ignored.
     - `WHEEL_LOG_LOCK_MAX_MS` over a few ms now means lock contention, not disk.
     - Suite Section 16 checks it with a stream whose flush sleeps 200 ms.
+  - **First rig run with the step-free clock, stream-restart and async-writer fixes**
+    (2026-11-02): an accidental 24-trial UM001 Stage 2 test (`20261102-124326`, since deleted)
+    passed every audit check.
+    - The threshold stepped twice mid-session and `ROTARY_MARKER` module times stayed
+      continuous.
+    - Worst render frame 34 ms; dot onset ≤ 1.9 ms.
+    - `WHEEL_LOG_LOCK_MAX_MS` max 27 ms (was up to 240 ms).
+  - **Removing an accidental session also means undoing its state write.** A stage's session-end
+    bookkeeping saves `subjects/<id>/wheel_shaping_state.json`, even after a Stop. That file
+    is gitignored and has no backup. For the deleted test above (2026-11-02):
+    - Rebuild the pre-session values by replaying the previous real session's `OUTCOME`s through
+      `staircase.ThresholdStaircase`. Stage 2's success rule: Rewarded or Withheld. Check the
+      replay reproduces every logged `THRESHOLD_DEG`.
+    - Quiescence keys go back to defaults if that session only unlocked quiescence.
+    - Drop the test's appended entry from `sessions_trial_count_history`.
+    - Deleting the session folder also removes its water from `water_consumed_today()`.
+    - Copies of the removed sessions and the pre-restore state file went to the session
+      scratchpad, which is temporary.
   - **A render-loop frame can block for ~0.5–1 s with nothing else wrong.** In `20261030-142131`
     trial 181, the camera and the rotary reader ran normally, so it wasn't the GIL or the
     process. Only the main thread stopped, inside Qt's `processEvents()`. That fits a task
