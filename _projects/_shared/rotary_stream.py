@@ -39,6 +39,8 @@ import threading
 import time
 from collections import deque
 
+import host_clock
+
 _MSG_LEN = 7
 _READER_TIMEOUT_S = 0.005        # reader's blocking-read timeout (ack reads get the original back)
 _SCALE_CANDIDATES = (1e-6, 1e-3)   # seconds per module-clock tick: fw v6 (us) vs older (ms)
@@ -52,7 +54,7 @@ class RotaryStream(object):
     One instance per task script, constructed once the rotary is connected:
     `stream = RotaryStream(rotary, log_python_t0)`, `stream.start()`, ..., `stream.stop()`.
 
-    All "host" times returned here are on the same `time.time() - log_python_t0` clock every VAL
+    All "host" times returned here are on the same `host_clock.now() - log_python_t0` clock every VAL
     registration in this codebase already uses; "module" times are seconds on the module's own clock.
     """
 
@@ -79,6 +81,9 @@ class RotaryStream(object):
         self._offset_est = None       # host minus module seconds (see _ingest)
         self._offset_t = None         # host time of the last estimate update
         self._latest = None           # (module_t, host_rx_t, pos_deg)
+        self._epoch_base = 0.0        # seconds added to this stream epoch's module times
+        self._new_epoch = False       # next message starts a new epoch (see _begin_epoch)
+        self._last_module_t = 0.0
         self.n_resyncs = 0
         self._max_read_gap_s = 0.0    # longest reader-loop iteration since last pop_max_read_gap_ms()
 
@@ -141,13 +146,29 @@ class RotaryStream(object):
         finally:
             _set_timeout(self.rotary.arcom.serial_object, _READER_TIMEOUT_S)
             self.rotary.arcom.serial_object.reset_input_buffer()
+            self._begin_epoch()
             self.rotary.enable_stream()
             self._pause_request.clear()
+
+    def _begin_epoch(self):
+        """ The firmware restarts its clock at 0 every time streaming is (re)enabled. Before this,
+        every stream pause (Stage 2 sets new thresholds whenever its staircase steps) sent the
+        module time back to ~0: the offset estimate could only creep up at _MAX_DRIFT, and
+        TrialRunner.flush_wheel_log()'s never-backward clamp pinned every later sample to one
+        timestamp (session 20261030-142131, from trial 22 on). The new epoch's times are shifted
+        so they continue on the old offset (see _ingest); within an epoch they stay exact, and a
+        trial's ROTARY_MARKER and its samples are always in the same epoch. """
+        with self._lock:
+            self._new_epoch = self._offset_est is not None
+            self._raw_last = 0
+            self._rollover_ticks = 0
+            if self._scale is None:
+                self._scale_probe = []
 
     # --- reader thread -----------------------------------------------------------------------------
 
     def _now(self):
-        return time.time() - self.log_python_t0
+        return host_clock.now() - self.log_python_t0
 
     def _read_loop(self, stop_event):
         """ READ-ONLY. Wrapped in a broad try/except: a Kill/Stop can close the port out from under
@@ -155,9 +176,9 @@ class RotaryStream(object):
         old poll loop. """
         serial_object = self.rotary.arcom.serial_object
         _raise_this_thread_priority()
-        last = time.time()
+        last = host_clock.now()
         while not stop_event.is_set():
-            now = time.time()
+            now = host_clock.now()
             self._max_read_gap_s = max(self._max_read_gap_s, now - last)
             last = now
             if self._pause_request.is_set():
@@ -207,22 +228,31 @@ class RotaryStream(object):
             if self._scale is None:
                 self._resolve_scale(new_samples, new_events, host_t)
             scale = self._scale if self._scale is not None else _DEFAULT_SCALE
+            newest_raw = max([s[0] for s in new_samples] + [e[0] for e in new_events])
+            if self._new_epoch:
+                # Put this epoch's first message on the old offset. Its latency is at least the
+                # minimum, so this base is a little high at worst, and a lower-latency message
+                # then lowers the offset at once (below) -- host-mapped times come out right.
+                self._epoch_base = max(host_t - self._offset_est - newest_raw * scale,
+                                       self._last_module_t)
+                self._new_epoch = False
+            base = self._epoch_base
             for raw, ticks in new_samples:
-                module_t = raw * scale
+                module_t = raw * scale + base
                 sample = (module_t, host_t, _ticks_to_deg(ticks))
                 self._samples.append(sample)
                 self._log_queue.append(sample)
                 self._latest = sample
             for raw, ev_type, ev_code in new_events:
-                self._events.append((raw * scale, host_t, ev_type, ev_code))
+                self._events.append((raw * scale + base, host_t, ev_type, ev_code))
             # The newest message in this read has the smallest transport latency, so host_t minus
             # its module time is an UPPER bound on the true clock offset. Track the lower envelope:
             # a lower bound-candidate is adopted at once; a higher one only at the plausible clock
             # drift rate. The estimate is never discarded during still periods (no data) -- the
             # old 5s-window minimum emptied then and restarted high, jittering the mapped
             # WHEEL_POS times by up to 30ms (session 20261022-162023).
-            newest_raw = max([s[0] for s in new_samples] + [e[0] for e in new_events])
-            candidate = host_t - newest_raw * scale
+            self._last_module_t = max(self._last_module_t, newest_raw * scale + base)
+            candidate = host_t - (newest_raw * scale + base)
             if self._offset_est is None or candidate < self._offset_est:
                 self._offset_est = candidate
             else:

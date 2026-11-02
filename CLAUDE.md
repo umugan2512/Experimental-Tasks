@@ -982,6 +982,81 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     150 ms between-machine budget, which has its own check) and requires ≥ 99% of the rest. With
     1.2 s trials the ~49 ms handover alone is 4%, so the old raw ≥ 97% check failed every
     fast session. It still fails the old hold-wait-outside-a-machine design (76%).
+  - **The audit judges wheel data loss on the rotary module's own clock, not host reader
+    pauses** (2026-10-29). "No wheel samples lost" requires the module-time gap between
+    consecutive `WHEEL_POS` rows to stay < 100 ms and never go backward. Rare 50–70 ms holds of
+    the whole process (1–2 per session, falling in the machine-to-machine handover, so OS
+    scheduling) failed the old "rotary reader never stalls > 50 ms" check every session, while
+    the module buffered through them with no sample lost. Reader pauses are now INFO only.
+  - **Host times come from `_shared/host_clock.now()`, not `time.time()`** (2026-10-30). It is
+    the wall time once at import plus `time.perf_counter()` elapsed: same epoch-like values, but
+    the Windows Time service can't step it. In Stage 2 session `20261030-142131` an NTP sync
+    stepped the wall clock +1.158 s mid-session (System log, Kernel-General event 1). Every host
+    time after that moved against the Bpod clock (clock fit: trials 1–102 as outliers), and the
+    camera, CSV and rotary reader all showed a 1.2 s "gap" that never happened. This rig's
+    hardware clock was 3 h 19 min off at boot, so Windows corrects it in big steps; check the
+    BIOS clock/CMOS battery. `time.monotonic()` is no alternative: it ticks at 15.6 ms on Windows.
+    pybpod's own CSV row stamps still use `datetime.now()`. The audit's CSV-silence check
+    recognizes a silence that the host_clock-stamped `WHEEL_POS` rows don't share, and labels
+    it a wall-clock step, not a stall. The clock-fit check names a run of outliers at one
+    offset as a host clock step.
+  - **The rotary firmware restarts its clock at 0 every time streaming is re-enabled**, so every
+    `stream.paused()` started a new module-clock epoch. Stage 2 pauses whenever its staircase
+    steps the threshold. The offset estimate could only creep up at 50 ppm after that, and
+    `flush_wheel_log()`'s never-backward clamp pinned every later sample to one timestamp: 77%
+    of `20261030-142131`'s wheel samples (everything after trial 22) have frozen times, and
+    that session's wheel timing can't be recovered beyond the ~30 ms CSV row stamps.
+    `RotaryStream._begin_epoch()` now shifts each new epoch to continue on the old offset, so
+    module times stay increasing and the host mapping stays right. A trial's `ROTARY_MARKER`
+    and its samples are always in the same epoch, so marker-relative placement stays exact.
+    The audit's "wheel module timestamps advance" check fails on 3+ rows sharing one module
+    time while the position changes (one repeat is the keepalive clamp, a few ms). The
+    "no wheel samples lost" gap check can't see a frozen clock. The soak's fake firmware now
+    restarts its clock on stream start too (`SOAK_P_NOMOVE=0 SOAK_P_EARLY=0` forces Stage 2
+    threshold steps).
+  - **Session CSV rows are written by a background thread** (2026-11-02,
+    `install_session_lock()`). Stock pybpod wrote and flushed every row (the session CSV plus
+    the task's stdout log, both on disk) inside the calling thread. A slow flush blocked that
+    thread: the render loop for 240 ms in Stage 1 session `20261102-122138`, and 30–70 ms in
+    most earlier sessions. Every render frame over 50 ms in Oct 27–Nov 2 matched a
+    `WHEEL_LOG_LOCK_MAX_MS` hold of the same length, except Oct 30's trial 181.
+    - The Bpod thread writes the same way, so it also stalled `run_state_machine()`'s loop,
+      which delivers the dot-handshake SoftCodes.
+    - Now `add_message()` does the in-memory part and queues the row under the lock, so CSV
+      order still equals call order. One writer thread writes and flushes each batch.
+    - The queue is drained by `Session._lab_drain()`, called from the wrapped `Bpod.close()`
+      (stage scripts read the CSV right after it), from `Session.__del__`, and `atexit` (Kill
+      exits via `exit(0)`).
+    - `add_message(flush=)` is accepted and ignored.
+    - `WHEEL_LOG_LOCK_MAX_MS` over a few ms now means lock contention, not disk.
+    - Suite Section 16 checks it with a stream whose flush sleeps 200 ms.
+  - **First rig run with the step-free clock, stream-restart and async-writer fixes**
+    (2026-11-02): an accidental 24-trial UM001 Stage 2 test (`20261102-124326`, since deleted)
+    passed every audit check.
+    - The threshold stepped twice mid-session and `ROTARY_MARKER` module times stayed
+      continuous.
+    - Worst render frame 34 ms; dot onset ≤ 1.9 ms.
+    - `WHEEL_LOG_LOCK_MAX_MS` max 27 ms (was up to 240 ms).
+  - **Removing an accidental session also means undoing its state write.** A stage's session-end
+    bookkeeping saves `subjects/<id>/wheel_shaping_state.json`, even after a Stop. That file
+    is gitignored and has no backup. For the deleted test above (2026-11-02):
+    - Rebuild the pre-session values by replaying the previous real session's `OUTCOME`s through
+      `staircase.ThresholdStaircase`. Stage 2's success rule: Rewarded or Withheld. Check the
+      replay reproduces every logged `THRESHOLD_DEG`.
+    - Quiescence keys go back to defaults if that session only unlocked quiescence.
+    - Drop the test's appended entry from `sessions_trial_count_history`.
+    - Deleting the session folder also removes its water from `water_consumed_today()`.
+    - Copies of the removed sessions and the pre-restore state file went to the session
+      scratchpad, which is temporary.
+  - **A render-loop frame can block for ~0.5–1 s with nothing else wrong.** In `20261030-142131`
+    trial 181, the camera and the rotary reader ran normally, so it wasn't the GIL or the
+    process. Only the main thread stopped, inside Qt's `processEvents()`. That fits a task
+    window being clicked or dragged, which on Windows blocks the thread's message pump until
+    the mouse is released. Bpod timing is unaffected; the dot just doesn't move during it.
+  - **Unchanged outputs are not rewritten.** `merge_session_structs()` skips writing a
+    `_combined_struct.mat/.json` whose JSON is identical, and `build_training_log` skips saving
+    `training_log.xlsx` when every part except `docProps/core.xml` (the save timestamp) matches.
+    Both used to show up as changed in git after every rebuild.
   - **The training log's `Duration (min)` is on the Bpod clock** (first trial start → last trial
     end). It used to be max − min over trial-RELATIVE event times, i.e. roughly the longest single
     trial (7.5 s for a 5-min session), for every row ever written.

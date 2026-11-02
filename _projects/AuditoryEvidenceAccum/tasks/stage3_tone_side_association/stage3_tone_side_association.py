@@ -99,6 +99,7 @@ import click_train_v2 as click_train
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
 from trial_render import run_trial_render_loop, register_trial_timing
+import host_clock
 import rotary_setup
 import hifi_setup
 import dot_display
@@ -445,7 +446,7 @@ my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 my_bpod.register_value('SESSION_SIDE', VAR_SESSION_SIDE)
 
-log_python_t0 = time.time()
+log_python_t0 = host_clock.now()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ, use_stream=True,
                       marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
@@ -499,7 +500,7 @@ print("Starting Stage 3 -- session side fixed to {0}, response threshold frozen 
               VAR_CLICK_ATTENUATION_DB, _click_attenuation_remaining)
           if _click_attenuation_remaining > 0 else 'FULL'), flush=True)
 
-session_start_time = time.time()
+session_start_time = host_clock.now()
 last_initiation_time = session_start_time
 session_reward_count = 0
 session_trial_count = 0        # MAIN trials only -- feeds VAR_TRIAL_COUNT_ADVANCE
@@ -515,7 +516,7 @@ session_end_reason = None
 trial = 0
 
 while True:
-    now = time.time()
+    now = host_clock.now()
     if now - session_start_time >= VAR_SESSION_CAP_S:
         session_end_reason = 'cap_90min'
         break
@@ -778,7 +779,7 @@ while True:
             # Called by the render loop the moment quiescence is met and the cue machine has been
             # told to enter CuePeriod -- the audio starts within milliseconds of CuePeriod.
             hifi.play(0)
-            cue_audio['t'] = time.time() - log_python_t0
+            cue_audio['t'] = host_clock.now() - log_python_t0
 
         def _run_cue_then_choice():
             try:
@@ -826,7 +827,7 @@ while True:
             punish_softcode=SOFTCODE_PUNISH, punish_flash_s=VAR_ERROR_FLASH_S,
             on_quiescence_met=_start_cue_audio, dot_phase_event=choice_started)
         n_breaks = runner.quiescence_breaks
-        last_initiation_time = time.time()
+        last_initiation_time = host_clock.now()
         if quiescence_unlocked:
             quiescence_obj.record_outcome(success=(n_breaks == 0))
 

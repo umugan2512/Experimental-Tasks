@@ -55,6 +55,7 @@ try:
 except ImportError:   # a test double standing in for pybpodapi -- register() then uses register_value()
     ValueMessage = None
 
+import host_clock
 import rotary_setup
 from rotary_stream import RotaryStream
 
@@ -94,63 +95,151 @@ def _name_pc_events(bpod):
             names[names.index(generic)] = name
 
 
-SESSION_FLUSH_INTERVAL_S = 0.05   # flush=False writes still reach disk at least this often
+SESSION_DRAIN_TIMEOUT_S = 5.0     # longest the end of a session waits for queued CSV rows
 
 
 def install_session_lock():
-    """ Makes pybpodapi's Session.add_message() thread-safe (patched once per process; idempotent).
+    """ Makes pybpodapi's Session.add_message() thread-safe, and moves its disk writes onto one
+    background writer thread (patched once per process; idempotent).
 
-    add_message() does `self.current_trial += msg`; through the `current_trial` property that is
-    get trials[-1] -> __add__ -> setter `trials[-1] = value`, not atomic. When the Bpod thread
-    appends a new Trial between another thread's get and set, the setter writes the PREVIOUS trial
-    object back over the new one. The new trial's events then land in the old trial's list, and
-    pybpod's own __update_timestamps() indexes past its timestamp list -> IndexError. Confirmed:
-    session 20261023-120425 crashed this way at trial 5, with the render loop registering
-    TRIAL_INIT_START as the trial started. One lock around add_message() serializes every session
-    write -- the Bpod thread's (trials, events, states), the main thread's register_value()s, and
-    print() via pybpod's StdoutBuffer -- so the get/set pair can no longer interleave with a new
-    Trial. Behaviour is otherwise unchanged. """
+    Thread safety: add_message() does `self.current_trial += msg`; through the `current_trial`
+    property that is get trials[-1] -> __add__ -> setter `trials[-1] = value`, not atomic. When
+    the Bpod thread appends a new Trial between another thread's get and set, the setter writes
+    the PREVIOUS trial object back over the new one. The new trial's events then land in the old
+    trial's list, and pybpod's own __update_timestamps() indexes past its timestamp list ->
+    IndexError. Confirmed: session 20261023-120425 crashed this way at trial 5, with the render
+    loop registering TRIAL_INIT_START as the trial started. One lock around add_message()
+    serializes every session write -- the Bpod thread's (trials, events, states), the main
+    thread's register_value()s, and print() via pybpod's StdoutBuffer.
+
+    Writes: stock pybpod writes and flushes every row (session CSV + the task's stdout log, both
+    on disk) inside the call. A slow flush then blocked whichever thread wrote: the render loop
+    for 240 ms in session 20261102-122138 (trial 3), and 30-70 ms in most earlier sessions, every
+    time inside flush_wheel_log(). The Bpod thread writes the same way, so a slow disk also held
+    up run_state_machine()'s loop, which is what delivers the injected dot-handshake SoftCodes.
+    Now the in-memory part runs under the lock as before, and the row is queued (in the same
+    lock, so CSV order = call order). One writer thread writes and flushes each batch. Stock and
+    the rig's old patched pybpod-api (same body) both get this. The queue is drained by
+    Session._lab_drain(), called from Bpod.close() (the stage scripts read the CSV right after
+    it), from Session.__del__, and at exit (Kill calls exit(0) mid-trial). """
     try:
         from pybpodapi import session as _session
+        from pybpodapi.com.messaging.trial import Trial
     except ImportError:
         return   # a test double standing in for pybpodapi (no real Session to protect)
     Session = _session.Session
     if getattr(Session, '_lab_locked', False):
         return
+    import atexit
+    import queue
+    import weakref
     lock = threading.RLock()   # reentrant: a print() from inside a write must not deadlock
+    live = weakref.WeakSet()   # sessions with a writer, drained at exit
 
-    original = getattr(Session, 'add_message', None)
-    if original is None:
-        # Stock pybpod-api (v1.8.2, what every fresh clone gets): no add_message() and no
-        # per-message flush control -- __add__ does the write and always flushes. Install the
-        # lab's add_message(msg, flush) here instead of depending on an unpushed pybpod-api commit:
-        # same body as stock __add__, the disk flush skipped when flush=False but forced at least
-        # every SESSION_FLUSH_INTERVAL_S, so a crash loses at most that much of the CSV.
-        from pybpodapi.com.messaging.trial import Trial
+    def _write_rows(session, rows):
+        writer = session.csvwriter
+        for row in rows:
+            writer.writerow(row)
+        writer.flush()
 
-        def original(self, msg, flush=True):
+    def _writer_loop(session_ref, q):
+        while True:
+            rows = [q.get()]
+            while True:
+                try:
+                    rows.append(q.get_nowait())
+                except queue.Empty:
+                    break
+            stop = rows[-1] is None
+            rows = [r for r in rows if r is not None]
+            session = session_ref()
+            if session is None:
+                return
+            try:
+                if rows:
+                    _write_rows(session, rows)
+            except Exception:
+                return   # stream closed under us at teardown; _lab_drain() writes the rest
+            finally:
+                del session
+            if stop:
+                return
+
+    def add_message(self, msg, flush=True):
+        """ flush is accepted for compatibility and ignored: every batch is flushed. """
+        with lock:
             if isinstance(msg, Trial):
                 self.trials.append(msg)
             elif self.current_trial is not None:
                 self.current_trial += msg
             self.history.append(msg)
             if self.csvwriter:
-                self.csvwriter.writerow(msg.tolist())
-                now = time.time()
-                if flush or now - getattr(self, '_lab_last_flush', 0.0) >= SESSION_FLUSH_INTERVAL_S:
-                    self.csvwriter.flush()
-                    self._lab_last_flush = now
-            return self
-
-    def add_message(self, msg, flush=True):
-        with lock:
-            return original(self, msg, flush=flush)
+                q = self.__dict__.get('_lab_queue')
+                if q is None:
+                    q = self._lab_queue = queue.Queue()
+                    t = threading.Thread(target=_writer_loop, args=(weakref.ref(self), q),
+                                         daemon=True)
+                    self._lab_writer = t
+                    live.add(self)
+                    t.start()
+                q.put(msg.tolist())
+        return self
 
     def __add__(self, msg):
         return add_message(self, msg, flush=True)
 
+    def _lab_drain(self, timeout=SESSION_DRAIN_TIMEOUT_S):
+        """ Writes every queued row to the CSV and flushes. Idempotent. """
+        q = self.__dict__.get('_lab_queue')
+        if q is None:
+            return
+        t = self.__dict__.get('_lab_writer')
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            q.put(None)
+            t.join(timeout=timeout)   # bounded: see the Kill-hang note in CLAUDE.md
+            if t.is_alive():
+                return   # still stuck in a write: writing from here too would interleave rows
+        rows = []
+        while True:
+            try:
+                row = q.get_nowait()
+            except queue.Empty:
+                break
+            if row is not None:
+                rows.append(row)
+        try:
+            if self.csvwriter:
+                _write_rows(self, rows)
+        except Exception:
+            pass
+
+    original_del = getattr(Session, '__del__', None)
+
+    def __del__(self):
+        _lab_drain(self)
+        if original_del is not None:
+            original_del(self)
+
+    original_close = Bpod.close
+
+    def close(self, *args, **kwargs):
+        session = getattr(self, '_session', None)
+        try:
+            return original_close(self, *args, **kwargs)
+        finally:
+            if session is not None:
+                _lab_drain(session)
+
+    @atexit.register
+    def _drain_all():
+        for session in list(live):
+            _lab_drain(session)
+
     Session.add_message = add_message
     Session.__add__ = __add__   # `session += msg` (every pybpod write) goes through the lock too
+    Session._lab_drain = _lab_drain
+    Session.__del__ = __del__
+    Bpod.close = close
     Session._lab_locked = True
 
 
@@ -399,7 +488,7 @@ class TrialRunner(object):
         if self.stream is None:
             return
         with self._wheel_log_lock:
-            t_lock = time.time()
+            t_lock = host_clock.now()
             samples = self.stream.drain_for_logging()
             offset = self.stream.module_to_host(0.0)
             last = self._wheel_log_last
@@ -451,16 +540,16 @@ class TrialRunner(object):
             self._wheel_log_last_module_t = last_mod
             if offset is not None:
                 self.register('WHEEL_CLOCK_OFFSET', '{0:.6f}'.format(offset))
-            self._wheel_log_pumped_at = time.time()
+            self._wheel_log_pumped_at = host_clock.now()
             self.wheel_log_lock_max_ms = max(getattr(self, 'wheel_log_lock_max_ms', 0.0),
-                                             (time.time() - t_lock) * 1e3)
+                                             (host_clock.now() - t_lock) * 1e3)
 
     def pump(self):
         """ Call from any render/wait loop: writes buffered wheel samples at most every
         WHEEL_LOG_PUMP_INTERVAL_S, so the live dashboard's wheel plot keeps updating mid-trial.
         (Registering from the main thread while the decision thread runs the Bpod call is the same
         concurrency the old per-call poll thread always had.) """
-        if self.stream is not None and time.time() - self._wheel_log_pumped_at >= \
+        if self.stream is not None and host_clock.now() - self._wheel_log_pumped_at >= \
                 WHEEL_LOG_PUMP_INTERVAL_S:
             self.flush_wheel_log()
 
@@ -584,7 +673,7 @@ class TrialRunner(object):
         return in_times, out_times
 
     def _now(self):
-        return time.time() - self.log_python_t0
+        return host_clock.now() - self.log_python_t0
 
     def _publish_wheel_pos(self, pos, t=None):
         t = self._now() if t is None else t
@@ -629,7 +718,7 @@ class TrialRunner(object):
         and right before the actual RUN command -- the closest anchor to the real hardware
         trial-start instant reachable without instrumenting pybpod-api itself. Callers should
         re-anchor any send_t/cue_send_t-based VAL registration to `runner.last_send_t` once this
-        call returns, instead of whatever earlier time.time() they captured before building the
+        call returns, instead of whatever earlier host_clock.now() they captured before building the
         StateMachine -- that earlier value doesn't account for SM-construction + upload +
         RUN-handshake latency, a confirmed source of drift between derived event timestamps and
         the hardware-relative offsets they were added to.
@@ -701,13 +790,13 @@ class TrialRunner(object):
         """ (module_t, host_t_mapped) of this trial's '#' marker, waiting briefly for USB delivery.
         None if it never showed up (a trial that ended before its first state's output fired, or a
         firmware that doesn't report markers -- see Tests/tasks/rotary_stream_test/). """
-        deadline = time.time() + timeout
+        deadline = host_clock.now() + timeout
         while True:
             ev = self.stream.find_event(self.marker_code, after_host_t=self.trial_t0)
             if ev is not None:
                 host_t = self.stream.module_to_host(ev[0])
                 return ev[0], (ev[1] if host_t is None else host_t)
-            if time.time() >= deadline:
+            if host_clock.now() >= deadline:
                 return None
             time.sleep(0.005)
 
@@ -796,7 +885,7 @@ class TrialRunner(object):
 
         Registers 'TRIAL_INIT_START' once, right at entry (the moment this trial's quiescence-hold
         attempt begins), and a 'QUIESCENCE_RESET_TIME' row each time the trailing window is broken
-        by movement -- both on the same time.time() - log_python_t0 clock as every other VAL row,
+        by movement -- both on the same host_clock.now() - log_python_t0 clock as every other VAL row,
         so a trial's own initiation cost (and how many resets it took) is directly recoverable from
         the session CSV without having to reconstruct it from HoldCheck/LickDuringHold state times.
 
@@ -816,13 +905,13 @@ class TrialRunner(object):
 
         def wheel_watch():
             window = deque()
-            wait_start = time.time()
+            wait_start = host_clock.now()
             warned = [False]
             while not stop_wheel_watch.is_set():
                 time.sleep(1.0 / self.still_poll_hz)
                 with self.rotary_lock:
                     pos = self.rotary.current_position()
-                now = time.time()
+                now = host_clock.now()
                 if window and abs(pos - window[-1][1]) > steady_threshold_deg:
                     n_breaks_holder[0] += 1
                     self.register('QUIESCENCE_RESET_TIME', now - self.log_python_t0)

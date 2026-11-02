@@ -954,11 +954,55 @@ def build_workbook():
         print("  {0}: {1} new row(s), {2} updated row(s)".format(subject, new_count, updated_count),
               flush=True)
 
-    wb.save(_OUTPUT_PATH)
+    _save_if_changed(wb, _OUTPUT_PATH)
     print("Wrote {0} -- {1} new row(s), {2} updated row(s) across {3} subject(s) run on this "
           "computer. Every other subject's sheet in the workbook was left untouched.".format(
               _OUTPUT_PATH, total_new, total_updated, len(by_subject)), flush=True)
 
+
+
+def _xml_canon(data):
+    """ An XML part as a nested tuple with attributes sorted: openpyxl and the sheet merge
+    (records/xlsx_sheet_merge.py, used by the sync) write the same content with attributes in a
+    different order, which made every rebuild after a sync re-save an identical workbook. """
+    import xml.etree.ElementTree as ET
+
+    def walk(el):
+        return (el.tag, tuple(sorted(el.attrib.items())), (el.text or '').strip(),
+                (el.tail or '').strip(), tuple(walk(c) for c in el))
+    try:
+        return walk(ET.fromstring(data))
+    except ET.ParseError:
+        return data
+
+
+def _xlsx_parts(data):
+    """ {member name: canonical content} of an .xlsx, without docProps/ (save time, writer name). """
+    import io as _io
+    import zipfile
+    with zipfile.ZipFile(_io.BytesIO(data)) as z:
+        return {n: (_xml_canon(z.read(n)) if n.endswith(('.xml', '.rels')) else z.read(n))
+                for n in z.namelist() if not n.startswith('docProps/')}
+
+
+def _save_if_changed(wb, path):
+    """ Saves wb to path unless the existing file already has exactly the same content. openpyxl
+    stamps the save time into the file, so an unchanged workbook used to be rewritten -- and show
+    up as changed in git -- on every rebuild. """
+    import io as _io
+    buf = _io.BytesIO()
+    wb.save(buf)
+    new = buf.getvalue()
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                if _xlsx_parts(f.read()) == _xlsx_parts(new):
+                    return False
+        except Exception:
+            pass   # unreadable/corrupt existing file: just overwrite it
+    with open(path, 'wb') as f:
+        f.write(new)
+    return True
 
 if __name__ == '__main__':
     build_workbook()

@@ -71,6 +71,7 @@ from direction_tracker import DirectionRatioTracker
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
 from trial_render import run_trial_render_loop, register_trial_timing
+import host_clock
 import rotary_setup
 import dot_display
 from camera_recorder import CameraRecorder
@@ -281,7 +282,7 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 
-log_python_t0 = time.time()
+log_python_t0 = host_clock.now()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
                       poll_hz=VAR_POLL_HZ, use_stream=True,
                       marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
@@ -350,7 +351,7 @@ print("Starting up to {0} trials, capped at {1} attempted trials, {2:.1f}mL cons
 session_trial_count = 0
 session_reward_ul_total = 0.0
 water = ConsumedWaterTracker(VAR_REWARD_UL)   # the water cap counts CONSUMED water
-session_start_time = time.time()
+session_start_time = host_clock.now()
 session_end_reason = None
 skipped_for_daily_cap = False   # ended before trial 1: no session happened
 
@@ -608,13 +609,13 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             session_end_reason = 'trial_count_cap'
         elif water_earlier_today_ul + water.consumed_ul >= VAR_DAILY_WATER_CAP_UL:
             session_end_reason = 'water_cap'
-        elif (time.time() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
+        elif (host_clock.now() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
             session_end_reason = 'duration_cap_30min'
         if session_end_reason is not None:
             print("Session cap reached ({0} trials attempted, {1} qualifying, {2:.1f}uL consumed of "
                   "{3:.1f}uL delivered, {4:.1f}min elapsed) -- ending session.".format(
                       trial, session_trial_count, water.consumed_ul, session_reward_ul_total,
-                      (time.time() - session_start_time) / 60.0), flush=True)
+                      (host_clock.now() - session_start_time) / 60.0), flush=True)
             break
 
     except Exception as err:

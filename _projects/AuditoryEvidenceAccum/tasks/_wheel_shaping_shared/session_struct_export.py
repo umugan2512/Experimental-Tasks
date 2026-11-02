@@ -190,8 +190,18 @@ def merge_session_structs(member_csv_paths, out_base):
     mat_path = out_base + '_combined_struct.mat'
     json_path = out_base + '_combined_struct.json'
 
+    # Rewrite only when the content changed: savemat stamps a creation time into the .mat header,
+    # so rewriting identical data on every training-log rebuild made git see a changed file each time.
+    json_text = json.dumps(struct, indent=2, default=str)
+    if os.path.exists(mat_path) and os.path.exists(json_path):
+        try:
+            with open(json_path) as f:
+                if f.read() == json_text:
+                    return mat_path, json_path
+        except (OSError, UnicodeDecodeError):
+            pass
     scipy.io.savemat(mat_path, _matlab_safe(struct), long_field_names=True)
     with open(json_path, 'w') as f:
-        json.dump(struct, f, indent=2, default=str)
+        f.write(json_text)
 
     return mat_path, json_path

@@ -34,11 +34,11 @@ interpreter crash elsewhere in this codebase (TkAgg + PyQt5's competing event lo
 -- one event loop for the whole process, always.
 
 **Time sync**: every timing value registered anywhere else in this codebase (TRIAL_START,
-DOT_ONSET_TIME, THRESHOLD_CROSSING_TIME, ...) is `time.time() - log_python_t0`, where
+DOT_ONSET_TIME, THRESHOLD_CROSSING_TIME, ...) is `host_clock.now() - log_python_t0`, where
 log_python_t0 is a single epoch captured once near the top of a task script and threaded through
 everything else (TrialRunner itself takes it as a constructor argument for the same reason).
 CameraRecorder requires the SAME log_python_t0 -- every captured frame is timestamped
-`time.time() - log_python_t0` (immediately after cap.read() returns) and appended, in memory, to
+`host_clock.now() - log_python_t0` (immediately after cap.read() returns) and appended, in memory, to
 a list; close() writes the full list to a companion CSV once the capture thread is confirmed
 stopped. Per-frame timestamping (not an assumed fixed fps) is deliberate -- no live camera can
 guarantee an exact delivered frame rate, so recording the real observed time for every frame is
@@ -78,6 +78,8 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt
+
+import host_clock
 
 
 def discover_camera(max_index=5):
@@ -225,13 +227,13 @@ class CameraRecorder(object):
         No-op if preview wasn't enabled at construction.
         """
         if self._preview_widget is not None:
-            self._snippet_until = time.time() + duration_s
+            self._snippet_until = host_clock.now() + duration_s
             self._preview_widget.show()
 
     def start(self):
         """ Spawns the background capture+write thread and records start_time_s (see module
         docstring's "Time sync" section) -- call once, before the first pump(). """
-        self.start_time_s = time.time() - self._log_python_t0
+        self.start_time_s = host_clock.now() - self._log_python_t0
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._capture_loop, args=(self._stop_event,),
                                          daemon=True)
@@ -249,11 +251,11 @@ class CameraRecorder(object):
         frame_interval = (1.0 / self.fps) if self.fps > 0 else 0
         frame_index = 0
         while not stop_event.is_set():
-            loop_start = time.time()
+            loop_start = host_clock.now()
             try:
                 with self._cap_lock:
                     ok, frame = self._cap.read()
-                t = time.time() - self._log_python_t0
+                t = host_clock.now() - self._log_python_t0
                 if not ok or frame is None:
                     continue
                 self._writer.write(frame)
@@ -267,7 +269,7 @@ class CameraRecorder(object):
                 self._latest_frame = frame
             except Exception:
                 break
-            sleep_time = frame_interval - (time.time() - loop_start)
+            sleep_time = frame_interval - (host_clock.now() - loop_start)
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -285,7 +287,7 @@ class CameraRecorder(object):
             if self._continuous_preview:
                 self._preview_widget.set_frame(self._latest_frame)
             elif self._snippet_until is not None:
-                if time.time() < self._snippet_until:
+                if host_clock.now() < self._snippet_until:
                     self._preview_widget.set_frame(self._latest_frame)
                 else:
                     self._preview_widget.hide()
