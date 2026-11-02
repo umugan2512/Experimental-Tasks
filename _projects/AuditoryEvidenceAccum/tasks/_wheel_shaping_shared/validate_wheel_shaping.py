@@ -935,6 +935,7 @@ print("=" * 100)
 
 import threading as _threading
 import time as _time
+import subprocess as _subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '_shared'))
 import bpod_trial_helpers as _bth
 import rotary_stream as _rs
@@ -1146,6 +1147,63 @@ if _have_pybpod:
     race_ok = bad_locked == 0
     print("  with install_session_lock(): 0 of 3000 trials lose/misattribute events under a concurrent "
           "VAL writer: {0} ({1} bad)".format(race_ok, bad_locked))
+    # A slow disk must not block the writing threads (session 20261102-122138: one 240 ms flush
+    # inside the render loop); rows still land in call order once drained.
+    class _SlowStream(object):
+        def write(self, data):
+            pass
+        def flush(self):
+            _time.sleep(0.2)
+        def close(self):
+            pass
+    tmp_slow = tempfile.mkdtemp(prefix='slowcsv_')
+    try:
+        slow_path = os.path.join(tmp_slow, 's.csv')
+        sess = _pyb_session.Session(slow_path)
+        sys.stdout, sys.stderr = _saved_out, _saved_err
+        sess.csvstream.streams.append(_SlowStream())
+        worst = [0.0]
+
+        def _writer(tag):
+            for k in range(40):
+                t_a = _time.perf_counter()
+                sess.add_message(_Val(tag, k))
+                worst[0] = max(worst[0], _time.perf_counter() - t_a)
+                _time.sleep(0.003)
+        ths = [_threading.Thread(target=_writer, args=(tag,)) for tag in ('A', 'B')]
+        for th in ths:
+            th.start()
+        for th in ths:
+            th.join()
+        sess._lab_drain()
+        with open(slow_path) as f:
+            got = [l.split(';')[4:6] for l in f.read().splitlines() if l.startswith('VAL;')]
+        order_ok = ([v for k, v in got if k == 'A'] == [str(i) for i in range(40)] and
+                    [v for k, v in got if k == 'B'] == [str(i) for i in range(40)])
+        slow_ok = worst[0] < 0.005 and order_ok and len(got) == 80
+        print("  200 ms disk flushes: add_message() never blocks ({0:.2f} ms worst), all 80 rows "
+              "written in order after drain: {1}".format(worst[0] * 1e3, slow_ok))
+        _race.keep.append(sess)
+
+        # Kill path: exit(0) with rows still queued -> the atexit drain completes the file
+        exit_path = os.path.join(tmp_slow, 'exit.csv')
+        script = ("import sys, time; sys.path.insert(0, {0!r}); import bpod_trial_helpers as b; "
+                  "b.install_session_lock(); from pybpodapi import session as s; "
+                  "from pybpodapi.com.messaging.value import ValueMessage as V; "
+                  "x = s.Session({1!r}); "
+                  "[x.add_message(V('K', i)) for i in range(500)]; sys.exit(0)").format(
+                      os.path.dirname(_bth.__file__), exit_path)
+        _subprocess.run([sys.executable, '-c', script], timeout=60,
+                        stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL)
+        with open(exit_path) as f:
+            n_exit = sum(1 for l in f if l.startswith('VAL;'))
+        exit_ok = n_exit == 500
+        print("  exit(0) with rows queued: all 500 rows reach the file ({0}): {1}".format(
+            n_exit, exit_ok))
+        race_ok = race_ok and slow_ok and exit_ok
+    finally:
+        sys.stdout, sys.stderr = _saved_out, _saved_err
+        shutil.rmtree(tmp_slow, ignore_errors=True)
 else:
     race_ok = True
     print("  pybpodapi not importable in this interpreter -- race check skipped (run with the "

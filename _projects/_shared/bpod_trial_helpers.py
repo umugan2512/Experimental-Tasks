@@ -95,63 +95,151 @@ def _name_pc_events(bpod):
             names[names.index(generic)] = name
 
 
-SESSION_FLUSH_INTERVAL_S = 0.05   # flush=False writes still reach disk at least this often
+SESSION_DRAIN_TIMEOUT_S = 5.0     # longest the end of a session waits for queued CSV rows
 
 
 def install_session_lock():
-    """ Makes pybpodapi's Session.add_message() thread-safe (patched once per process; idempotent).
+    """ Makes pybpodapi's Session.add_message() thread-safe, and moves its disk writes onto one
+    background writer thread (patched once per process; idempotent).
 
-    add_message() does `self.current_trial += msg`; through the `current_trial` property that is
-    get trials[-1] -> __add__ -> setter `trials[-1] = value`, not atomic. When the Bpod thread
-    appends a new Trial between another thread's get and set, the setter writes the PREVIOUS trial
-    object back over the new one. The new trial's events then land in the old trial's list, and
-    pybpod's own __update_timestamps() indexes past its timestamp list -> IndexError. Confirmed:
-    session 20261023-120425 crashed this way at trial 5, with the render loop registering
-    TRIAL_INIT_START as the trial started. One lock around add_message() serializes every session
-    write -- the Bpod thread's (trials, events, states), the main thread's register_value()s, and
-    print() via pybpod's StdoutBuffer -- so the get/set pair can no longer interleave with a new
-    Trial. Behaviour is otherwise unchanged. """
+    Thread safety: add_message() does `self.current_trial += msg`; through the `current_trial`
+    property that is get trials[-1] -> __add__ -> setter `trials[-1] = value`, not atomic. When
+    the Bpod thread appends a new Trial between another thread's get and set, the setter writes
+    the PREVIOUS trial object back over the new one. The new trial's events then land in the old
+    trial's list, and pybpod's own __update_timestamps() indexes past its timestamp list ->
+    IndexError. Confirmed: session 20261023-120425 crashed this way at trial 5, with the render
+    loop registering TRIAL_INIT_START as the trial started. One lock around add_message()
+    serializes every session write -- the Bpod thread's (trials, events, states), the main
+    thread's register_value()s, and print() via pybpod's StdoutBuffer.
+
+    Writes: stock pybpod writes and flushes every row (session CSV + the task's stdout log, both
+    on disk) inside the call. A slow flush then blocked whichever thread wrote: the render loop
+    for 240 ms in session 20261102-122138 (trial 3), and 30-70 ms in most earlier sessions, every
+    time inside flush_wheel_log(). The Bpod thread writes the same way, so a slow disk also held
+    up run_state_machine()'s loop, which is what delivers the injected dot-handshake SoftCodes.
+    Now the in-memory part runs under the lock as before, and the row is queued (in the same
+    lock, so CSV order = call order). One writer thread writes and flushes each batch. Stock and
+    the rig's old patched pybpod-api (same body) both get this. The queue is drained by
+    Session._lab_drain(), called from Bpod.close() (the stage scripts read the CSV right after
+    it), from Session.__del__, and at exit (Kill calls exit(0) mid-trial). """
     try:
         from pybpodapi import session as _session
+        from pybpodapi.com.messaging.trial import Trial
     except ImportError:
         return   # a test double standing in for pybpodapi (no real Session to protect)
     Session = _session.Session
     if getattr(Session, '_lab_locked', False):
         return
+    import atexit
+    import queue
+    import weakref
     lock = threading.RLock()   # reentrant: a print() from inside a write must not deadlock
+    live = weakref.WeakSet()   # sessions with a writer, drained at exit
 
-    original = getattr(Session, 'add_message', None)
-    if original is None:
-        # Stock pybpod-api (v1.8.2, what every fresh clone gets): no add_message() and no
-        # per-message flush control -- __add__ does the write and always flushes. Install the
-        # lab's add_message(msg, flush) here instead of depending on an unpushed pybpod-api commit:
-        # same body as stock __add__, the disk flush skipped when flush=False but forced at least
-        # every SESSION_FLUSH_INTERVAL_S, so a crash loses at most that much of the CSV.
-        from pybpodapi.com.messaging.trial import Trial
+    def _write_rows(session, rows):
+        writer = session.csvwriter
+        for row in rows:
+            writer.writerow(row)
+        writer.flush()
 
-        def original(self, msg, flush=True):
+    def _writer_loop(session_ref, q):
+        while True:
+            rows = [q.get()]
+            while True:
+                try:
+                    rows.append(q.get_nowait())
+                except queue.Empty:
+                    break
+            stop = rows[-1] is None
+            rows = [r for r in rows if r is not None]
+            session = session_ref()
+            if session is None:
+                return
+            try:
+                if rows:
+                    _write_rows(session, rows)
+            except Exception:
+                return   # stream closed under us at teardown; _lab_drain() writes the rest
+            finally:
+                del session
+            if stop:
+                return
+
+    def add_message(self, msg, flush=True):
+        """ flush is accepted for compatibility and ignored: every batch is flushed. """
+        with lock:
             if isinstance(msg, Trial):
                 self.trials.append(msg)
             elif self.current_trial is not None:
                 self.current_trial += msg
             self.history.append(msg)
             if self.csvwriter:
-                self.csvwriter.writerow(msg.tolist())
-                now = host_clock.now()
-                if flush or now - getattr(self, '_lab_last_flush', 0.0) >= SESSION_FLUSH_INTERVAL_S:
-                    self.csvwriter.flush()
-                    self._lab_last_flush = now
-            return self
-
-    def add_message(self, msg, flush=True):
-        with lock:
-            return original(self, msg, flush=flush)
+                q = self.__dict__.get('_lab_queue')
+                if q is None:
+                    q = self._lab_queue = queue.Queue()
+                    t = threading.Thread(target=_writer_loop, args=(weakref.ref(self), q),
+                                         daemon=True)
+                    self._lab_writer = t
+                    live.add(self)
+                    t.start()
+                q.put(msg.tolist())
+        return self
 
     def __add__(self, msg):
         return add_message(self, msg, flush=True)
 
+    def _lab_drain(self, timeout=SESSION_DRAIN_TIMEOUT_S):
+        """ Writes every queued row to the CSV and flushes. Idempotent. """
+        q = self.__dict__.get('_lab_queue')
+        if q is None:
+            return
+        t = self.__dict__.get('_lab_writer')
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            q.put(None)
+            t.join(timeout=timeout)   # bounded: see the Kill-hang note in CLAUDE.md
+            if t.is_alive():
+                return   # still stuck in a write: writing from here too would interleave rows
+        rows = []
+        while True:
+            try:
+                row = q.get_nowait()
+            except queue.Empty:
+                break
+            if row is not None:
+                rows.append(row)
+        try:
+            if self.csvwriter:
+                _write_rows(self, rows)
+        except Exception:
+            pass
+
+    original_del = getattr(Session, '__del__', None)
+
+    def __del__(self):
+        _lab_drain(self)
+        if original_del is not None:
+            original_del(self)
+
+    original_close = Bpod.close
+
+    def close(self, *args, **kwargs):
+        session = getattr(self, '_session', None)
+        try:
+            return original_close(self, *args, **kwargs)
+        finally:
+            if session is not None:
+                _lab_drain(session)
+
+    @atexit.register
+    def _drain_all():
+        for session in list(live):
+            _lab_drain(session)
+
     Session.add_message = add_message
     Session.__add__ = __add__   # `session += msg` (every pybpod write) goes through the lock too
+    Session._lab_drain = _lab_drain
+    Session.__del__ = __del__
+    Bpod.close = close
     Session._lab_locked = True
 
 

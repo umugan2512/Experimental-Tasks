@@ -1014,6 +1014,22 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     "no wheel samples lost" gap check can't see a frozen clock. The soak's fake firmware now
     restarts its clock on stream start too (`SOAK_P_NOMOVE=0 SOAK_P_EARLY=0` forces Stage 2
     threshold steps).
+  - **Session CSV rows are written by a background thread** (2026-11-02,
+    `install_session_lock()`). Stock pybpod wrote and flushed every row (the session CSV plus
+    the task's stdout log, both on disk) inside the calling thread. A slow flush blocked that
+    thread: the render loop for 240 ms in Stage 1 session `20261102-122138`, and 30–70 ms in
+    most earlier sessions. Every render frame over 50 ms in Oct 27–Nov 2 matched a
+    `WHEEL_LOG_LOCK_MAX_MS` hold of the same length, except Oct 30's trial 181.
+    - The Bpod thread writes the same way, so it also stalled `run_state_machine()`'s loop,
+      which delivers the dot-handshake SoftCodes.
+    - Now `add_message()` does the in-memory part and queues the row under the lock, so CSV
+      order still equals call order. One writer thread writes and flushes each batch.
+    - The queue is drained by `Session._lab_drain()`, called from the wrapped `Bpod.close()`
+      (stage scripts read the CSV right after it), from `Session.__del__`, and `atexit` (Kill
+      exits via `exit(0)`).
+    - `add_message(flush=)` is accepted and ignored.
+    - `WHEEL_LOG_LOCK_MAX_MS` over a few ms now means lock contention, not disk.
+    - Suite Section 16 checks it with a stream whose flush sleeps 200 ms.
   - **A render-loop frame can block for ~0.5–1 s with nothing else wrong.** In `20261030-142131`
     trial 181, the camera and the rotary reader ran normally, so it wasn't the GIL or the
     process. Only the main thread stopped, inside Qt's `processEvents()`. That fits a task
