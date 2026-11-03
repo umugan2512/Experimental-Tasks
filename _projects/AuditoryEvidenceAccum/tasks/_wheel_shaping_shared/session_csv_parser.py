@@ -16,6 +16,7 @@ import datetime
 import glob
 import math
 import os
+import re
 
 # VAL keys that get registered repeatedly WITHIN a single trial (e.g. once per wheel-position
 # sample, once per quiescence reset) rather than once -- the generic VAL branch below used to keep
@@ -815,3 +816,68 @@ def water_consumed_today(project_dir, subject_id, date_str, exclude_session=None
             total += ul
             names.append(name)
     return total, names
+
+
+def _subject_protocol_sessions(project_dir, subject_id, protocol_name, date_glob):
+    """ [(name, trials)] for subject_id's protocol_name sessions whose folder name matches
+    date_glob + '-*', in folder-name (= start time) order. Unreadable CSVs are skipped. """
+    out = []
+    pattern = os.path.join(project_dir, 'experiments', '*', 'setups', '*', 'sessions', date_glob + '-*')
+    for folder in sorted(glob.glob(pattern), key=os.path.basename):
+        name = os.path.basename(folder)
+        csv_path = os.path.join(folder, name + '.csv')
+        if not os.path.isfile(csv_path):
+            continue
+        try:
+            if _csv_header_info(csv_path) != (subject_id, protocol_name):
+                continue   # cheap check first: a full parse of a long session takes ~0.6s
+            info, session_vals, trials = parse_session_csv(csv_path)
+        except Exception:
+            continue
+        out.append((name, trials))
+    return out
+
+
+def _csv_header_info(csv_path):
+    """ (subject, protocol) from a session CSV's INFO preamble, read only up to the first TRIAL
+    row. """
+    subject = protocol = None
+    with open(csv_path, newline='', encoding='utf-8', errors='replace') as f:
+        for row in csv.reader(f, delimiter=';'):
+            if not row:
+                continue
+            if row[0] == 'TRIAL':
+                break
+            if row[0] == 'INFO' and len(row) > 5:
+                if row[4] == 'SUBJECT-NAME':
+                    subject = parse_subject_name(row[5])
+                elif row[4] == 'PROTOCOL-NAME':
+                    protocol = row[5]
+            if subject is not None and protocol is not None:
+                break
+    return subject, protocol
+
+
+def previous_day_withheld(project_dir, subject_id, today_str, protocol_name):
+    """ The side-bias summary Stage 2 uses to pick the day's starting threshold:
+    (date_str, n_withheld, n_turns, [session names]) over subject_id's protocol_name sessions on the
+    most recent day before today_str ('YYYYMMDD') with any turn, or None. A turn is a trial whose
+    OUTCOME VAL is 'Rewarded' or 'Withheld' (NoMovement is not). """
+    pattern = os.path.join(project_dir, 'experiments', '*', 'setups', '*', 'sessions', '*')
+    dates = sorted({os.path.basename(f)[:8] for f in glob.glob(pattern)
+                    if re.match(r'^\d{8}-', os.path.basename(f))
+                    and os.path.basename(f)[:8] < today_str}, reverse=True)
+    for date_str in dates:
+        withheld = turns = 0
+        names = []
+        for name, trials in _subject_protocol_sessions(project_dir, subject_id, protocol_name, date_str):
+            outcomes = [t['vals'].get('OUTCOME') for t in trials]
+            n_w = outcomes.count('Withheld')
+            n_t = n_w + outcomes.count('Rewarded')
+            if n_t:
+                withheld += n_w
+                turns += n_t
+                names.append(name)
+        if turns:
+            return date_str, withheld, turns, names
+    return None

@@ -828,6 +828,11 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   value. Replayed on that session's turns, the R×31 run would have earned 6 rewards instead of 23.
   5 failures in a row (withheld or no-movement) step the threshold down, to a floor of 0.20.
   Withheld turns still count toward the 100-trial advancement gate.
+  **Since 2026-11-03 a side-biased day also halves the next day's starting threshold** (per
+  explicit instruction): if ≥ 20% of the previous Stage 2 day's turns were withheld, the first
+  session of the day starts at half, min 10°. It's checked once per day via the state key
+  `bias_day_checked` and saved at once, so a restart after Stop/Kill/crash neither halves again
+  nor reverts. UM001's 20261102 (65 of 249 withheld) takes it from 35° to 17.5°.
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching

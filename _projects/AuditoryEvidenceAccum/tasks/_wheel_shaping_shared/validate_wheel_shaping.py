@@ -1562,11 +1562,61 @@ print("Section 20 result: {0}".format("PASS" if section20_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 21: side-biased day halves the next day's Stage 2 starting threshold")
+print("=" * 100)
+
+
+def _write_session21(project, name, subject, outcomes, protocol='stage2_threshold_staircase'):
+    folder = os.path.join(project, 'experiments', 'Stage2', 'setups', 'Stage2', 'sessions', name)
+    os.makedirs(folder)
+    rows = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', protocol],
+            ['INFO', 'pc', '', '', 'SUBJECT-NAME', "['{0}', 'x']".format(subject)]]
+    for o in outcomes:
+        rows += [['TRIAL', 'pc', '', '', 'New trial', ''],
+                 ['VAL', 'pc', '', '', 'OUTCOME', o],
+                 ['END-TRIAL', 'pc', '', '', 'The trial ended', '']]
+    with open(os.path.join(folder, name + '.csv'), 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows)
+
+
+proj21 = tempfile.mkdtemp(prefix='biasday_')
+try:
+    none21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261103', 'stage2_threshold_staircase')
+    _write_session21(proj21, '20261030-090000', 'M1', ['Withheld'] * 50)          # older day
+    _write_session21(proj21, '20261102-090000', 'M1', ['Rewarded'] * 6 + ['Withheld'] * 2 + ['NoMovement'] * 5)
+    _write_session21(proj21, '20261102-100000', 'M1', ['Rewarded'] * 2)
+    _write_session21(proj21, '20261102-110000', 'M2', ['Withheld'] * 50)          # other animal
+    _write_session21(proj21, '20261102-120000', 'M1', ['Rewarded'] * 50, protocol='stage1_wheel_shaping')
+    _write_session21(proj21, '20261103-090000', 'M1', ['Withheld'] * 50)          # today
+    prev21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261103', 'stage2_threshold_staircase')
+    skip21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261101', 'stage2_threshold_staircase')
+finally:
+    shutil.rmtree(proj21, ignore_errors=True)
+scan_ok = (none21 is None and prev21 == ('20261102', 2, 10, ['20261102-090000', '20261102-100000'])
+           and skip21 == ('20261030', 50, 50, ['20261030-090000']))
+print("  newest earlier day, this animal + Stage 2 only, sessions combined, NoMovement not a turn, "
+      "today ignored, None without history: {0} ({1})".format(scan_ok, prev21))
+_m = 10.0 / 35
+_b = staircase.bias_day_start_fraction
+halve_cases = [(_b(1.0, 0.26, 0.20, _m) * 35, 17.5), (_b(15.0 / 35, 0.20, 0.20, _m) * 35, 10.0),
+               (_b(8.0 / 35, 0.9, 0.20, _m) * 35, 8.0), (_b(1.0, 0.19, 0.20, _m) * 35, 35.0),
+               (_b(1.0, None, 0.20, _m) * 35, 35.0)]
+halve_ok = all(abs(a - b) < 1e-9 for a, b in halve_cases)
+print("  35->17.5, 15->10 (min), 8 kept, 19% and no history unchanged: {0} ({1})".format(
+    halve_ok, [round(a, 2) for a, _ in halve_cases]))
+
+section21_pass = scan_ok and halve_ok
+print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
-                 section19_pass and section20_pass)
+                 section19_pass and section20_pass and section21_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
