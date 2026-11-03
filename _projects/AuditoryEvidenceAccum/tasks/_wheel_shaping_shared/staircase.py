@@ -99,6 +99,17 @@ def decay_gain(prev_gain_mult):
     return max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION)
 
 
+def bias_day_start_fraction(fraction, withheld_fraction, trigger, min_fraction):
+    """ Stage 2's threshold for the first session of a day after a side-biased day: half of
+    `fraction` when `withheld_fraction` (of the previous day's turns) is >= `trigger`, but not
+    below `min_fraction`, and never raised (a threshold already under the minimum stays). Per
+    explicit instruction (2026-11-03), after UM001's 20261102 sessions withheld 26% of turns while
+    the threshold sat at 35 deg all day. """
+    if withheld_fraction is None or withheld_fraction < trigger:
+        return fraction
+    return min(fraction, max(min_fraction, fraction / 2.0))
+
+
 def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_count_gate=200):
     """ The three simple, doc-specified numeric gates for Stage 2 advancement (trial count, ITI at
     its ceiling, direction ratio in-band) -- NOT the full advancement decision, which per

@@ -437,6 +437,7 @@ print("DEBUG: camera.start() returned OK", flush=True)
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
 my_bpod.register_value('CAMERA_FPS', camera.fps)
+my_bpod.register_value('CAMERA_BACKEND', camera.backend)
 
 # Geometry-aware gain (same derivation as every other dot-coupled script), signed via
 # rotary_setup.screen_direction_gain() for this rig's confirmed wheel->screen direction.

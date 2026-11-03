@@ -367,6 +367,10 @@ def audit(folder):
                     'INFO', 'max {0:.0f}ms, median {1:.0f}ms; > {2:.0f}ms on {3} trial(s){4}'.format(
                         max(xs), statistics.median(xs), BUDGET['stream_read_gap_max_ms'], len(over),
                         ' ({0})'.format(', '.join(str(i) for i in over[:10])) if over else '')))
+    gc_ms = [x for x in (_val(t, 'GC_MAX_MS') for t in trials) if x is not None]
+    if gc_ms:   # since 2026-11-03: full collections held off for the session (_hold_full_gc)
+        out.append(('longest garbage collection per trial (holds every thread)', 'INFO',
+                    'max {0:.1f}ms, median {1:.1f}ms'.format(max(gc_ms), statistics.median(gc_ms))))
 
     # 8. markers + warnings
     with_resp = [t for t in ran if any(t['states'].get(s) is not None and not math.isnan(t['states'][s])
