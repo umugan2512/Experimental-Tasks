@@ -20,7 +20,7 @@ register a response.
 | Stage | Within-session | Across-session |
 |---|---|---|
 | 1 | Fixed for the whole session. | Grows once per qualifying session (≥100 rewarded trials; same-day and Stopped sessions count too): `+0.02` fraction, ceiling `0.20` (Stage 2's own starting point). Starts at `0.10` (3.5°). |
-| 2 | Per-trial `ThresholdStaircase`: `+0.10` after 20 consecutive successes (success = cleared the threshold at all, independent of debiasing withhold), `-0.10` after 5 consecutive failures. Ceiling `1.0`, floor `0.0`. | Persists `threshold_fraction` + both streak counters every session, so a streak survives overnight. |
+| 2 | Per-trial `ThresholdStaircase`: `+0.10` after 20 consecutive successes, `-0.10` after 5 consecutive failures. Success = a rewarded turn; a debiasing-withheld turn or no movement is a failure (since 2026-11-02, so an animal stuck on one side gets an easier threshold). Ceiling `1.0`, floor `0.20` (Stage 2's start, `VAR_THRESHOLD_FLOOR_FRACTION`). | Persists `threshold_fraction` + both streak counters every session, so a streak survives overnight. |
 | 3 / 4 | Frozen — read once at session start, never updated. | Passthrough only; defaults to `1.0` (Stage 2's ceiling) if a subject somehow skipped Stage 2. |
 | 5 | Resumes the *same* `ThresholdStaircase` mechanism as Stage 2, continuing from whatever Stage 2/4 left persisted — but only on sessions where Tag B's selector (below) picks `'response'`; otherwise frozen for that whole session. | Target for advancement is `0.90` (`STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION`), **not** the staircase's own `1.0` ceiling — the staircase can still step past 0.90, advancement just stops requiring it to. |
 
@@ -88,6 +88,23 @@ in any given Stage 5 session — `select_stage5_staircase_to_tighten()` picks wh
 furthest (as a normalized 0-1 fraction) from its own final value, tie-breaking by alternating
 away from the previous session's pick (persisted as `stage5_last_staircase_advanced`). The
 *inactive* one is fully frozen that session — its counters don't move either.
+
+## Side-bias withholding (Stage 2 only)
+
+`DirectionRatioTracker` (`direction_tracker.py`): the right-turn fraction over the last 40
+movement directions (rewarded or withheld turns; no-movement trials don't count), recency-weighted
+(half-Gaussian, `DIRECTION_RATIO_SIGMA = 8`, so ~10 effective trials, plus 2 neutral
+pseudo-trials). Outside 30-70%, reward is withheld on the over-used side. From a balanced history
+a same-side run is withheld after ~6 turns. Stage 1 and Stages 3-5 don't use it.
+
+| Within-session | Across-session |
+|---|---|
+| Recomputed every trial. No withholding until 10 directions are known (`DIRECTION_RATIO_MIN_TRIALS`), counting the carried-over ones. `DIRECTION_RATIO` logs the weighted value, `DIRECTION_RATIO_FLAT` the unweighted one. | The last 40 directions persist as `recent_directions`, so withholding is live from trial 1 for an animal with Stage 2 history. `DIRECTION_HISTORY_SEEDED` logs how many were carried over. |
+
+Before 2026-11-02 the window started empty every session and withholding waited for 40 trials of
+that session, so UM001 (`20261102-160353`) got 22/22 left turns rewarded. The flat (unweighted)
+ratio then let UM001 (`20261102-161142`) oscillate between long runs (R×31, L×29, …), each
+rewarded for ~16 trials before the ratio left the band.
 
 ## Session caps (Stage 1/2)
 

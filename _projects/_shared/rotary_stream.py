@@ -86,6 +86,8 @@ class RotaryStream(object):
         self._last_module_t = 0.0
         self.n_resyncs = 0
         self._max_read_gap_s = 0.0    # longest reader-loop iteration since last pop_max_read_gap_ms()
+        self._caught_up_t = None      # see caught_up_t()
+        self._paused_drained = False  # inside paused(), after the in-flight bytes were ingested
 
     # --- lifecycle ---------------------------------------------------------------------------------
 
@@ -141,12 +143,15 @@ class RotaryStream(object):
                 self._ingest(serial_object.read(n), self._now())
             self._carry = b''
             serial_object.reset_input_buffer()
+            self._paused_drained = True   # nothing more can arrive until the stream is re-enabled
             _set_timeout(serial_object, self._ack_timeout)   # ack reads need their normal timeout
             yield
         finally:
             _set_timeout(self.rotary.arcom.serial_object, _READER_TIMEOUT_S)
             self.rotary.arcom.serial_object.reset_input_buffer()
             self._begin_epoch()
+            self._caught_up_t = self._now()
+            self._paused_drained = False
             self.rotary.enable_stream()
             self._pause_request.clear()
 
@@ -189,7 +194,11 @@ class RotaryStream(object):
                 # Block in the driver until at least one byte arrives (bounded by the short reader
                 # timeout set in start()) instead of sleep-polling -- wakes the moment data lands,
                 # with the GIL released while waiting.
-                data = serial_object.read(max(1, serial_object.in_waiting))
+                pending = serial_object.in_waiting
+                if not pending:
+                    # every byte sent before this moment has been ingested (see caught_up_t())
+                    self._caught_up_t = self._now()
+                data = serial_object.read(max(1, pending))
                 if data:
                     n = serial_object.in_waiting
                     if n:
@@ -301,6 +310,18 @@ class RotaryStream(object):
         print("RotaryStream: module clock tick = {0}s".format(best), flush=True)
 
     # --- queries -----------------------------------------------------------------------------------
+
+    def caught_up_t(self):
+        """ Host time (log_python_t0-relative) up to which every streamed byte has been ingested:
+        the reader last found the port empty then. None before the first read. A position change
+        after it may still be in flight -- TrialRunner.flush_wheel_log() only writes keepalive rows
+        up to this time. Writing them up to "now" while the reader was briefly behind put a row
+        AHEAD of buffered real samples, and the never-backward clamp then pinned 6 of them to its
+        time (session 20261102-161142, t=763.5s). Inside paused() (stream disabled, drained) it is
+        "now". """
+        if self._paused_drained:
+            return self._now()
+        return self._caught_up_t
 
     def pop_max_read_gap_ms(self):
         """ Longest gap between reader-loop iterations since the last call (ms) -- a stalled

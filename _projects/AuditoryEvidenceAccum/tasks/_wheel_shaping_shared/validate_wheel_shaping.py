@@ -102,7 +102,17 @@ reset_on_opposite = sc4.consecutive_successes == 0 and sc4.consecutive_failures 
 print("  a single failure resets the success streak to 0 (not just decrements): {0}".format(
     reset_on_opposite))
 
-section1_pass = (below_step and stepped_up and reset_after_step and below_step_down and
+# floor (Stage 2 passes 0.20 since withheld turns count as failures): step-downs stop there, and
+# a value already below it is not raised
+sc_floor = staircase.ThresholdStaircase(current_fraction=0.30, floor=0.20)
+for _ in range(15):
+    sc_floor.record_outcome(success=False)
+sc_low = staircase.ThresholdStaircase(current_fraction=0.10, floor=0.20)
+for _ in range(5):
+    sc_low.record_outcome(success=False)
+floor_ok = abs(sc_floor.current_fraction - 0.20) < 1e-9 and abs(sc_low.current_fraction - 0.10) < 1e-9
+print("  floor=0.20: 15 failures from 0.30 stop at 0.20; a value below the floor stays: {0}".format(floor_ok))
+section1_pass = (floor_ok and below_step and stepped_up and reset_after_step and below_step_down and
                   stepped_down and ceiling_check and reset_on_opposite)
 print("Section 1 result: {0}".format("PASS" if section1_pass else "FAIL -- see checks above"))
 
@@ -184,51 +194,83 @@ for _ in range(35):
     dt.record('R')
 for _ in range(5):
     dt.record('L')
-over_used_right = dt.over_used_side() == 'R' and not dt.in_band()
-withhold_right = dt.should_withhold('R') and not dt.should_withhold('L')
-print("  35R/5L over 40 trials (87.5% R): over_used_side='R', out of band: {0}".format(
-    over_used_right))
-print("  should_withhold('R')=True, should_withhold('L')=False: {0}".format(withhold_right))
+# weighted: the 5 most recent L turns outweigh the 35 older R turns, so R is no longer withheld
+# (the flat ratio, 0.88, would still withhold R)
+recent_l_counts = (dt.in_band() and not dt.should_withhold('R')
+                   and dt.right_fraction() < 0.6 and dt.plain_right_fraction() > 0.85)
+print("  35R then 5L: weighted ratio {0:.2f} follows the recent L turns, flat ratio {1:.2f}, R not "
+      "withheld: {2}".format(dt.right_fraction(), dt.plain_right_fraction(), recent_l_counts))
+n_more_l = 0
+while not dt.should_withhold('L') and n_more_l < 40:
+    dt.record('L'); n_more_l += 1
+over_used_left = n_more_l <= 6 and dt.over_used_side() == 'L' and not dt.should_withhold('R')
+print("  ...L over-used after {0} more L turns (<= 6), withhold L only: {1}".format(
+    n_more_l, over_used_left))
 
 dt2 = DirectionRatioTracker()
 for i in range(40):
     dt2.record('R' if i % 2 == 0 else 'L')
 balanced_in_band = dt2.in_band() and dt2.over_used_side() is None
-print("  perfectly alternating 40 trials (50/50): in_band=True, over_used_side=None: {0}".format(
+print("  perfectly alternating 40 trials: in_band=True, over_used_side=None: {0}".format(
     balanced_in_band))
 
 dt3 = DirectionRatioTracker(window=40)
 for _ in range(50):
     dt3.record('R')
-window_check = len(dt3._sides) == 40   # rolling window caps at 40, doesn't grow unbounded
+window_check = len(dt3._sides) == 40 and dt3.should_withhold('R')
 print("  rolling window caps at 40 entries after 50 records: {0}".format(window_check))
 
-# Regression check: before the window is full, even an extreme (all-one-side) ratio must NOT
-# trigger withholding -- confirmed on hardware that OUTCOME=Withheld fired as early as trial 2
-# before this gate existed (right_fraction() over 1-2 trials is pure noise, not a real bias).
+# A run from a balanced history is withheld within a few turns, and a few opposite turns end it
+# (20261102-161142: the flat 40-trial ratio let runs of ~16 through, and needed ~11 to recover).
+dt_run = DirectionRatioTracker(history=['R', 'L'] * 20)
+n_run = 0
+while not dt_run.should_withhold('R'):
+    dt_run.record('R'); n_run += 1
+n_back = 0
+while dt_run.should_withhold('R'):
+    dt_run.record('L'); n_back += 1
+run_ok = n_run <= 6 and n_back <= 3
+print("  balanced history: R withheld after {0} R turns, back in band after {1} L turns "
+      "(<= 6 / <= 3): {2}".format(n_run, n_back, run_ok))
+
+# Before DIRECTION_RATIO_MIN_TRIALS directions are known, even an extreme ratio must NOT trigger
+# withholding -- OUTCOME=Withheld fired as early as trial 2 when there was no gate at all.
 dt4 = DirectionRatioTracker()
 dt4.record('L')
-one_trial_not_full = not dt4.has_full_window()
+one_trial_not_enough = not dt4.has_enough_trials() and not dt4.has_full_window()
 one_trial_in_band = dt4.in_band() and not dt4.should_withhold('L') and not dt4.should_withhold('R')
-print("  1 trial recorded: has_full_window()=False: {0}".format(one_trial_not_full))
-print("  1 trial, all-'L' (extreme ratio): in_band=True, no withholding on either side "
-      "(not enough data yet to trust it): {0}".format(one_trial_in_band))
+print("  1 trial recorded: has_enough_trials()=False: {0}".format(one_trial_not_enough))
+print("  1 trial, all-'L': in_band=True, no withholding on either side: {0}".format(one_trial_in_band))
 
+# Fresh window (no earlier sessions): withholding starts after DIRECTION_RATIO_MIN_TRIALS (10).
 dt5 = DirectionRatioTracker()
-for _ in range(39):
+for _ in range(9):
     dt5.record('L')
-still_not_full_at_39 = not dt5.has_full_window()
-still_no_withhold_at_39 = dt5.in_band() and not dt5.should_withhold('L')
-print("  39/40 trials, all-'L': still has_full_window()=False, still no withholding: {0}".format(
-    still_not_full_at_39 and still_no_withhold_at_39))
+still_no_withhold_at_9 = not dt5.has_enough_trials() and not dt5.should_withhold('L')
+print("  fresh window, 9 trials all-'L': still no withholding: {0}".format(still_no_withhold_at_9))
 dt5.record('L')
-full_at_40_withholds = dt5.has_full_window() and dt5.should_withhold('L')
-print("  40th trial completes the window: has_full_window()=True, NOW withholds 'L': {0}".format(
-    full_at_40_withholds))
+withholds_at_10 = dt5.has_enough_trials() and dt5.should_withhold('L')
+print("  10th trial: has_enough_trials()=True, NOW withholds 'L': {0}".format(withholds_at_10))
 
-section3_pass = (neutral_start and over_used_right and withhold_right and balanced_in_band and
-                  window_check and one_trial_not_full and one_trial_in_band and
-                  still_not_full_at_39 and still_no_withhold_at_39 and full_at_40_withholds)
+# Seeded from earlier sessions: withholding is live from this session's first trial.
+seed = ['R'] * 5 + ['L'] * 40          # 45 entries, oldest first; only the last 40 are kept
+dt6 = DirectionRatioTracker(history=seed)
+seeded_truncated = dt6.seeded_trials == 40 and dt6.history() == ['L'] * 40
+seeded_withholds_first_trial = dt6.should_withhold('L') and not dt6.should_withhold('R')
+print("  seeded with 45 earlier directions: keeps the last 40: {0}".format(seeded_truncated))
+print("  seeded all-'L' window: withholds 'L' on trial 1: {0}".format(seeded_withholds_first_trial))
+dt8 = DirectionRatioTracker(history=['L', 'None', None, 'R', 'x'])
+seed_filters_junk = dt8.history() == ['L', 'R'] and DirectionRatioTracker(history=None).seeded_trials == 0
+print("  seeding ignores anything but 'L'/'R' (and None history): {0}".format(seed_filters_junk))
+import json as _json
+dt9 = DirectionRatioTracker(history=_json.loads(_json.dumps(dt_run.history())))
+seed_round_trip = dt9.history() == dt_run.history() and dt9.right_fraction() == dt_run.right_fraction()
+print("  history() survives a JSON round trip: {0}".format(seed_round_trip))
+
+section3_pass = (neutral_start and recent_l_counts and over_used_left and balanced_in_band and
+                  window_check and run_ok and one_trial_not_enough and one_trial_in_band and
+                  still_no_withhold_at_9 and withholds_at_10 and seeded_truncated and
+                  seeded_withholds_first_trial and seed_filters_junk and seed_round_trip)
 print("Section 3 result: {0}".format("PASS" if section3_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -1013,6 +1055,42 @@ print("  still wheel + late flush -> no WHEEL_POS gap > {0:.0f}ms, rows in order
 print("  filled rows hold the last real position: {0}".format(held_ok))
 print("  every row carries t,pos,t_module with t_module = t - offset: {0}".format(three_field_ok))
 
+# Keepalive vs. a reader that is behind (20261102-161142, t=763.5s): rows written at "now" landed
+# ahead of samples still in flight, and the never-backward clamp pinned 6 of them to one time.
+# Keepalive rows must stop at the reader's caught-up time.
+class _LaggingStream(_FakeStream):
+    def __init__(self):
+        _FakeStream.__init__(self)
+        self.caught = None
+    def caught_up_t(self):
+        return self.caught
+fb3 = _FakeBpod()
+runner3 = _bth.TrialRunner(fb3, None, _time.time(), use_stream=False)
+runner3.stream = _LaggingStream()
+lag_now = [10.0]
+runner3._now = lambda: lag_now[0]
+runner3.stream.add(10.0, 1.0)
+runner3.stream.caught = 10.0
+runner3.flush_wheel_log()
+lag_now[0] = 10.6                  # 0.6s later, but the reader last saw an empty port at 10.30
+runner3.stream.caught = 10.30
+runner3.flush_wheel_log()
+ahead_rows = [float(v.split(',')[0]) for k, v in fb3.rows if k == 'WHEEL_POS']
+no_row_ahead = max(ahead_rows) <= 10.30
+for k in range(20):                # the buffered movement arrives: 10.31 .. 10.50, 10ms apart
+    runner3.stream.add(10.31 + 0.01 * k, 1.0 + 0.4 * (k + 1))
+runner3.stream.caught = 10.6
+runner3.flush_wheel_log()
+lag_rows = [tuple(map(float, v.split(','))) for k, v in fb3.rows if k == 'WHEEL_POS']
+lag_mods = [r[2] for r in lag_rows]
+lag_run = max(len(list(g)) for _, g in __import__('itertools').groupby(lag_mods))
+lag_real = [r for r in lag_rows if r[1] != 1.0]
+lag_ok = (no_row_ahead and lag_run < 3 and lag_mods == sorted(lag_mods)
+          and all(abs(r[0] - (10.31 + 0.01 * i)) < 1e-3 for i, r in enumerate(lag_real)))
+print("  keepalive stops at the reader's caught-up time; late samples keep their own times "
+      "(last keepalive {0:.3f}s, longest same-time run {1}): {2}".format(max(ahead_rows), lag_run, lag_ok))
+keepalive_ok = keepalive_ok and lag_ok
+
 # quiescence tracker: moving for 0.3s, then still -> met only after a full still hold window
 runner2 = _bth.TrialRunner(_FakeBpod(), None, _time.time(), use_stream=False)
 runner2.stream = _FakeStream()
@@ -1235,7 +1313,45 @@ finally:
     shutil.rmtree(tmp16, ignore_errors=True)
 print("  struct export handles 3-field WHEEL_POS rows (keeps t_module): {0}".format(export_ok))
 
-section16_pass = race_ok and export_ok
+# Camera: a slow video write must not delay frame capture (20261102-161142: one 229ms frame gap
+# while the wheel and CSV logged normally -- read and write shared one thread).
+import camera_recorder as _cr
+import queue as _queue
+class _StubCap(object):
+    def __init__(self): self.next_t = _time.perf_counter()
+    def read(self):                    # a 30 fps camera: blocks until its next frame is due
+        self.next_t += 1 / 30.0
+        d = self.next_t - _time.perf_counter()
+        if d > 0: _time.sleep(d)
+        return True, np.zeros((4, 4, 3), dtype=np.uint8)
+    def release(self): pass
+class _SlowOnceWriter(object):
+    def __init__(self): self.n = 0
+    def write(self, frame):
+        self.n += 1
+        if self.n == 5: _time.sleep(0.2)
+    def release(self): pass
+_cam_dir = tempfile.mkdtemp(prefix='camtest_')
+cam = _cr.CameraRecorder.__new__(_cr.CameraRecorder)
+cam._log_python_t0 = _time.time(); cam.fps = 30.0; cam._cap = _StubCap(); cam._writer = _SlowOnceWriter()
+cam.output_path = os.path.join(_cam_dir, 'v.avi'); cam._live_frame_path = os.path.join(_cam_dir, 'l.jpg')
+cam._live_frame_write_interval = 10 ** 6; cam._cap_lock = _threading.Lock(); cam._latest_frame = None
+cam._timestamps = []; cam._stop_event = None; cam._thread = None; cam._writer_thread = None
+cam._write_queue = _queue.Queue(maxsize=60); cam.max_read_ms = 0.0; cam.max_write_ms = 0.0
+cam._preview_widget = None; cam._app = None
+cam.start()
+_time.sleep(1.0)
+cam.close()
+cam_ts = [t for _, t in cam._timestamps]
+cam_gap = max(b2 - a2 for a2, b2 in zip(cam_ts, cam_ts[1:]))
+camera_ok = (cam_gap < 0.06 and cam._writer.n == len(cam_ts) and cam.max_write_ms >= 190
+             and os.path.exists(os.path.join(_cam_dir, 'v_timestamps.csv')))
+print("  camera: a 200ms video write leaves no frame gap > 60ms (max {0:.0f}ms), every frame "
+      "written ({1}/{2}), CAMERA_MAX_WRITE_MS {3:.0f}: {4}".format(
+          cam_gap * 1e3, cam._writer.n, len(cam_ts), cam.max_write_ms, camera_ok))
+shutil.rmtree(_cam_dir, ignore_errors=True)
+
+section16_pass = race_ok and export_ok and camera_ok
 print("Section 16 result: {0}".format("PASS" if section16_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

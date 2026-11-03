@@ -64,6 +64,7 @@ BPOD_LOOP_SLEEP_S = 0.005        # per-iteration sleep in pybpod's run loop (str
                                   # TrialRunner.start() for the rig measurement behind this value
 WHEEL_LOG_MIN_INTERVAL_S = 0.05   # stream mode: a WHEEL_POS row is written whenever the position
                                   # changes, and at least this often while it holds still
+WHEEL_KEEPALIVE_MARGIN_S = 0.005  # keepalive rows stop this far before RotaryStream.caught_up_t()
 WHEEL_LOG_PUMP_INTERVAL_S = 0.025 # how often pump() writes the buffered stream samples to the CSV
                                   # (also the keepalive cadence while the wheel is still)
 
@@ -489,11 +490,18 @@ class TrialRunner(object):
             return
         with self._wheel_log_lock:
             t_lock = host_clock.now()
+            # read BEFORE draining: every sample ingested before that moment is then in `samples`
+            caught_up = getattr(self.stream, 'caught_up_t', lambda: None)()
             samples = self.stream.drain_for_logging()
             offset = self.stream.module_to_host(0.0)
             last = self._wheel_log_last
             if not samples:
                 now = self._now()
+                # Only as far as the reader has verifiably seen no change (see
+                # RotaryStream.caught_up_t()): a keepalive past that could land ahead of samples
+                # still in flight.
+                if caught_up is not None:
+                    now = min(now, caught_up - WHEEL_KEEPALIVE_MARGIN_S)
                 if offset is None or (last is not None and now - last[0] < WHEEL_LOG_MIN_INTERVAL_S):
                     return
                 # No new sample means the position has not changed since the last one (the

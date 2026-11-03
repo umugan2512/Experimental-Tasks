@@ -609,7 +609,12 @@ Durable facts/gotchas from building this:
   column's width) to that one column — a drop-in replacement for `DotDisplay` (identical public
   method surface), used by `dot_wheel_midscreen_test.py` and, behind a `VAR_USE_MIDDLE_SCREEN_ONLY`
   flag, `hifi_singleside_dot_test.py`. Before assuming "N physical monitors = N `QScreen`s" on any
-  rig, check `screens()` directly rather than trusting the monitor count alone.
+  rig, check `screens()` directly rather than trusting the monitor count alone. **Other boxes
+  differ:** `training01` exposes the same three panels as three separate 2048x1536 `QScreen`s
+  (1, 2, 3, left to right), so a window on screen 1 alone put the dot's "centre" on the leftmost
+  panel. `dot_display._stimulus_geometry()` (2026-11-02) makes the window span
+  `screens[DEFAULT_DOT_SCREEN_INDEX:]`, which is the same 6144px window, centred on the middle
+  panel, on both kinds of box (verified on `training01` by screenshot).
 - **This rig's rotary encoder's raw positive-position direction is the physical direction that
   visually moves a wheel-coupled display element toward screen-LEFT, not screen-right** — confirmed
   directly on hardware (a user turning the wheel observed the dot moving opposite to the expected
@@ -808,6 +813,21 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   stays unchanged (still reports the real rolling value for logging/display regardless of window
   fullness), only the withhold-triggering `in_band()`/`over_used_side()`/`should_withhold()` chain
   is gated.
+  **Since 2026-11-02 the gate is 20 known directions, and the window carries over between
+  sessions** (`recent_directions` in the state file, `DIRECTION_HISTORY_SEEDED` VAL). The old
+  "full 40-trial window of this session" gate let UM001 turn left on 22/22 trials of
+  `20261102-160353`, all rewarded, with `DIRECTION_RATIO` sitting at 0.0. UM001's state was
+  seeded by hand from its last two Stage 2 sessions (right fraction 0.28, so left turns are
+  withheld from the next session's first trial).
+  **Since later on 2026-11-02 the ratio is recency-weighted and a withheld turn is a staircase
+  failure.** In `20261102-161142` UM001 turned in long runs (R×31, L×29, …; 22% switches). The
+  flat 40-trial ratio rewarded each run for ~16 trials, then withheld until the animal flipped,
+  so the session oscillated. The threshold sat at its 35° ceiling throughout, because a withheld
+  turn counted as a success. Now `right_fraction()` is half-Gaussian weighted (sigma 8, about 10
+  effective trials), the gate is 10 known directions, and `DIRECTION_RATIO_FLAT` logs the old
+  value. Replayed on that session's turns, the R×31 run would have earned 6 rewards instead of 23.
+  5 failures in a row (withheld or no-movement) step the threshold down, to a floor of 0.20.
+  Withheld turns still count toward the 100-trial advancement gate.
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching
@@ -1048,6 +1068,20 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     - Deleting the session folder also removes its water from `water_consumed_today()`.
     - Copies of the removed sessions and the pre-restore state file went to the session
       scratchpad, which is temporary.
+  - **Keepalive `WHEEL_POS` rows stop at the reader's caught-up time** (2026-11-02,
+    `RotaryStream.caught_up_t()`). `flush_wheel_log()` treated "no new samples" as "wheel
+    still" and wrote keepalive rows up to now. When the reader thread was briefly behind
+    (session `20261102-161142`, t=763.5 s), a row landed ahead of samples still in flight. The
+    never-backward clamp then pinned 6 of them to that row's time (audit: 5 frozen samples).
+  - **Camera frames are written on their own thread** (2026-11-02). With `cap.read()` and
+    `VideoWriter.write()` on one thread, one slow write gave a 229 ms frame gap while the wheel and
+    CSV logged normally (`20261102-161142`). `CAMERA_MAX_READ_MS`/`CAMERA_MAX_WRITE_MS` now say
+    which side a future gap came from.
+  - **The dashboard skips polls with no new CSV bytes, and runs the audit on a worker thread**
+    (2026-11-02). After a 250-trial session it kept rebuilding the wheel panel every 500 ms poll,
+    forever: `cla()` plus one artist per trial line, 0.62 s per poll. The audit (~5.5 s) also
+    froze the window at session end. The panel now uses persistent artists (one line, two
+    `LineCollection`s): 143 ms per redraw with new data, nothing when idle.
   - **A render-loop frame can block for ~0.5–1 s with nothing else wrong.** In `20261030-142131`
     trial 181, the camera and the rotary reader ran normally, so it wasn't the GIL or the
     process. Only the main thread stopped, inside Qt's `processEvents()`. That fits a task

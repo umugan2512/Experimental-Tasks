@@ -69,6 +69,7 @@ thread) -- an external reader just needs to read whatever's the newest complete 
 container concerns at all. Automatic for every caller, no task script needs to change to get it.
 """
 import os
+import queue
 import sys
 import threading
 import time
@@ -186,6 +187,15 @@ class CameraRecorder(object):
         self._timestamps = []   # list of (frame_index, timestamp_s) -- see module docstring
         self._stop_event = None
         self._thread = None
+        # Encoding + disk writes run on their own thread (2026-11-02): with read and write on one
+        # thread, one slow VideoWriter.write() (a 113MB file by the end of a 22-min session)
+        # delayed the next read, a 229ms frame gap in session 20261102-161142 while the wheel and
+        # CSV logged normally. Bounded at ~2s of frames; when full, the capture thread waits
+        # rather than drop frames.
+        self._write_queue = queue.Queue(maxsize=max(10, int(2 * self.fps)))
+        self._writer_thread = None
+        self.max_read_ms = 0.0    # longest cap.read(), registered as CAMERA_MAX_READ_MS
+        self.max_write_ms = 0.0   # longest VideoWriter.write(), registered as CAMERA_MAX_WRITE_MS
 
         self.start_time_s = None
 
@@ -223,7 +233,7 @@ class CameraRecorder(object):
         own Bpod serial I/O and Qt event processing, in scripts (like full_protocol_lookback_test.py)
         that already run other background threads and have a documented GIL-pressure crash history.
         Recording itself is completely unaffected either way -- this only controls the PREVIEW
-        WIDGET's own visibility/update window, never the background capture+write thread.
+        WIDGET's own visibility/update window, never the background capture/writer threads.
         No-op if preview wasn't enabled at construction.
         """
         if self._preview_widget is not None:
@@ -231,13 +241,35 @@ class CameraRecorder(object):
             self._preview_widget.show()
 
     def start(self):
-        """ Spawns the background capture+write thread and records start_time_s (see module
+        """ Spawns the background capture and writer threads and records start_time_s (see module
         docstring's "Time sync" section) -- call once, before the first pump(). """
         self.start_time_s = host_clock.now() - self._log_python_t0
         self._stop_event = threading.Event()
+        self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
+        self._writer_thread.start()
         self._thread = threading.Thread(target=self._capture_loop, args=(self._stop_event,),
                                          daemon=True)
         self._thread.start()
+
+    def _write_loop(self):
+        """ Writes queued frames (and every Nth one as the live JPEG) until the None sentinel
+        close() queues after the capture thread has stopped. """
+        while True:
+            item = self._write_queue.get()
+            if item is None:
+                return
+            frame, write_jpeg = item
+            try:
+                t = time.perf_counter()
+                self._writer.write(frame)
+                self.max_write_ms = max(self.max_write_ms, (time.perf_counter() - t) * 1e3)
+            except Exception:
+                pass
+            if write_jpeg:
+                try:
+                    cv2.imwrite(self._live_frame_path, frame)
+                except Exception:
+                    pass   # best-effort -- never let a preview-file write disrupt recording
 
     def _capture_loop(self, stop_event):
         # Rate-limited to ~self.fps, same "measure elapsed, sleep the remainder" shape as this
@@ -254,17 +286,14 @@ class CameraRecorder(object):
             loop_start = host_clock.now()
             try:
                 with self._cap_lock:
+                    t_read = time.perf_counter()
                     ok, frame = self._cap.read()
+                    self.max_read_ms = max(self.max_read_ms, (time.perf_counter() - t_read) * 1e3)
                 t = host_clock.now() - self._log_python_t0
                 if not ok or frame is None:
                     continue
-                self._writer.write(frame)
                 self._timestamps.append((frame_index, t))
-                if frame_index % self._live_frame_write_interval == 0:
-                    try:
-                        cv2.imwrite(self._live_frame_path, frame)
-                    except Exception:
-                        pass   # best-effort -- never let a preview-file write disrupt recording
+                self._write_queue.put((frame, frame_index % self._live_frame_write_interval == 0))
                 frame_index += 1
                 self._latest_frame = frame
             except Exception:
@@ -305,7 +334,19 @@ class CameraRecorder(object):
             self._thread.join(timeout=3.0)
 
         self._cap.release()
-        self._writer.release()
+        writer_done = True
+        if self._writer_thread is not None:
+            try:
+                self._write_queue.put(None, timeout=30.0)   # after every frame already queued
+                self._writer_thread.join(timeout=30.0)
+            except queue.Full:
+                pass
+            writer_done = not self._writer_thread.is_alive()
+        if writer_done:
+            self._writer.release()
+        else:
+            print("CameraRecorder: video writer still busy after 30s -- not finalizing {0} "
+                  "(the file may be truncated)".format(self.output_path), flush=True)
         self._save_timestamps()
 
         if self._preview_widget is not None:
