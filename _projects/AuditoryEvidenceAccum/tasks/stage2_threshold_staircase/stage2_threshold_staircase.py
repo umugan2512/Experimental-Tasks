@@ -356,6 +356,7 @@ camera.start()
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
 my_bpod.register_value('CAMERA_FPS', camera.fps)
+my_bpod.register_value('CAMERA_BACKEND', camera.backend)
 
 # rotary_setup.screen_direction_gain() applies this rig's confirmed wheel->screen sign correction
 # (see rotary_setup.py's WHEEL_TO_SCREEN_SIGN) -- previously missing here, unlike every other

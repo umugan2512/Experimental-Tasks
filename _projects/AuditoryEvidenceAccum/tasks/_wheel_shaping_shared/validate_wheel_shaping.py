@@ -1317,6 +1317,9 @@ print("  struct export handles 3-field WHEEL_POS rows (keeps t_module): {0}".for
 # while the wheel and CSV logged normally -- read and write shared one thread).
 import camera_recorder as _cr
 import queue as _queue
+# A real session runs at a 1ms Windows timer (TrialRunner.start()); at the default 15.6ms the stub
+# camera's own sleeps overshoot and the 60ms bound below failed by chance on training05.
+_cam_timer = _bth._set_windows_timer_resolution(True)
 class _StubCap(object):
     def __init__(self): self.next_t = _time.perf_counter()
     def read(self):                    # a 30 fps camera: blocks until its next frame is due
@@ -1351,7 +1354,64 @@ print("  camera: a 200ms video write leaves no frame gap > 60ms (max {0:.0f}ms),
           cam_gap * 1e3, cam._writer.n, len(cam_ts), cam.max_write_ms, camera_ok))
 shutil.rmtree(_cam_dir, ignore_errors=True)
 
-section16_pass = race_ok and export_ok and camera_ok
+# Camera: a backlog of frames already in the driver must drain (2026-11-03). With the old
+# whole-frame-interval throttle the loop read at most one frame per 1/fps, so a backlog never
+# drained: every later frame was read ~5 frames late (and real sessions dropped to 28.5fps).
+class _BackloggedCap(object):
+    def __init__(self, backlog=5, fps=30.0):
+        now = _time.perf_counter()
+        self.iv = 1 / fps
+        self.k = 0
+        self.t_first = now - backlog * self.iv   # frames 0..backlog-1 are already waiting
+        self.latency = []                        # read return - frame available, per frame
+    def read(self):
+        due = self.t_first + self.k * self.iv
+        d = due - _time.perf_counter()
+        if d > 0: _time.sleep(d)
+        self.latency.append(_time.perf_counter() - due)
+        self.k += 1
+        return True, np.zeros((4, 4, 3), dtype=np.uint8)
+    def release(self): pass
+class _NullWriter(object):
+    def write(self, frame): pass
+    def release(self): pass
+_cam_dir = tempfile.mkdtemp(prefix='camtest_')
+cam = _cr.CameraRecorder.__new__(_cr.CameraRecorder)
+cam._log_python_t0 = _time.time(); cam.fps = 30.0; cam._cap = _BackloggedCap(); cam._writer = _NullWriter()
+cam.output_path = os.path.join(_cam_dir, 'v.avi'); cam._live_frame_path = os.path.join(_cam_dir, 'l.jpg')
+cam._live_frame_write_interval = 10 ** 6; cam._cap_lock = _threading.Lock(); cam._latest_frame = None
+cam._timestamps = []; cam._stop_event = None; cam._thread = None; cam._writer_thread = None
+cam._write_queue = _queue.Queue(maxsize=60); cam.max_read_ms = 0.0; cam.max_write_ms = 0.0
+cam._preview_widget = None; cam._app = None
+cam.start()
+_time.sleep(1.0)
+cam.close()
+_late = cam._cap.latency[len(cam._cap.latency) // 2:]   # second half of the run
+backlog_ok = len(_late) > 0 and max(_late) < 0.02 and cam.compute_realized_fps() > 29.0
+print("  camera: a 5-frame driver backlog drains -- 2nd-half read latency max {0:.1f}ms (< 20ms), "
+      "{1:.1f}fps realized (> 29): {2}".format(max(_late) * 1e3 if _late else float('nan'),
+                                               cam.compute_realized_fps() or 0.0, backlog_ok))
+shutil.rmtree(_cam_dir, ignore_errors=True)
+if _cam_timer:
+    _bth._set_windows_timer_resolution(False)
+
+# Full garbage collections are held off for a session and every collection is timed (2026-11-03:
+# full collections stalled every thread for 46-87ms, growing with session length).
+import gc as _gc
+_gc_before = _gc.get_threshold()
+_bth._hold_full_gc(True)
+_gc_held = _gc.get_threshold()
+_gc.collect()
+_gc_ms = _bth.pop_gc_max_ms()
+_gc_popped_again = _bth.pop_gc_max_ms()
+_bth._hold_full_gc(False)
+gc_ok = (_gc_held == (_gc_before[0], _gc_before[1], _bth.GC_FULL_THRESHOLD_HOLD)
+         and _gc_ms > 0 and _gc_popped_again == 0.0
+         and _gc.get_threshold() == _gc_before and _bth._gc_timer not in _gc.callbacks)
+print("  gc: full collections held during a session (thresholds {0} -> {1}), a collection timed "
+      "({2:.2f}ms), restored afterwards: {3}".format(_gc_before, _gc_held, _gc_ms, gc_ok))
+
+section16_pass = race_ok and export_ok and camera_ok and backlog_ok and gc_ok
 print("Section 16 result: {0}".format("PASS" if section16_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

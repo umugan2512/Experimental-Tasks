@@ -362,6 +362,7 @@ camera.start()
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
 my_bpod.register_value('CAMERA_FPS', camera.fps)
+my_bpod.register_value('CAMERA_BACKEND', camera.backend)
 
 render_interval = 1.0 / VAR_RENDER_HZ
 

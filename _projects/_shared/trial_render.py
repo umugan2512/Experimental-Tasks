@@ -28,7 +28,7 @@ import time
 
 import host_clock
 import rotary_setup
-from bpod_trial_helpers import PC_EVENT_DOT_SHOWN, PC_EVENT_QUIESCENCE_MET
+from bpod_trial_helpers import PC_EVENT_DOT_SHOWN, PC_EVENT_QUIESCENCE_MET, pop_gc_max_ms
 
 
 def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disappear_delay_s,
@@ -132,7 +132,9 @@ def register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_retu
       longer (QC of 20261027-102843: -25.6 to -18.6 ms, p5-p95): it also includes USB transfer
       and pybpod reading the trial's final events. Licks in that ~48 ms window per trial are
       not logged -- mask it in lick analyses.
-    - STREAM_MAX_READ_GAP_MS, WHEEL_LOG_LOCK_MAX_MS """
+    - STREAM_MAX_READ_GAP_MS, WHEEL_LOG_LOCK_MAX_MS
+    - GC_MAX_MS: longest garbage collection this trial (full ones are held off for the session,
+      see bpod_trial_helpers._hold_full_gc()) """
     reg = runner.register
     if quiescence_hold_s is not None:
         reg('QUIESCENCE_HOLD_S', quiescence_hold_s)
@@ -161,6 +163,7 @@ def register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_retu
     if runner.stream is not None:
         reg('STREAM_MAX_READ_GAP_MS', runner.stream.pop_max_read_gap_ms())
     reg('WHEEL_LOG_LOCK_MAX_MS', getattr(runner, 'wheel_log_lock_max_ms', 0.0))
+    reg('GC_MAX_MS', pop_gc_max_ms())
     if getattr(runner, 'run_write_ms', None) is not None:
         reg('SM_RUN_WRITE_MS', runner.run_write_ms)
     runner.wheel_log_lock_max_ms = 0.0

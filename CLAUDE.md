@@ -948,7 +948,8 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     - Previously, polling the Bpod's USB serial port continuously made *every* thread in the
       process wake 25–93 ms late (74 stalls > 25 ms per 120 s, including a thread only doing
       `sleep(1ms)`). These were the audit's "rotary reader stalls"; garbage collection, the camera
-      and the serial read itself were ruled out.
+      and the serial read itself were ruled out. (Garbage collection only for a 120 s run: in
+      long sessions it is the main remaining stall, see "Full garbage collections" below.)
     - With the 5 ms sleep: 0–2 stalls per 120 s, all ≤ 41 ms.
     - Cost: the dot handshake `DotOn` → response is 20 ms on the Bpod clock, instead of 7 ms.
       Event timing is unaffected (hardware timestamps).
@@ -1082,6 +1083,42 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     `VideoWriter.write()` on one thread, one slow write gave a 229 ms frame gap while the wheel and
     CSV logged normally (`20261102-161142`). `CAMERA_MAX_READ_MS`/`CAMERA_MAX_WRITE_MS` now say
     which side a future gap came from.
+  - **Full garbage collections are held off for the session** (2026-11-03,
+    `bpod_trial_helpers._hold_full_gc()`, called from `TrialRunner.start()`/`stop()`).
+    - In `20261102-161142` (250 trials), the reader, render loop and log lock stalled TOGETHER on
+      trials 75/101/144/191/249 for 46/54/59/72/87 ms. Landing between machines, the same stall
+      stretched `INTER_TRIAL_GAP_MS` to 69/80/95/116 ms (trials 50/143/190/248), which is
+      lick-blind time.
+    - The stalls grow longer and further apart (26 → 58 trials) as the session goes on. That
+      matches CPython's automatic full (generation-2) collection, which holds the GIL while it
+      scans every tracked object, on a heap that grows all session (pybpod keeps every message).
+    - The 120 s `stall_diag` runs couldn't see this: their heap was too small.
+    - Now the generation-2 threshold is set to 10⁹ for the session (Python 3.6 has no
+      `gc.freeze()`). Generation 0/1 collections stay automatic, and only cyclic garbage waits.
+    - Every collection is timed; the per-trial max is registered as `GC_MAX_MS`. The audit
+      reports it as INFO.
+    - **Not yet confirmed on the rig.** The GC cause is inferred from the pattern above. A
+      full-length session should show no more joint reader+render+log-lock stalls, and
+      `GC_MAX_MS` of a few ms at most.
+  - **Camera: DirectShow backend, and the capture loop can catch up** (2026-11-03,
+    `camera_recorder.open_capture()`).
+    - Every session through `20261102-161142` ran at 28.5 fps (median interval 35 ms) from a
+      30 fps camera. The loop's minimum period was one whole frame interval, so read plus
+      bookkeeping made each iteration slightly longer than the camera's own period. A backlog
+      never drained: frames waited in the driver and were dropped, and each frame's timestamp is
+      when `read()` returned, so it was late by however many frames were queued. In the suite's
+      stub, a 5-frame backlog left frames read ~234 ms late, still growing.
+    - The minimum period is now half a frame (`CAPTURE_MIN_PERIOD_FRACTION`). A camera-paced
+      read never sleeps, and an instant-returning backend is still capped at 2× fps.
+    - OpenCV's default backend (MSMF) delivered in bursts on training05: 21–31 gaps > 50 ms per
+      15 s. DirectShow was steady: no gap > 50 ms, max 49 ms. `CameraRecorder` on training05 with
+      both changes: DSHOW, 29.85 fps realized, interval p1 31 ms, max 49 ms over 20 s.
+    - `open_capture()` tries DirectShow, then falls back to the default backend. The backend is
+      registered as `CAMERA_BACKEND`.
+    - An explicit camera index follows DirectShow's device order. The stages use discovery, and
+      `Calibration/rig_check.py` opens its preview through `open_capture()` too, so the two
+      agree. On a box with a virtual camera (OBS etc.), DirectShow may list it first: check
+      `CAMERA_BACKEND` and the preview.
   - **The dashboard skips polls with no new CSV bytes, and runs the audit on a worker thread**
     (2026-11-02). After a 250-trial session it kept rebuilding the wheel panel every 500 ms poll,
     forever: `cla()` plus one artist per trial line, 0.62 s per poll. The audit (~5.5 s) also

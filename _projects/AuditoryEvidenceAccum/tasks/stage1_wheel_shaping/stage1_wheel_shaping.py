@@ -292,6 +292,7 @@ camera.start()
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
 my_bpod.register_value('CAMERA_FPS', camera.fps)
+my_bpod.register_value('CAMERA_BACKEND', camera.backend)
 
 # Geometry-aware FINAL gain (same derivation as full_protocol_lookback_test.py) -- Stage 1's actual
 # gain is this, multiplied by the current (persisted, decaying) gain multiplier.
