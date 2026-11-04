@@ -31,15 +31,16 @@ the LED) if either was left on when the window closes, mirroring `flush_valve.py
 `finally`-guaranteed close-on-exit.
 
 **Lick sensor / TTL monitor** (training01): this box's lick sensor is an OPB815WZ IR beam break
-read by an Arduino (`arduino_lick_relay/`), which copies the beam state to a Bpod BNC input
-(HIGH = beam broken). Digital inputs have no polling/`manual_override`-read API -- they're only
+read by an Arduino (`arduino_lick_relay/`), which copies the beam state to Bpod BNC In 2
+(HIGH = beam broken: BNC2High = lick in). Digital inputs have no polling/`manual_override`-read API -- they're only
 timestamped while a `StateMachine` runs (see this repo's own `CLAUDE.md`, Hardware module notes).
 `TtlMonitorThread` repeatedly sends a short `Listen` state (`Tup`: `exit`, nothing else) back to
 back on a background `QThread` (same "background thread for anything that blocks on real Bpod
 time" pattern as `calibrate_liquid.py`'s own `PulseRunner`). Bpod logs every enabled input's edges
 whether or not a state listens for them, so every Port/BNC/Wire edge is reported with its Bpod
 timestamp (elapsed since the monitor started). The per-channel edge counts show which input is
-actually wired; the "Lick input" channel (or, on Auto, the first input that fires) is read as the
+actually wired; the "Lick input" channel (default: this box's own, `_shared/lick_input.py`; or, on
+Auto, the first input that fires) is read as the
 lick port: `PortNIn`/`BNCNHigh`/`WireNHigh` = lick in. Edges during the ~50 ms handover between
 1 s windows are not logged.
 
@@ -82,6 +83,7 @@ _CALIBRATION_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_CALIBRATION_DIR, '..', '_projects', '_shared'))
 import rotary_setup
 import hifi_setup
+import lick_input
 from bpod_trial_helpers import was_visited
 from camera_recorder import discover_camera, open_capture
 from click_train_v2 import VAR_CLICK_DURATION_S, VAR_CLICK_RAMP_MS
@@ -344,6 +346,10 @@ class RigCheckWindow(QWidget):
         self.lick_input_combo.addItem('Auto (first input that fires)', None)
         for channel in VAR_LICK_INPUT_CHOICES:
             self.lick_input_combo.addItem(channel, channel)
+        # start on this box's own lick input (_shared/lick_input.py: BNC2 on training01)
+        box_index = self.lick_input_combo.findData(lick_input.lick_input())
+        if box_index >= 0:
+            self.lick_input_combo.setCurrentIndex(box_index)
         self.lick_input_combo.currentIndexChanged.connect(self._on_lick_input_changed)
         lick_form.addRow('Lick input:', self.lick_input_combo)
         self.lick_button = QPushButton('Start Lick Monitor')

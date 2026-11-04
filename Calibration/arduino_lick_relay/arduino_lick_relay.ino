@@ -2,7 +2,7 @@
 //
 // The Bpod's own lick port input never registered this sensor, so the Arduino reads the
 // phototransistor and copies its state to a digital output wired to a Bpod BNC input. The Bpod
-// timestamps every edge on its own clock (events BNC1High = lick in, BNC1Low = lick out);
+// timestamps every edge on its own clock (events BNC2High = lick in, BNC2Low = lick out);
 // this loop adds ~10 us. No debouncing here, on purpose: filtering would delay the edges, and the
 // analysis already merges sensor chatter from the raw edges (merge_lick_chatter()).
 //
@@ -11,16 +11,17 @@
 //   GND ------------- Black (LED cathode)
 //   5V  -- 10 kohm -- White (collector) -- D2    pull-up; beam clear = LOW, beam broken = HIGH
 //   GND ------------- Green (emitter)
-//   D8  ------------- BNC centre pin  -> Bpod BNC In 1   (Bpod BNC inputs: optoisolated, 2.5-5 V)
+//   D8  ------------- BNC centre pin  -> Bpod BNC In 2   (Bpod BNC inputs: optoisolated, 2.5-5 V)
 //   GND ------------- BNC shield
 //
 // Check: Calibration/rig_check.py -> "Lick sensor / TTL monitor" shows which Bpod input fires.
+// The tasks read licks from this input via _projects/_shared/lick_input.py (TRAINING01 -> BNC2).
 
 const byte SENSOR_PIN = 2;
 const byte OUT_PIN = 8;
 const byte LED_PIN = LED_BUILTIN;   // on-board LED lit while the beam is broken
 
-// false: output HIGH while the beam is broken (lick in = BNC1High). Set true only if the sensor
+// false: output HIGH while the beam is broken (lick in = BNC2High). Set true only if the sensor
 // is wired the other way round (beam broken reads LOW on D2).
 const bool INVERT_OUTPUT = false;
 
