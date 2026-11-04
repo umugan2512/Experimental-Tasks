@@ -988,7 +988,12 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   - **Follow-ups from the independent QC of `20261027-102843` (2026-10-28):**
     - The audit's wheel clock-map check is detrended. The module and PC crystals differ by
       ~20 ppm, so the raw offset ramps over a session (82→95 ms), and undetrended it failed every
-      session longer than ~4 min. Residual spread: 0.41 ms. The reader-stall check excludes
+      session longer than ~4 min. Residual spread: 0.41 ms. Since 2026-11-04 it detrends each
+      stream epoch on its own. Each epoch starts with a threshold step (`THRESHOLD_DEG` /
+      `RESPONSE_THRESHOLD_DEG` changed). Every stream pause re-anchors the module clock on
+      that epoch's first message, and the offset then steps down 1–5 ms. Host-mapped times
+      stay correct, but one line through the whole session reads that as jitter
+      (`20261104-165242`: 5.2 ms FAIL; 0.5 ms per epoch). The reader-stall check excludes
       trial 1 (stream start-up) and names any trial over budget.
     - Keepalive `WHEEL_POS` rows' module time (an estimate, host − offset) is clamped between the
       previous row's and the next real sample's, so the third field never steps backward.
