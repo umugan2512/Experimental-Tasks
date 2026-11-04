@@ -57,6 +57,7 @@ except ImportError:   # a test double standing in for pybpodapi -- register() th
     ValueMessage = None
 
 import host_clock
+import lick_input
 import rotary_setup
 from rotary_stream import RotaryStream
 
@@ -720,9 +721,10 @@ class TrialRunner(object):
         self.bpod.send_state_machine(sma)
         self._uploaded_sma = sma
 
-    def register_port_events(self, prefix, events_dict, anchor_t, port_in_key='Port1In',
-                              port_out_key='Port1Out'):
-        """ Extracts and registers BOTH edges of a digital input (Port1In/Port1Out by default) as
+    def register_port_events(self, prefix, events_dict, anchor_t, port_in_key=None,
+                              port_out_key=None):
+        """ Extracts and registers BOTH edges of a digital input (by default this box's lick input,
+        lick_input.lick_events(): Port1In/Port1Out, or BNC2High/BNC2Low on training01) as
         absolute-time VALs, comma-joined strings matching the existing CLICK_TIMES_L/CLICK_TIMES_R
         convention -- per explicit instruction, every lick-time extraction in this codebase should
         report both the contact start AND end, not just the start: it's useful data in its own
@@ -731,6 +733,9 @@ class TrialRunner(object):
         short Port1In events) without hand-parsing raw EVENT rows. Returns (in_times_abs,
         out_times_abs) so callers can use the first element exactly where they already use their
         own hand-built lick_times_abs/cue_lick_times_abs/choice_lick_times_abs. """
+        default_in, default_out = lick_input.lick_events()
+        port_in_key = port_in_key or default_in
+        port_out_key = port_out_key or default_out
         in_times = [anchor_t + t for t in events_dict.get(port_in_key, [])]
         out_times = [anchor_t + t for t in events_dict.get(port_out_key, [])]
         self.register('{0}_TIMES_IN'.format(prefix),
@@ -1010,7 +1015,8 @@ class TrialRunner(object):
                 hold_sma.add_state(
                     state_name='HoldCheck',
                     state_timer=required_hold,
-                    state_change_conditions={'Port1In': 'LickDuringHold', Bpod.Events.Tup: 'exit'},
+                    state_change_conditions={lick_input.lick_events()[0]: 'LickDuringHold',
+                                             Bpod.Events.Tup: 'exit'},
                     output_actions=[])
                 hold_sma.add_state(
                     state_name='LickDuringHold',

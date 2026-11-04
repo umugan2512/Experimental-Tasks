@@ -1672,11 +1672,86 @@ print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 22: per-box lick input (LICK_INPUT=BNC2 on training01)")
+print("=" * 100)
+
+import lick_input  # noqa: E402 -- _projects/_shared, already on sys.path for Section 16
+
+
+def _write_session22(folder, name, lick_channel, lick_in, lick_out, n_rewarded=3):
+    rows = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', 'stage1_wheel_shaping'],
+            ['INFO', 'pc', '', '', 'SUBJECT-NAME', "['M1', 'x']"],
+            ['VAL', 'pc', '', '', 'REWARD_UL', '7.0']]
+    if lick_channel:
+        rows.append(['VAL', 'pc', '', '', 'LICK_INPUT', lick_channel])
+    for i in range(n_rewarded):
+        rows += [['TRIAL', 'pc', '', '', 'New trial', ''],
+                 ['END-TRIAL', 'pc', '', '', 'The trial ended', ''],
+                 ['INFO', 'pc', str(10.0 * i), str(10.0 * i + 1.5), 'TRIAL-BPOD-TIME', '1.5'],
+                 ['STATE', 'pc', '0.5', '0.56', 'Reward', '0.06'],
+                 ['EVENT', 'pc', '0.7', '', '68', lick_in],
+                 ['EVENT', 'pc', '0.75', '', '69', lick_out],
+                 # chatter: a second In 15 ms after the Out -- merged into one lick
+                 ['EVENT', 'pc', '0.765', '', '68', lick_in],
+                 ['EVENT', 'pc', '0.8', '', '69', lick_out],
+                 # a stray edge on the OTHER input must not count
+                 ['EVENT', 'pc', '0.9', '', '70', 'Port1In' if lick_in != 'Port1In' else 'BNC2High']]
+    path = os.path.join(folder, name + '.csv')
+    with open(path, 'w', newline='') as f:
+        csv.writer(f, delimiter=';').writerows(rows)
+    return path
+
+
+tmp22 = tempfile.mkdtemp(prefix='lickinput_')
+try:
+    bnc_csv = _write_session22(tmp22, 'bnc', 'BNC2', 'BNC2High', 'BNC2Low')
+    old_csv = _write_session22(tmp22, 'old', None, 'Port1In', 'Port1Out')
+    res22 = {}
+    for label, path in (('bnc', bnc_csv), ('old', old_csv)):
+        info, svals, trials = session_csv_parser.parse_session_csv(path)
+        inc_trials = session_csv_parser.IncrementalSessionParser(path).update()[2]
+        res22[label] = {
+            'events': trials[0].get('lick_events'),
+            'licks': [session_csv_parser.trial_licks(t) for t in trials],
+            'consumed': [session_csv_parser.classify_trial(
+                t, session_csv_parser.PROTOCOL_CONFIG['stage1_wheel_shaping'])[3] for t in trials],
+            'water': session_csv_parser.session_water_consumed(info, svals, trials),
+            'log_licks': build_training_log.summarize_session(path)['lick_count'],
+            'inc_same': [session_csv_parser.trial_licks(t) for t in inc_trials]
+                        == [session_csv_parser.trial_licks(t) for t in trials],
+        }
+finally:
+    shutil.rmtree(tmp22, ignore_errors=True)
+bnc22, old22 = res22['bnc'], res22['old']
+parse_ok = (bnc22['events'] == ('BNC2High', 'BNC2Low') and old22['events'] == ('Port1In', 'Port1Out')
+            and bnc22['licks'] == [[0.7]] * 3 and old22['licks'] == [[0.7]] * 3
+            and bnc22['consumed'] == [True] * 3 and abs((bnc22['water'] or 0) - 21.0) < 1e-9
+            and bnc22['log_licks'] == 3 and old22['log_licks'] == 3
+            and bnc22['inc_same'] and old22['inc_same'])
+print("  LICK_INPUT=BNC2 session: BNC2High/Low read as licks (chatter merged, stray Port1In "
+      "ignored), consumed water + training-log licks; no LICK_INPUT = Port1; incremental parser "
+      "agrees: {0} ({1} / {2})".format(parse_ok, bnc22, old22))
+map_ok = (lick_input.lick_input('TRAINING01') == 'BNC2' and lick_input.lick_input('training01') == 'BNC2'
+          and lick_input.lick_input('TRAINING03') == 'Port1'
+          and lick_input.lick_events('BNC2') == ('BNC2High', 'BNC2Low')
+          and lick_input.lick_events('Port1') == ('Port1In', 'Port1Out')
+          and lick_input.lick_events('Port1') == session_csv_parser.lick_event_names('Port1')
+          and lick_input.lick_events('BNC2') == session_csv_parser.lick_event_names('BNC2'))
+print("  lick_input: TRAINING01 -> BNC2, other boxes -> Port1, same event names as the parser: "
+      "{0}".format(map_ok))
+
+section22_pass = parse_ok and map_ok
+print("Section 22 result: {0}".format("PASS" if section22_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
-                 section19_pass and section20_pass and section21_pass)
+                 section19_pass and section20_pass and section21_pass and section22_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
