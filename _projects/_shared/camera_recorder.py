@@ -52,10 +52,14 @@ helper.
 **Not yet confirmed on hardware**: the timestamp captured is when cap.read() returns to Python,
 not a true hardware capture timestamp from the camera itself -- the best achievable synchronization
 without deeper camera-hardware timestamp support. Actual jitter/latency against real Bpod events
-hasn't been measured yet (see docs_local/CAMERA_TEST_PLAN.md's Stage 4). OpenCV on Windows
-sometimes benefits from an explicit cv2.CAP_DSHOW backend hint for reliable/fast camera open --
-flagged, not applied here, same "UNCONFIRMED" convention used elsewhere in this codebase for
-anything not yet hardware-validated.
+hasn't been measured yet (see docs_local/CAMERA_TEST_PLAN.md's Stage 4).
+
+**Backend: DirectShow first, then OpenCV's default** (2026-11-03, _open_capture()). Measured on
+training05 (opencv 3.4.5, 640x480, 15s per run, 1ms timer): the default (MSMF) delivered frames in
+bursts -- 21-31 gaps > 50ms, 1st-percentile interval 2-8ms -- while DirectShow was steady at
+~30fps: no gap > 50ms, 1st percentile 31ms, max 49ms. Both opened in ~1.1s. The backend in use is
+`self.backend`, registered by the stage scripts as CAMERA_BACKEND. An explicit camera_index now
+follows DirectShow's device order (every stage script passes None, i.e. discovery).
 
 **Live-frame JPEG export (`<output_stem>_latest.jpg`)**: added after confirming directly that
 `session_video.avi` cannot be read by any OTHER process/handle while this class's own
@@ -69,6 +73,7 @@ thread) -- an external reader just needs to read whatever's the newest complete 
 container concerns at all. Automatic for every caller, no task script needs to change to get it.
 """
 import os
+import queue
 import sys
 import threading
 import time
@@ -80,6 +85,9 @@ from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt
 
 import host_clock
+
+CAPTURE_MIN_PERIOD_FRACTION = 0.5   # capture loop's minimum period, in frame intervals -- see
+                                    # CameraRecorder._capture_loop()
 
 
 def discover_camera(max_index=5):
@@ -100,7 +108,25 @@ def discover_camera(max_index=5):
     return index
 
 
-def _discover_camera_capture(max_index=5):
+def open_capture(index, fps=None):
+    """ Opens camera `index` with DirectShow, falling back to OpenCV's default backend (see the
+    module docstring's "Backend" section). Returns an open capture that has already delivered one
+    frame, or None. `fps` is requested from DirectShow, which otherwise reports 0. Calibration's
+    rig_check.py opens its preview through this too, so the index discover_camera() found means
+    the same device there. """
+    for api in (cv2.CAP_DSHOW, cv2.CAP_ANY):
+        cap = cv2.VideoCapture(index, api)
+        if cap.isOpened():
+            if fps and api == cv2.CAP_DSHOW:
+                cap.set(cv2.CAP_PROP_FPS, fps)
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return cap
+        cap.release()
+    return None
+
+
+def _discover_camera_capture(max_index=5, fps=None):
     """ Same probe as discover_camera(), but returns (index, open_capture) instead of releasing
     the capture it just verified works -- CameraRecorder.__init__() reuses it directly rather than
     closing it and immediately reopening the same index from scratch. Confirmed as a real,
@@ -114,12 +140,9 @@ def _discover_camera_capture(max_index=5):
     capture open (e.g. Calibration/rig_check.py, which opens its own separate preview-only capture
     later) should keep using discover_camera(). """
     for index in range(max_index):
-        cap = cv2.VideoCapture(index)
-        if cap.isOpened():
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                return index, cap
-        cap.release()
+        cap = open_capture(index, fps)
+        if cap is not None:
+            return index, cap
     raise RuntimeError("No working camera found in indices 0..{0}".format(max_index - 1))
 
 
@@ -158,17 +181,21 @@ class CameraRecorder(object):
         self._log_python_t0 = log_python_t0
         if camera_index is not None:
             self.camera_index = camera_index
-            self._cap = cv2.VideoCapture(self.camera_index)
+            self._cap = open_capture(self.camera_index, fps)
         else:
             # Reuses the already-open capture _discover_camera_capture() just verified works --
             # see its own docstring for why opening this a SECOND time (the old behavior: discover
             # the index, release it, then open it again here) cost a real, confirmed extra ~17s.
-            self.camera_index, self._cap = _discover_camera_capture()
+            self.camera_index, self._cap = _discover_camera_capture(fps=fps)
         self.output_path = output_path
         self.fps = fps
 
-        if not self._cap.isOpened():
+        if self._cap is None or not self._cap.isOpened():
             raise RuntimeError("Could not open camera index {0}".format(self.camera_index))
+        try:
+            self.backend = self._cap.getBackendName()   # registered as CAMERA_BACKEND
+        except Exception:
+            self.backend = 'unknown'
 
         width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -186,6 +213,15 @@ class CameraRecorder(object):
         self._timestamps = []   # list of (frame_index, timestamp_s) -- see module docstring
         self._stop_event = None
         self._thread = None
+        # Encoding + disk writes run on their own thread (2026-11-02): with read and write on one
+        # thread, one slow VideoWriter.write() (a 113MB file by the end of a 22-min session)
+        # delayed the next read, a 229ms frame gap in session 20261102-161142 while the wheel and
+        # CSV logged normally. Bounded at ~2s of frames; when full, the capture thread waits
+        # rather than drop frames.
+        self._write_queue = queue.Queue(maxsize=max(10, int(2 * self.fps)))
+        self._writer_thread = None
+        self.max_read_ms = 0.0    # longest cap.read(), registered as CAMERA_MAX_READ_MS
+        self.max_write_ms = 0.0   # longest VideoWriter.write(), registered as CAMERA_MAX_WRITE_MS
 
         self.start_time_s = None
 
@@ -200,8 +236,8 @@ class CameraRecorder(object):
                 self._app = QApplication(sys.argv)
             self._preview_widget = _PreviewWidget()
 
-        print("CameraRecorder: index {0}, {1}x{2} @ {3}fps -> {4}".format(
-            self.camera_index, width, height, self.fps, self.output_path), flush=True)
+        print("CameraRecorder: index {0} ({1}), {2}x{3} @ {4}fps -> {5}".format(
+            self.camera_index, self.backend, width, height, self.fps, self.output_path), flush=True)
 
     def show(self):
         """ Shows the preview widget continuously (repainted on every pump() call), if enabled --
@@ -223,7 +259,7 @@ class CameraRecorder(object):
         own Bpod serial I/O and Qt event processing, in scripts (like full_protocol_lookback_test.py)
         that already run other background threads and have a documented GIL-pressure crash history.
         Recording itself is completely unaffected either way -- this only controls the PREVIEW
-        WIDGET's own visibility/update window, never the background capture+write thread.
+        WIDGET's own visibility/update window, never the background capture/writer threads.
         No-op if preview wasn't enabled at construction.
         """
         if self._preview_widget is not None:
@@ -231,13 +267,35 @@ class CameraRecorder(object):
             self._preview_widget.show()
 
     def start(self):
-        """ Spawns the background capture+write thread and records start_time_s (see module
+        """ Spawns the background capture and writer threads and records start_time_s (see module
         docstring's "Time sync" section) -- call once, before the first pump(). """
         self.start_time_s = host_clock.now() - self._log_python_t0
         self._stop_event = threading.Event()
+        self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
+        self._writer_thread.start()
         self._thread = threading.Thread(target=self._capture_loop, args=(self._stop_event,),
                                          daemon=True)
         self._thread.start()
+
+    def _write_loop(self):
+        """ Writes queued frames (and every Nth one as the live JPEG) until the None sentinel
+        close() queues after the capture thread has stopped. """
+        while True:
+            item = self._write_queue.get()
+            if item is None:
+                return
+            frame, write_jpeg = item
+            try:
+                t = time.perf_counter()
+                self._writer.write(frame)
+                self.max_write_ms = max(self.max_write_ms, (time.perf_counter() - t) * 1e3)
+            except Exception:
+                pass
+            if write_jpeg:
+                try:
+                    cv2.imwrite(self._live_frame_path, frame)
+                except Exception:
+                    pass   # best-effort -- never let a preview-file write disrupt recording
 
     def _capture_loop(self, stop_event):
         # Rate-limited to ~self.fps, same "measure elapsed, sleep the remainder" shape as this
@@ -248,28 +306,31 @@ class CameraRecorder(object):
         # as fast as the CPU allows, hammering the GIL against the main thread's own Bpod serial
         # I/O and Qt event processing -- confirmed on hardware as the cause of a real "very laggy"
         # symptom the first time this ran without this throttle.
-        frame_interval = (1.0 / self.fps) if self.fps > 0 else 0
+        # The minimum loop period is HALF a frame interval (2026-11-03), not a whole one: with a
+        # whole one, read + bookkeeping made every iteration a little longer than the camera's own
+        # frame period, so the loop never caught up -- frames queued in the driver and dropped
+        # (28.5fps realized from a 30fps camera, median interval 35ms, in every session through
+        # 20261102-161142). A camera-paced read (~33ms) now never sleeps, a backlog drains, and
+        # a backend that returns instantly is still held to 2x fps.
+        min_period = (CAPTURE_MIN_PERIOD_FRACTION / self.fps) if self.fps > 0 else 0
         frame_index = 0
         while not stop_event.is_set():
             loop_start = host_clock.now()
             try:
                 with self._cap_lock:
+                    t_read = time.perf_counter()
                     ok, frame = self._cap.read()
+                    self.max_read_ms = max(self.max_read_ms, (time.perf_counter() - t_read) * 1e3)
                 t = host_clock.now() - self._log_python_t0
-                if not ok or frame is None:
-                    continue
-                self._writer.write(frame)
-                self._timestamps.append((frame_index, t))
-                if frame_index % self._live_frame_write_interval == 0:
-                    try:
-                        cv2.imwrite(self._live_frame_path, frame)
-                    except Exception:
-                        pass   # best-effort -- never let a preview-file write disrupt recording
-                frame_index += 1
-                self._latest_frame = frame
+                if ok and frame is not None:
+                    self._timestamps.append((frame_index, t))
+                    self._write_queue.put((frame,
+                                           frame_index % self._live_frame_write_interval == 0))
+                    frame_index += 1
+                    self._latest_frame = frame
             except Exception:
                 break
-            sleep_time = frame_interval - (host_clock.now() - loop_start)
+            sleep_time = min_period - (host_clock.now() - loop_start)
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -305,7 +366,19 @@ class CameraRecorder(object):
             self._thread.join(timeout=3.0)
 
         self._cap.release()
-        self._writer.release()
+        writer_done = True
+        if self._writer_thread is not None:
+            try:
+                self._write_queue.put(None, timeout=30.0)   # after every frame already queued
+                self._writer_thread.join(timeout=30.0)
+            except queue.Full:
+                pass
+            writer_done = not self._writer_thread.is_alive()
+        if writer_done:
+            self._writer.release()
+        else:
+            print("CameraRecorder: video writer still busy after 30s -- not finalizing {0} "
+                  "(the file may be truncated)".format(self.output_path), flush=True)
         self._save_timestamps()
 
         if self._preview_widget is not None:
@@ -313,12 +386,11 @@ class CameraRecorder(object):
 
     def compute_realized_fps(self):
         """ The REALIZED delivered frame rate, from this recorder's own per-frame timestamps --
-        as opposed to self.fps (the nominal/requested rate passed to the constructor). The capture
-        loop's own throttle (see _capture_loop's comment) can only ever slow the loop DOWN toward
-        self.fps when an iteration finishes early; it cannot speed the loop up past self.fps when
-        real per-iteration cost (cap.read() + writer + GIL contention) exceeds 1/fps -- confirmed
-        as the cause of a real nominal-vs-realized gap on hardware (30.0 nominal, ~21.3Hz
-        realized). Call after close() (once self._timestamps is complete) -- returns None if
+        as opposed to self.fps (the nominal/requested rate passed to the constructor). It is
+        what the camera actually delivered and the loop actually read: below self.fps when the
+        camera runs slower (e.g. long exposures in a dark rig) or when the loop falls behind
+        (30.0 nominal, ~21.3Hz realized on early hardware; 28.5 under the old whole-frame
+        throttle, see _capture_loop's comment). Call after close() (once self._timestamps is complete) -- returns None if
         fewer than 2 frames were captured. """
         if len(self._timestamps) < 2:
             return None

@@ -138,6 +138,9 @@ def _cleanup_and_export():
     realized_fps = camera.compute_realized_fps()
     if realized_fps is not None:
         my_bpod.register_value('CAMERA_FPS_REALIZED', realized_fps)
+    # longest frame read / video write -- tells a camera frame gap's cause (see CameraRecorder)
+    my_bpod.register_value('CAMERA_MAX_READ_MS', camera.max_read_ms)
+    my_bpod.register_value('CAMERA_MAX_WRITE_MS', camera.max_write_ms)
     dot.close()
     hifi.close()
     rotary.close()
@@ -465,6 +468,7 @@ camera.start()
 my_bpod.register_value('CAMERA_START_TIME', camera.start_time_s)
 my_bpod.register_value('CAMERA_OUTPUT_PATH', camera.output_path)
 my_bpod.register_value('CAMERA_FPS', camera.fps)
+my_bpod.register_value('CAMERA_BACKEND', camera.backend)
 
 # Geometry-aware gain (same derivation as every other dot-coupled script), signed via
 # rotary_setup.screen_direction_gain() for this rig's confirmed wheel->screen direction.

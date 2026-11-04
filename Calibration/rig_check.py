@@ -83,7 +83,7 @@ sys.path.insert(0, os.path.join(_CALIBRATION_DIR, '..', '_projects', '_shared'))
 import rotary_setup
 import hifi_setup
 from bpod_trial_helpers import was_visited
-from camera_recorder import discover_camera
+from camera_recorder import discover_camera, open_capture
 from click_train_v2 import VAR_CLICK_DURATION_S, VAR_CLICK_RAMP_MS
 
 from pybpod_hifi_module.module_api import HiFiModule
@@ -133,11 +133,12 @@ class CameraCheckThread(QThread):
         self._stop_requested = True
 
     def run(self):
-        cap = cv2.VideoCapture(self.camera_index)
+        # same backend (and so the same device order) as discover_camera() -- see camera_recorder.py
+        cap = open_capture(self.camera_index, self.fps)
+        if cap is None:
+            self.error.emit('Could not open camera index {0}'.format(self.camera_index))
+            return
         try:
-            if not cap.isOpened():
-                self.error.emit('Could not open camera index {0}'.format(self.camera_index))
-                return
             frame_interval = (1.0 / self.fps) if self.fps > 0 else 0
             while not self._stop_requested:
                 loop_start = time.time()

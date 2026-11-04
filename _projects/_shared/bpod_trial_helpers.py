@@ -43,6 +43,7 @@ and reward states are entered instead of guessing from a host timer.
 require_no_lick=True remains dead code on purpose (every caller passes False) -- see CLAUDE.md
 before re-enabling it.
 """
+import gc
 import math
 import sys
 import threading
@@ -64,8 +65,11 @@ BPOD_LOOP_SLEEP_S = 0.005        # per-iteration sleep in pybpod's run loop (str
                                   # TrialRunner.start() for the rig measurement behind this value
 WHEEL_LOG_MIN_INTERVAL_S = 0.05   # stream mode: a WHEEL_POS row is written whenever the position
                                   # changes, and at least this often while it holds still
+WHEEL_KEEPALIVE_MARGIN_S = 0.005  # keepalive rows stop this far before RotaryStream.caught_up_t()
 WHEEL_LOG_PUMP_INTERVAL_S = 0.025 # how often pump() writes the buffered stream samples to the CSV
                                   # (also the keepalive cadence while the wheel is still)
+GC_FULL_THRESHOLD_HOLD = 10 ** 9  # generation-2 threshold during a session: automatic full
+                                  # collections never trigger (see _hold_full_gc())
 
 
 # PC -> Bpod events (TrialRunner.inject_softcode()). MATLAB's SendBpodSoftCode(N) and pybpod's
@@ -270,6 +274,56 @@ def _set_windows_process_priority(high):
         return False
 
 
+_gc_saved_threshold = None
+_gc_start_t = None
+_gc_max_s = 0.0
+
+
+def _gc_timer(phase, info):
+    """ gc.callbacks hook: times every collection, any generation (runs with the GIL held). """
+    global _gc_start_t, _gc_max_s
+    if phase == 'start':
+        _gc_start_t = time.perf_counter()
+    elif _gc_start_t is not None:
+        _gc_max_s = max(_gc_max_s, time.perf_counter() - _gc_start_t)
+        _gc_start_t = None
+
+
+def _hold_full_gc(enable):
+    """ Stops (or restores) CPython's automatic FULL garbage collections, and times every
+    collection (pop_gc_max_ms()). A full collection holds the GIL while it scans every tracked
+    object, and the heap grows all session (pybpod keeps every message in memory). In Stage 2
+    session 20261102-161142 the reader, render loop and log lock all stalled together on trials
+    75/101/144/191/249 for 46/54/59/72/87ms, with stalls growing longer and further apart as the
+    heap grew; landing between machines, the same stall stretched INTER_TRIAL_GAP_MS to
+    69-116ms (lick-blind). Generation 0/1 collections stay automatic (they only scan young
+    objects); reference counting still frees everything that isn't cyclic, so the cost is cyclic
+    garbage waiting until the session ends. Python 3.6 has no gc.freeze(). """
+    global _gc_saved_threshold, _gc_max_s
+    if enable:
+        if _gc_saved_threshold is None:
+            _gc_saved_threshold = gc.get_threshold()
+            gc.set_threshold(_gc_saved_threshold[0], _gc_saved_threshold[1],
+                             GC_FULL_THRESHOLD_HOLD)
+        if _gc_timer not in gc.callbacks:
+            gc.callbacks.append(_gc_timer)
+        _gc_max_s = 0.0
+    else:
+        if _gc_saved_threshold is not None:
+            gc.set_threshold(*_gc_saved_threshold)
+            _gc_saved_threshold = None
+        if _gc_timer in gc.callbacks:
+            gc.callbacks.remove(_gc_timer)
+    return True
+
+
+def pop_gc_max_ms():
+    """ Longest garbage collection since the last call (ms), registered per trial as GC_MAX_MS. """
+    global _gc_max_s
+    longest, _gc_max_s = _gc_max_s, 0.0
+    return longest * 1e3
+
+
 class _InjectableStdin(object):
     """ Stands in for `bpod.stdin` (pybpod's NonBlockingStreamReader over sys.stdin, or None).
     run_state_machine() polls `self.stdin.readline()` on every loop iteration and acts on the line
@@ -405,6 +459,10 @@ class TrialRunner(object):
             # 120s each -- normal: 4 stalls/max 60ms and 2/27ms (a 1ms sleeper woke 58-77ms late);
             # high: 2/33.5ms and 0/25ms (sleeper <= 26ms).
             self._win_priority = _set_windows_process_priority(True)
+            # The stalls that were left hit every thread at once, growing with session length:
+            # automatic full garbage collections (see _hold_full_gc()). stall_diag.py's 120s runs
+            # couldn't see them -- a 120s heap is too small for a full collection to matter.
+            self._gc_held = _hold_full_gc(True)
 
     def stop(self):
         """ Stream mode: writes any not-yet-logged wheel samples, then stops the stream -- call
@@ -419,6 +477,8 @@ class TrialRunner(object):
                 _set_windows_timer_resolution(False)
             if getattr(self, '_win_priority', False):
                 _set_windows_process_priority(False)
+            if getattr(self, '_gc_held', False):
+                _hold_full_gc(False)
 
     def register(self, key, value, flush=True):
         with self.register_lock:
@@ -489,11 +549,18 @@ class TrialRunner(object):
             return
         with self._wheel_log_lock:
             t_lock = host_clock.now()
+            # read BEFORE draining: every sample ingested before that moment is then in `samples`
+            caught_up = getattr(self.stream, 'caught_up_t', lambda: None)()
             samples = self.stream.drain_for_logging()
             offset = self.stream.module_to_host(0.0)
             last = self._wheel_log_last
             if not samples:
                 now = self._now()
+                # Only as far as the reader has verifiably seen no change (see
+                # RotaryStream.caught_up_t()): a keepalive past that could land ahead of samples
+                # still in flight.
+                if caught_up is not None:
+                    now = min(now, caught_up - WHEEL_KEEPALIVE_MARGIN_S)
                 if offset is None or (last is not None and now - last[0] < WHEEL_LOG_MIN_INTERVAL_S):
                     return
                 # No new sample means the position has not changed since the last one (the

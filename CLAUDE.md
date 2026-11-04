@@ -813,6 +813,26 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   stays unchanged (still reports the real rolling value for logging/display regardless of window
   fullness), only the withhold-triggering `in_band()`/`over_used_side()`/`should_withhold()` chain
   is gated.
+  **Since 2026-11-02 the gate is 20 known directions, and the window carries over between
+  sessions** (`recent_directions` in the state file, `DIRECTION_HISTORY_SEEDED` VAL). The old
+  "full 40-trial window of this session" gate let UM001 turn left on 22/22 trials of
+  `20261102-160353`, all rewarded, with `DIRECTION_RATIO` sitting at 0.0. UM001's state was
+  seeded by hand from its last two Stage 2 sessions (right fraction 0.28, so left turns are
+  withheld from the next session's first trial).
+  **Since later on 2026-11-02 the ratio is recency-weighted and a withheld turn is a staircase
+  failure.** In `20261102-161142` UM001 turned in long runs (R×31, L×29, …; 22% switches). The
+  flat 40-trial ratio rewarded each run for ~16 trials, then withheld until the animal flipped,
+  so the session oscillated. The threshold sat at its 35° ceiling throughout, because a withheld
+  turn counted as a success. Now `right_fraction()` is half-Gaussian weighted (sigma 8, about 10
+  effective trials), the gate is 10 known directions, and `DIRECTION_RATIO_FLAT` logs the old
+  value. Replayed on that session's turns, the R×31 run would have earned 6 rewards instead of 23.
+  5 failures in a row (withheld or no-movement) step the threshold down, to a floor of 0.20.
+  Withheld turns still count toward the 100-trial advancement gate.
+  **Since 2026-11-03 a side-biased day also halves the next day's starting threshold** (per
+  explicit instruction): if ≥ 20% of the previous Stage 2 day's turns were withheld, the first
+  session of the day starts at half, min 10°. It's checked once per day via the state key
+  `bias_day_checked` and saved at once, so a restart after Stop/Kill/crash neither halves again
+  nor reverts. UM001's 20261102 (65 of 249 withheld) takes it from 35° to 17.5°.
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching
@@ -928,7 +948,8 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     - Previously, polling the Bpod's USB serial port continuously made *every* thread in the
       process wake 25–93 ms late (74 stalls > 25 ms per 120 s, including a thread only doing
       `sleep(1ms)`). These were the audit's "rotary reader stalls"; garbage collection, the camera
-      and the serial read itself were ruled out.
+      and the serial read itself were ruled out. (Garbage collection only for a 120 s run: in
+      long sessions it is the main remaining stall, see "Full garbage collections" below.)
     - With the 5 ms sleep: 0–2 stalls per 120 s, all ≤ 41 ms.
     - Cost: the dot handshake `DotOn` → response is 20 ms on the Bpod clock, instead of 7 ms.
       Event timing is unaffected (hardware timestamps).
@@ -1053,6 +1074,56 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     - Deleting the session folder also removes its water from `water_consumed_today()`.
     - Copies of the removed sessions and the pre-restore state file went to the session
       scratchpad, which is temporary.
+  - **Keepalive `WHEEL_POS` rows stop at the reader's caught-up time** (2026-11-02,
+    `RotaryStream.caught_up_t()`). `flush_wheel_log()` treated "no new samples" as "wheel
+    still" and wrote keepalive rows up to now. When the reader thread was briefly behind
+    (session `20261102-161142`, t=763.5 s), a row landed ahead of samples still in flight. The
+    never-backward clamp then pinned 6 of them to that row's time (audit: 5 frozen samples).
+  - **Camera frames are written on their own thread** (2026-11-02). With `cap.read()` and
+    `VideoWriter.write()` on one thread, one slow write gave a 229 ms frame gap while the wheel and
+    CSV logged normally (`20261102-161142`). `CAMERA_MAX_READ_MS`/`CAMERA_MAX_WRITE_MS` now say
+    which side a future gap came from.
+  - **Full garbage collections are held off for the session** (2026-11-03,
+    `bpod_trial_helpers._hold_full_gc()`, called from `TrialRunner.start()`/`stop()`).
+    - In `20261102-161142` (250 trials), the reader, render loop and log lock stalled TOGETHER on
+      trials 75/101/144/191/249 for 46/54/59/72/87 ms. Landing between machines, the same stall
+      stretched `INTER_TRIAL_GAP_MS` to 69/80/95/116 ms (trials 50/143/190/248), which is
+      lick-blind time.
+    - The stalls grow longer and further apart (26 → 58 trials) as the session goes on. That
+      matches CPython's automatic full (generation-2) collection, which holds the GIL while it
+      scans every tracked object, on a heap that grows all session (pybpod keeps every message).
+    - The 120 s `stall_diag` runs couldn't see this: their heap was too small.
+    - Now the generation-2 threshold is set to 10⁹ for the session (Python 3.6 has no
+      `gc.freeze()`). Generation 0/1 collections stay automatic, and only cyclic garbage waits.
+    - Every collection is timed; the per-trial max is registered as `GC_MAX_MS`. The audit
+      reports it as INFO.
+    - **Not yet confirmed on the rig.** The GC cause is inferred from the pattern above. A
+      full-length session should show no more joint reader+render+log-lock stalls, and
+      `GC_MAX_MS` of a few ms at most.
+  - **Camera: DirectShow backend, and the capture loop can catch up** (2026-11-03,
+    `camera_recorder.open_capture()`).
+    - Every session through `20261102-161142` ran at 28.5 fps (median interval 35 ms) from a
+      30 fps camera. The loop's minimum period was one whole frame interval, so read plus
+      bookkeeping made each iteration slightly longer than the camera's own period. A backlog
+      never drained: frames waited in the driver and were dropped, and each frame's timestamp is
+      when `read()` returned, so it was late by however many frames were queued. In the suite's
+      stub, a 5-frame backlog left frames read ~234 ms late, still growing.
+    - The minimum period is now half a frame (`CAPTURE_MIN_PERIOD_FRACTION`). A camera-paced
+      read never sleeps, and an instant-returning backend is still capped at 2× fps.
+    - OpenCV's default backend (MSMF) delivered in bursts on training05: 21–31 gaps > 50 ms per
+      15 s. DirectShow was steady: no gap > 50 ms, max 49 ms. `CameraRecorder` on training05 with
+      both changes: DSHOW, 29.85 fps realized, interval p1 31 ms, max 49 ms over 20 s.
+    - `open_capture()` tries DirectShow, then falls back to the default backend. The backend is
+      registered as `CAMERA_BACKEND`.
+    - An explicit camera index follows DirectShow's device order. The stages use discovery, and
+      `Calibration/rig_check.py` opens its preview through `open_capture()` too, so the two
+      agree. On a box with a virtual camera (OBS etc.), DirectShow may list it first: check
+      `CAMERA_BACKEND` and the preview.
+  - **The dashboard skips polls with no new CSV bytes, and runs the audit on a worker thread**
+    (2026-11-02). After a 250-trial session it kept rebuilding the wheel panel every 500 ms poll,
+    forever: `cla()` plus one artist per trial line, 0.62 s per poll. The audit (~5.5 s) also
+    froze the window at session end. The panel now uses persistent artists (one line, two
+    `LineCollection`s): 143 ms per redraw with new data, nothing when idle.
   - **A render-loop frame can block for ~0.5–1 s with nothing else wrong.** In `20261030-142131`
     trial 181, the camera and the rotary reader ran normally, so it wasn't the GIL or the
     process. Only the main thread stopped, inside Qt's `processEvents()`. That fits a task

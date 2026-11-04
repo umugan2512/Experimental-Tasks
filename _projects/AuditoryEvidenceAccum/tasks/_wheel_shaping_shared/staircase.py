@@ -51,8 +51,13 @@ class ThresholdStaircase(object):
     consecutive_successes/consecutive_failures all round-trip through it), not reset to an initial
     value -- the whole point of the staircase is that it survives across days. """
 
-    def __init__(self, current_fraction, consecutive_successes=0, consecutive_failures=0):
+    def __init__(self, current_fraction, consecutive_successes=0, consecutive_failures=0,
+                 floor=0.0):
+        """ :param floor: lowest fraction a step-down can reach. Stage 2 passes its own starting
+        point (0.20) since 2026-11-02, when withheld turns started counting as failures. A value
+        already below the floor is never raised by a step-down. """
         self.current_fraction = current_fraction
+        self.floor = floor
         self.consecutive_successes = consecutive_successes
         self.consecutive_failures = consecutive_failures
 
@@ -69,7 +74,8 @@ class ThresholdStaircase(object):
             self.consecutive_failures += 1
             self.consecutive_successes = 0
             if self.consecutive_failures >= STAIRCASE_FAILURES_TO_STEP_DOWN:
-                self.current_fraction = max(0.0, self.current_fraction - STAIRCASE_STEP_DOWN)
+                self.current_fraction = max(min(self.floor, self.current_fraction),
+                                            self.current_fraction - STAIRCASE_STEP_DOWN)
                 self.consecutive_failures = 0
 
 
@@ -91,6 +97,17 @@ def decay_gain(prev_gain_mult):
     """ -GAIN_DECAY_STEP_PER_SESSION per qualifying (>200 trial) session, floor at GAIN_FLOOR_MULT
     -- call once per qualifying session (not per trial), same call-site shape as grow_iti(). """
     return max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION)
+
+
+def bias_day_start_fraction(fraction, withheld_fraction, trigger, min_fraction):
+    """ Stage 2's threshold for the first session of a day after a side-biased day: half of
+    `fraction` when `withheld_fraction` (of the previous day's turns) is >= `trigger`, but not
+    below `min_fraction`, and never raised (a threshold already under the minimum stays). Per
+    explicit instruction (2026-11-03), after UM001's 20261102 sessions withheld 26% of turns while
+    the threshold sat at 35 deg all day. """
+    if withheld_fraction is None or withheld_fraction < trigger:
+        return fraction
+    return min(fraction, max(min_fraction, fraction / 2.0))
 
 
 def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_count_gate=200):
