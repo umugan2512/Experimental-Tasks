@@ -1354,8 +1354,10 @@ non-obvious design choices:
   then commits ONLY data (`training_log.xlsx` + `experiments/` session files) onto `main` via a
   temporary index (no checkout of `main`) and writes the main->branch merge commit by hand —
   a plain `git merge` refuses because the new data files already exist on disk untracked.
-  `commit_data_locally()` (the same commit, no push) runs after every `run_session.py` Save;
-  `Sync Training Log.bat` also pushes. Uses `git add --ignore-removal`, so deleting old local
+  Every `run_session.py` weight/notes Save commits and pushes (`sync(rebuild=False)`, since
+  2026-11-05; it used to be `commit_data_locally()`, commit only). If the push fails the commit
+  stays local and the dashboard's save label says so. `Sync Training Log.bat` also rebuilds
+  the workbook first. Uses `git add --ignore-removal`, so deleting old local
   sessions never deletes them from `main`.
 - **One mouse, one computer — nothing another computer wrote is overwritten.** Since session data
   is shared, every box has every box's sessions on disk, so `build_training_log.build_workbook()`

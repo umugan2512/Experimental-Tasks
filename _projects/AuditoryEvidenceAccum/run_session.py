@@ -2337,12 +2337,14 @@ class SessionRunnerWindow(QWidget):
         else:
             saved_text = ('Header fields saved -- session row not found yet '
                           '(try again once the session has at least one trial).')
-        self.save_status_label.setText(saved_text + ' Committing to main...')
+        self.save_status_label.setText(saved_text + ' Committing and pushing to main...')
         self._commit_training_log(saved_text)
 
     def _commit_training_log(self, saved_text):
-        """ Commits the just-saved training_log.xlsx and any new session data onto the local
-        `main` branch (never pushes -- see sync_training_log.commit_data_locally()). Runs on a
+        """ Commits the just-saved training_log.xlsx and any new session data onto `main` and
+        pushes it (sync_training_log.sync(rebuild=False): fetch, commit, merge in other
+        computers' data, push; since 2026-11-05, it used to commit locally only). If the push
+        fails (offline, say), the commit stays local and the label says so. Runs on a
         background thread since git can be slow on some rigs (CLAUDE.md's Stage 3 startup-freeze
         note), polled via QTimer so the label is only ever touched from the GUI thread. The Save
         button stays disabled meanwhile, so a second save can't rewrite the file while git is
@@ -2351,10 +2353,10 @@ class SessionRunnerWindow(QWidget):
 
         def work():
             try:
-                result['msg'] = sync_training_log.commit_data_locally()
+                result['msg'] = sync_training_log.sync(rebuild=False)
             except Exception as err:
                 print(traceback.format_exc(), flush=True)
-                result['msg'] = 'Commit to main FAILED: {0}'.format(err)
+                result['msg'] = 'Commit/push to main FAILED: {0}'.format(err)
 
         thread = threading.Thread(target=work, daemon=True)
         self.save_weight_button.setEnabled(False)
