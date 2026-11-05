@@ -201,7 +201,12 @@ print("  Stage 1 threshold after 8th session (expect ceiling 0.20, Stage 2's own
 print("  Stage 1 threshold never exceeds the 0.20 ceiling on further growth: {0}".format(
     threshold_stays_at_ceiling))
 
-section2_pass = (iti_before_ceiling and iti_at_ceiling and iti_stays_at_ceiling and
+# session-level steps are rounded: no 0.9999999999999999 / 2.3999999999999995 in the state file
+steps_rounded = (staircase.grow_iti(0.9) == 1.0 and staircase.decay_gain(2.5) == 2.4
+                 and staircase.grow_stage1_threshold(0.16) == 0.18)
+print("  grow_iti(0.9) == 1.0, decay_gain(2.5) == 2.4, grow_stage1_threshold(0.16) == 0.18 exactly: {0}".format(
+    steps_rounded))
+section2_pass = steps_rounded and (iti_before_ceiling and iti_at_ceiling and iti_stays_at_ceiling and
                   gain_before_floor and gain_at_floor and gain_stays_at_floor and
                   threshold_before_ceiling and threshold_at_ceiling and threshold_stays_at_ceiling)
 print("Section 2 result: {0}".format("PASS" if section2_pass else "FAIL -- see checks above"))

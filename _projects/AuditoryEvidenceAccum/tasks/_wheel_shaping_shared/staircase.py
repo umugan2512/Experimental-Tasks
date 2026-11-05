@@ -89,7 +89,7 @@ class ThresholdStaircase(object):
 def grow_iti(prev_iti_s):
     """ +ITI_GROWTH_PER_SESSION_S per qualifying session, ceiling at ITI_CEILING_S -- call once per
     session (not per trial), per training_protocol.md Stage 2(b). """
-    return min(ITI_CEILING_S, prev_iti_s + ITI_GROWTH_PER_SESSION_S)
+    return round(min(ITI_CEILING_S, prev_iti_s + ITI_GROWTH_PER_SESSION_S), 6)
 
 
 def grow_stage1_threshold(prev_fraction):
@@ -97,13 +97,14 @@ def grow_stage1_threshold(prev_fraction):
     THRESHOLD_GROWTH_CEILING_FRACTION -- call once per qualifying session (not per trial), same
     call-site shape as grow_iti(). Not ThresholdStaircase: Stage 1 doesn't get a per-trial,
     consecutive-count-driven staircase, just this fixed session-level step. """
-    return min(THRESHOLD_GROWTH_CEILING_FRACTION, prev_fraction + THRESHOLD_GROWTH_PER_SESSION_FRACTION)
+    return round(min(THRESHOLD_GROWTH_CEILING_FRACTION,
+                     prev_fraction + THRESHOLD_GROWTH_PER_SESSION_FRACTION), 6)
 
 
 def decay_gain(prev_gain_mult):
     """ -GAIN_DECAY_STEP_PER_SESSION per qualifying (>200 trial) session, floor at GAIN_FLOOR_MULT
     -- call once per qualifying session (not per trial), same call-site shape as grow_iti(). """
-    return max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION)
+    return round(max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION), 6)
 
 
 def bias_day_start_fraction(fraction, withheld_fraction, trigger, min_fraction):
