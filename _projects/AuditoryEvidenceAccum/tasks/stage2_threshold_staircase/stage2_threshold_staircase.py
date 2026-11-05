@@ -166,7 +166,7 @@ VAR_TRIAL_COUNT_ADVANCE = 100       # The QUALIFYING threshold only (lowered fro
                                      # VAR_TRIAL_CAP below) -- those two numbers used to share
                                      # one variable/value, but per explicit instruction they're
                                      # now independent.
-VAR_TRIAL_CAP = 250                 # The session's own hard trial-count cap (one of three --
+VAR_TRIAL_CAP = 300                 # The session's own hard trial-count cap (one of three --
                                      # see below), checked against every ATTEMPTED trial, not
                                      # the qualifying count above.
 VAR_DAILY_WATER_CAP_UL = 1500.0     # CONSUMED per animal per calendar DAY, across all of its

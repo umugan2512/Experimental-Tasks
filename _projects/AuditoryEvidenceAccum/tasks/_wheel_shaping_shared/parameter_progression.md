@@ -110,7 +110,7 @@ rewarded for ~16 trials before the ratio left the band.
 
 | Cap | Scope | Value |
 |---|---|---|
-| Trials attempted | per session | `VAR_TRIAL_CAP = 250` |
+| Trials attempted | per session | `VAR_TRIAL_CAP`: Stage 1 250, Stage 2 300 (since 2026-11-05) |
 | Water **consumed** (licked after delivery) | per animal per **calendar day**, all of its sessions | `VAR_DAILY_WATER_CAP_UL = 1500` |
 | Time | per session | 30 min |
 

@@ -720,7 +720,7 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   i.e. on aborts and incorrect choices only, never on a correct trial and never as a trial-start
   cue. Stage 1/2 have no error condition at all, so they never flash.
 - **A session's hard trial cap and its advancement-qualifying trial count are two different
-  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (250, per session) ends the session, checked against
+  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (per session: 250 in Stage 1, 300 in Stage 2 since 2026-11-05) ends the session, checked against
   every *attempted* trial, as does 30 min.
   - **Water is capped per animal per calendar DAY, not per session** (`VAR_DAILY_WATER_CAP_UL`,
     1.5 mL **consumed**). This was explicit instruction on 2026-10-28, after two back-to-back
