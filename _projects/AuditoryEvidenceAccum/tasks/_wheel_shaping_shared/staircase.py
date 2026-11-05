@@ -100,14 +100,15 @@ def decay_gain(prev_gain_mult):
 
 
 def bias_day_start_fraction(fraction, withheld_fraction, trigger, min_fraction):
-    """ Stage 2's threshold for the first session of a day after a side-biased day: half of
-    `fraction` when `withheld_fraction` (of the previous day's turns) is >= `trigger`, but not
-    below `min_fraction`, and never raised (a threshold already under the minimum stays). Per
-    explicit instruction (2026-11-03), after UM001's 20261102 sessions withheld 26% of turns while
-    the threshold sat at 35 deg all day. """
-    if withheld_fraction is None or withheld_fraction < trigger:
-        return fraction
-    return min(fraction, max(min_fraction, fraction / 2.0))
+    """ Stage 2's threshold for the first session of a day that follows an earlier Stage 2 day:
+    half of `fraction` when `withheld_fraction` (of the previous day's turns) is >= `trigger`, and
+    never below `min_fraction` -- a threshold already under it is raised to it, biased day or not.
+    Per explicit instruction: the halving after UM001's 20261102 (26% withheld at 35 deg all day,
+    2026-11-03), and the 12.5 deg day-start minimum after its 20261104 slid to the 7 deg staircase
+    floor (2026-11-05). """
+    if withheld_fraction is not None and withheld_fraction >= trigger:
+        fraction = fraction / 2.0
+    return max(min_fraction, fraction)
 
 
 def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_count_gate=200):

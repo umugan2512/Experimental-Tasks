@@ -1656,13 +1656,13 @@ scan_ok = (none21 is None and prev21 == ('20261102', 2, 10, ['20261102-090000', 
            and skip21 == ('20261030', 50, 50, ['20261030-090000']))
 print("  newest earlier day, this animal + Stage 2 only, sessions combined, NoMovement not a turn, "
       "today ignored, None without history: {0} ({1})".format(scan_ok, prev21))
-_m = 10.0 / 35
+_m = 12.5 / 35
 _b = staircase.bias_day_start_fraction
-halve_cases = [(_b(1.0, 0.26, 0.20, _m) * 35, 17.5), (_b(15.0 / 35, 0.20, 0.20, _m) * 35, 10.0),
-               (_b(8.0 / 35, 0.9, 0.20, _m) * 35, 8.0), (_b(1.0, 0.19, 0.20, _m) * 35, 35.0),
-               (_b(1.0, None, 0.20, _m) * 35, 35.0)]
+halve_cases = [(_b(1.0, 0.26, 0.20, _m) * 35, 17.5), (_b(15.0 / 35, 0.20, 0.20, _m) * 35, 12.5),
+               (_b(7.0 / 35, 0.21, 0.20, _m) * 35, 12.5), (_b(7.0 / 35, 0.10, 0.20, _m) * 35, 12.5),
+               (_b(1.0, 0.19, 0.20, _m) * 35, 35.0), (_b(20.0 / 35, None, 0.20, _m) * 35, 20.0)]
 halve_ok = all(abs(a - b) < 1e-9 for a, b in halve_cases)
-print("  35->17.5, 15->10 (min), 8 kept, 19% and no history unchanged: {0} ({1})".format(
+print("  35->17.5, 15->12.5 (min), 7->12.5 biased or not, 19% and no history unchanged: {0} ({1})".format(
     halve_ok, [round(a, 2) for a, _ in halve_cases]))
 
 section21_pass = scan_ok and halve_ok

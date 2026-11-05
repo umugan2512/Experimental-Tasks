@@ -8,8 +8,8 @@ introduces errors/clicks, so nothing else is still changing when clicks are intr
 concurrent processes: (a) threshold staircase, +10% per 20 consecutive successes / -10% per 5
 consecutive failures, ceiling at the final threshold, floor at Stage 2's 20% start (a withheld turn
 counts as a failure since 2026-11-02, so an animal stuck on one side gets an easier threshold; and
-since 2026-11-03 the first session of a day starts at half the threshold, min 10deg, when >= 20% of
-the previous day's turns were withheld); (b) ITI +0.1s/qualifying-session to a 1.5s
+since 2026-11-03 the first session of a day starts at half the threshold when >= 20% of the previous
+day's turns were withheld; since 2026-11-05 every day after the first starts at >= 12.5deg); (b) ITI +0.1s/qualifying-session to a 1.5s
 ceiling; (c) spout retraction ~2-3mm/qualifying-session (physical, manual -- this script can only
 remind/log the schedule, there's no spout actuator to command); (d) side-bias management -- track
 the direction ratio over the last ~40 trials, withhold reward on the over-used side if it leaves
@@ -177,7 +177,10 @@ VAR_DAILY_WATER_CAP_UL = 1500.0     # CONSUMED per animal per calendar DAY, acro
 VAR_THRESHOLD_FLOOR_FRACTION = 0.20 # step-downs stop here (Stage 2's own starting point)
 VAR_BIAS_DAY_WITHHELD_TRIGGER = 0.20  # the first session of a day starts at half the threshold if
                                       # >= this fraction of the previous day's turns were withheld
-VAR_BIAS_DAY_MIN_THRESHOLD_DEG = 10.0 # ...but not below this (staircase.bias_day_start_fraction())
+VAR_DAY_START_MIN_THRESHOLD_DEG = 12.5  # ...and every day after the first Stage 2 day starts at
+                                        # >= this, raised if the staircase ended below it
+                                        # (staircase.bias_day_start_fraction()). The within-session
+                                        # floor is still VAR_THRESHOLD_FLOOR_FRACTION.
 VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
@@ -255,22 +258,27 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
 # both sides going: the first Stage 2 session of the next day starts at half of it. The check runs
 # once per day ('bias_day_checked'), and a halving is saved right away, so a restart after a
 # Stop, Kill or crash continues from the halved value instead of halving again or undoing it.
-# Registered as session-level VALs once the Bpod session exists.
+# The same check holds the day's start at >= VAR_DAY_START_MIN_THRESHOLD_DEG (not on the first
+# Stage 2 day, which keeps Stage 1's hand-off). Registered as session-level VALs once the Bpod
+# session exists.
 _today_str = os.path.basename(os.path.abspath(os.getcwd()))[:8]
 prev_day = None
 threshold_before_halving_fraction = state.get('threshold_fraction')
 threshold_bias_halved = False
+threshold_day_start_raised = False
 if state.get('bias_day_checked') != _today_str:
     prev_day = session_csv_parser.previous_day_withheld(
         VAR_PROJECT_DIR, VAR_SUBJECT_ID, _today_str, 'stage2_threshold_staircase')
-    _halved = staircase.bias_day_start_fraction(
-        threshold_before_halving_fraction, prev_day[1] / float(prev_day[2]) if prev_day else None,
-        VAR_BIAS_DAY_WITHHELD_TRIGGER, VAR_BIAS_DAY_MIN_THRESHOLD_DEG / VAR_THRESHOLD_FINAL_DEG)
-    if _halved < threshold_before_halving_fraction:
-        threshold_bias_halved = True
-        state.set('threshold_fraction', _halved)
-        state.set('consecutive_successes', 0)
-        state.set('consecutive_failures', 0)
+    if prev_day:
+        _start = staircase.bias_day_start_fraction(
+            threshold_before_halving_fraction, prev_day[1] / float(prev_day[2]),
+            VAR_BIAS_DAY_WITHHELD_TRIGGER, VAR_DAY_START_MIN_THRESHOLD_DEG / VAR_THRESHOLD_FINAL_DEG)
+        threshold_bias_halved = _start < threshold_before_halving_fraction
+        threshold_day_start_raised = _start > threshold_before_halving_fraction
+        if _start != threshold_before_halving_fraction:
+            state.set('threshold_fraction', _start)
+            state.set('consecutive_successes', 0)
+            state.set('consecutive_failures', 0)
     state.set('bias_day_checked', _today_str)
 
 staircase_obj = staircase.ThresholdStaircase(
@@ -321,15 +329,17 @@ my_bpod.register_value('PREV_DAY_DATE', prev_day[0] if prev_day else '')
 my_bpod.register_value('PREV_DAY_WITHHELD_FRACTION',
                        '{0:.4f}'.format(prev_day[1] / float(prev_day[2])) if prev_day else '')
 my_bpod.register_value('THRESHOLD_BIAS_HALVED', int(threshold_bias_halved))
+my_bpod.register_value('THRESHOLD_DAY_START_RAISED', int(threshold_day_start_raised))
 my_bpod.register_value('THRESHOLD_START_BEFORE_HALVING_DEG',
                        threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG)
 if prev_day:
     print("Previous Stage 2 day ({0}): {1}/{2} turns withheld ({3:.0%}) -- threshold {4}".format(
         prev_day[0], prev_day[1], prev_day[2], prev_day[1] / float(prev_day[2]),
-        '{0:.1f} -> {1:.1f}deg (halved, min {2:.0f}deg)'.format(
+        '{0:.1f} -> {1:.1f}deg ({2}, day-start min {3:.1f}deg)'.format(
             threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG,
-            cur_threshold_deg_at_start, VAR_BIAS_DAY_MIN_THRESHOLD_DEG)
-        if threshold_bias_halved else 'unchanged'), flush=True)
+            cur_threshold_deg_at_start, 'halved' if threshold_bias_halved else 'raised to the minimum',
+            VAR_DAY_START_MIN_THRESHOLD_DEG)
+        if threshold_bias_halved or threshold_day_start_raised else 'unchanged'), flush=True)
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.
