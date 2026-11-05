@@ -263,7 +263,7 @@ event_names = rotary_setup.set_and_enable_thresholds(
 rotary.enable_evt_transmission()
 neg_event, pos_event = event_names[0], event_names[1]
 
-my_bpod.register_value('THRESHOLD_DEG', cur_threshold_deg)
+my_bpod.register_value('THRESHOLD_DEG', round(cur_threshold_deg, 3))
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this

@@ -331,7 +331,7 @@ my_bpod.register_value('PREV_DAY_WITHHELD_FRACTION',
 my_bpod.register_value('THRESHOLD_BIAS_HALVED', int(threshold_bias_halved))
 my_bpod.register_value('THRESHOLD_DAY_START_RAISED', int(threshold_day_start_raised))
 my_bpod.register_value('THRESHOLD_START_BEFORE_HALVING_DEG',
-                       threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG)
+                       round(threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, 3))
 if prev_day:
     print("Previous Stage 2 day ({0}): {1}/{2} turns withheld ({3:.0%}) -- threshold {4}".format(
         prev_day[0], prev_day[1], prev_day[2], prev_day[1] / float(prev_day[2]),
@@ -601,7 +601,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
         runner.register('SM_RUN_TIME', send_t)
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
-        runner.register('THRESHOLD_DEG', cur_threshold_deg)
+        runner.register('THRESHOLD_DEG', round(cur_threshold_deg, 3))
         runner.register('DOT_ONSET_JITTER_S', dot_onset_jitter_s)
         register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_return_t,
                               visited, send_t)
@@ -627,14 +627,19 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         # is no movement-threshold staircase outcome either way -- but it IS a failed hold.
         # The staircase itself counts only a REWARDED turn as a success (2026-11-02): a withheld
         # turn is a failure, so 5 in a row step the threshold down. UM001 20261102-161142 sat at
-        # the 35deg ceiling for all 250 trials while 65 of its turns were withheld.
+        # the 35deg ceiling for all 250 trials while 65 of its turns were withheld. NoMovement is
+        # neutral since 2026-11-05 (record_neutral(): blocks a step-up, never steps down) --
+        # disengaged skips drove part of UM001 20261104's slide to the floor.
         if moved:
             session_trial_count += 1
         if rewarded:
             session_reward_ul_total += VAR_REWARD_UL
         if not early:
             fraction_before_step = staircase_obj.current_fraction
-            staircase_obj.record_outcome(success=rewarded)
+            if outcome == 'NoMovement':
+                staircase_obj.record_neutral()
+            else:
+                staircase_obj.record_outcome(success=rewarded)
             if staircase_obj.current_fraction > fraction_before_step:
                 session_saw_threshold_step_up = True
         if quiescence_unlocked:

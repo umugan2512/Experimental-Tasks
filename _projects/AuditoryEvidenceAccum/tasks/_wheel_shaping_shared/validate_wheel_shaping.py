@@ -112,8 +112,37 @@ for _ in range(5):
     sc_low.record_outcome(success=False)
 floor_ok = abs(sc_floor.current_fraction - 0.20) < 1e-9 and abs(sc_low.current_fraction - 0.10) < 1e-9
 print("  floor=0.20: 15 failures from 0.30 stop at 0.20; a value below the floor stays: {0}".format(floor_ok))
+# record_neutral() (Stage 2's NoMovement since 2026-11-05): blocks a step-up, never steps down,
+# and leaves a running failure streak alone
+sc_n1 = staircase.ThresholdStaircase(current_fraction=0.20)
+for _ in range(staircase.STAIRCASE_SUCCESSES_TO_STEP_UP - 1):
+    sc_n1.record_outcome(success=True)
+sc_n1.record_neutral()
+sc_n1.record_outcome(success=True)
+sc_n2 = staircase.ThresholdStaircase(current_fraction=0.30)
+for _ in range(staircase.STAIRCASE_FAILURES_TO_STEP_DOWN - 1):
+    sc_n2.record_outcome(success=False)
+sc_n2.record_neutral()
+sc_n2.record_outcome(success=False)
+sc_n3 = staircase.ThresholdStaircase(current_fraction=0.30, floor=0.20)
+for _ in range(10):
+    sc_n3.record_neutral()
+neutral_ok = (sc_n1.current_fraction == 0.20 and sc_n1.consecutive_successes == 1
+              and sc_n2.current_fraction == 0.20 and sc_n3.current_fraction == 0.30
+              and sc_n3.consecutive_failures == 0)
+print("  record_neutral: no step-up across it, failure streak survives it, x10 changes nothing: {0}".format(
+    neutral_ok))
+# steps are rounded, so the fraction (and the logged degrees) carry no float noise
+sc_r = staircase.ThresholdStaircase(current_fraction=0.20)
+for _ in range(staircase.STAIRCASE_SUCCESSES_TO_STEP_UP):
+    sc_r.record_outcome(success=True)
+for _ in range(staircase.STAIRCASE_FAILURES_TO_STEP_DOWN):
+    sc_r.record_outcome(success=False)
+rounded_ok = sc_r.current_fraction == 0.2 and repr(round(sc_r.current_fraction * 35, 3)) == '7.0'
+print("  0.20 -> 0.30 -> 0.20 lands on exactly 0.2 (7.0deg logged): {0} ({1!r})".format(
+    rounded_ok, sc_r.current_fraction))
 section1_pass = (floor_ok and below_step and stepped_up and reset_after_step and below_step_down and
-                  stepped_down and ceiling_check and reset_on_opposite)
+                  stepped_down and ceiling_check and reset_on_opposite and neutral_ok and rounded_ok)
 print("Section 1 result: {0}".format("PASS" if section1_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -504,7 +533,33 @@ print("  stage labels: 'Stage N' for numbered protocols, passthrough otherwise: 
 
 section6d_pass = stage_order_correct and stage_labels_correct
 
-section6_pass = section6a_pass and section6b_pass and section6c_pass and section6d_pass
+# merge_session_structs(): every combined trial names its member session; members stay untouched
+import json as _json6
+import session_struct_export
+tmp_merge_dir = tempfile.mkdtemp(prefix='merge_struct_test_')
+try:
+    merge_csvs = []
+    for name, n in (('20261104-162439', 3), ('20261104-165242', 2)):
+        folder = os.path.join(tmp_merge_dir, name)
+        os.makedirs(folder)
+        with open(os.path.join(folder, name + '_struct.json'), 'w') as f:
+            _json6.dump({'info': {}, 'task_params': {},
+                         'trials': [{'bpod_start': float(k)} for k in range(n)]}, f)
+        merge_csvs.append(os.path.join(folder, name + '.csv'))
+    _mat, merge_json = session_struct_export.merge_session_structs(
+        merge_csvs, os.path.join(tmp_merge_dir, 'combined'))
+    with open(merge_json) as f:
+        merged = _json6.load(f)
+finally:
+    shutil.rmtree(tmp_merge_dir, ignore_errors=True)
+merge_labels_ok = ([(t['session_member'], t['session_name']) for t in merged['trials']] ==
+                   [(1, '20261104-162439')] * 3 + [(2, '20261104-165242')] * 2
+                   and all('session_member' not in t for m in merged['members'] for t in m['trials']))
+print("  merged struct: each trial labelled with its member (1-based) + session, members unlabelled: "
+      "{0}".format(merge_labels_ok))
+
+section6_pass = (section6a_pass and section6b_pass and section6c_pass and section6d_pass
+                 and merge_labels_ok)
 print("Section 6 result: {0}".format("PASS" if section6_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

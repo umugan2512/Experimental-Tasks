@@ -184,7 +184,12 @@ def merge_session_structs(member_csv_paths, out_base):
     collapsing them (they may differ slightly between a Stop and its restart). Writes
     <out_base>_combined_struct.mat/.json. Returns (mat_path, json_path). """
     members = [_load_member(p) for p in member_csv_paths]
-    all_trials = [trial for member in members for trial in member['trials']]
+    # Every combined trial names its member (1-based, MATLAB's index into 'members') and session:
+    # bpod_start restarts near 0 in each member, so sorting by time alone interleaves them.
+    all_trials = [dict(trial, session_member=i + 1,
+                       session_name=os.path.basename(os.path.dirname(os.path.abspath(path))))
+                  for i, (path, member) in enumerate(zip(member_csv_paths, members))
+                  for trial in member['trials']]
     struct = {'members': members, 'trials': all_trials}
 
     mat_path = out_base + '_combined_struct.mat'

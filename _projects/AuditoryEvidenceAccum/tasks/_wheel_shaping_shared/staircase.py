@@ -68,15 +68,22 @@ class ThresholdStaircase(object):
             self.consecutive_successes += 1
             self.consecutive_failures = 0
             if self.consecutive_successes >= STAIRCASE_SUCCESSES_TO_STEP_UP:
-                self.current_fraction = min(1.0, self.current_fraction + STAIRCASE_STEP_UP)
+                self.current_fraction = round(min(1.0, self.current_fraction + STAIRCASE_STEP_UP), 6)
                 self.consecutive_successes = 0
         else:
             self.consecutive_failures += 1
             self.consecutive_successes = 0
             if self.consecutive_failures >= STAIRCASE_FAILURES_TO_STEP_DOWN:
-                self.current_fraction = max(min(self.floor, self.current_fraction),
-                                            self.current_fraction - STAIRCASE_STEP_DOWN)
+                self.current_fraction = round(max(min(self.floor, self.current_fraction),
+                                                  self.current_fraction - STAIRCASE_STEP_DOWN), 6)
                 self.consecutive_failures = 0
+
+    def record_neutral(self):
+        """ A trial that blocks a step-up but never counts toward a step-down: the success streak
+        resets, the failure streak and the threshold stay. Stage 2 uses it for NoMovement
+        (2026-11-05, per explicit instruction): those are disengagement, not a too-hard threshold,
+        and on UM001's 20261104 they were 8 of the 35 failures behind its slide to the floor. """
+        self.consecutive_successes = 0
 
 
 def grow_iti(prev_iti_s):

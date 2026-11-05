@@ -486,7 +486,7 @@ while True:
         runner.register('N_CLICKS_R', trial_clicks['n_right'])
         runner.register('STIM_SEED', stim_seed)
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
-        runner.register('RESPONSE_THRESHOLD_DEG', cur_response_threshold_deg)
+        runner.register('RESPONSE_THRESHOLD_DEG', round(cur_response_threshold_deg, 3))
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
         runner.register('ITI_S', VAR_ITI_S)
 

@@ -826,7 +826,11 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   turn counted as a success. Now `right_fraction()` is half-Gaussian weighted (sigma 8, about 10
   effective trials), the gate is 10 known directions, and `DIRECTION_RATIO_FLAT` logs the old
   value. Replayed on that session's turns, the R×31 run would have earned 6 rewards instead of 23.
-  5 failures in a row (withheld or no-movement) step the threshold down, to a floor of 0.20.
+  5 withheld turns in a row step the threshold down, to a floor of 0.20. Since 2026-11-05 a
+  NoMovement trial is neutral (`ThresholdStaircase.record_neutral()`, per explicit instruction
+  after the 11-04 QC): it resets the success streak, so it blocks a step-up, but it never counts
+  toward a step-down and doesn't break a running failure streak. Logged thresholds are rounded
+  (3 decimals; staircase steps to 6), so no more `7.000000000000002`.
   Withheld turns still count toward the 100-trial advancement gate.
   **Since 2026-11-03 a side-biased day also halves the next day's starting threshold** (per
   explicit instruction): if ≥ 20% of the previous Stage 2 day's turns were withheld, the first
@@ -1487,7 +1491,10 @@ non-obvious design choices:
   raw sessions' own already-exported structs (preferring each member's own `.json`, which has
   `task_params` — not recoverable by re-parsing the raw CSV alone, since `VAR_*` values are never
   written into the CSV itself) into one `<first_session>_combined_struct.mat`/`.json`, called from
-  `build_training_log.py`'s grouping step for any merged group.
+  `build_training_log.py`'s grouping step for any merged group. Since 2026-11-05 every combined
+  trial carries `session_member` (1-based index into `members`) and `session_name`: each
+  member's `bpod_start` restarts near 0, so sorting the combined trials by time alone would
+  interleave the members.
 - **One native Bpod INFO row's own "key" is a full descriptive sentence** ("This is a PYBPOD file.
   Find more info at ..."), not a short identifier like every other INFO key — confirmed present in
   every real session CSV's preamble, not a parsing bug. Broke `scipy.io.savemat` (`ValueError:
