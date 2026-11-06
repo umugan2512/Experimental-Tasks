@@ -152,8 +152,8 @@ VAR_PLOTS_POLL_MS = 500       # how often to read the watched CSV's new rows and
                               # (incremental -- see session_csv_parser.IncrementalSessionParser)
 VAR_CAMERA_POLL_MS = 1000     # how often to read the latest camera JPEG (see grab_latest_frame())
 VAR_STOP_GRACE_S = 8.0        # how long to wait for a graceful 'close' before escalating to kill
-VAR_DAILY_WATER_CAP_UL = 1500.0   # must match the stage scripts' own VAR_DAILY_WATER_CAP_UL
-VAR_DAILY_WATER_CAP_TASKS = ('stage1_wheel_shaping', 'stage2_threshold_staircase')
+VAR_DAY_WATER_NOTE_TASKS = ('stage1_wheel_shaping', 'stage2_threshold_staircase')   # launch label
+                              # shows the water consumed today (no daily cap since 2026-11-06)
 VAR_QUICK_DEATH_CHECK_MS = 2000   # how long after launch to check whether the task subprocess has
                                    # already died (e.g. missing dependency, bad COM port) -- long
                                    # enough for a real Bpod handshake/import to get underway, short
@@ -2002,26 +2002,14 @@ class SessionRunnerWindow(QWidget):
                                  'Choose a stage, subject, and user first.')
             return
         water_note = ''
-        if cfg.get('task_name') in VAR_DAILY_WATER_CAP_TASKS:
-            # Same per-day total the task itself uses for its cap (session_csv_parser).
+        if cfg.get('task_name') in VAR_DAY_WATER_NOTE_TASKS:
+            # Same per-day total the task itself logs (session_csv_parser).
             try:
                 today_ul, today_sessions = session_csv_parser.water_consumed_today(
                     _PROJECT_DIR, subject, datetime.datetime.now().strftime('%Y%m%d'))
             except Exception:
                 today_ul, today_sessions = 0.0, []
-            if today_ul >= VAR_DAILY_WATER_CAP_UL:
-                answer = QMessageBox.question(
-                    self, 'Daily water cap reached',
-                    '{0} has already consumed {1:.0f} uL today in {2} session(s) ({3}), at or over '
-                    'the {4:.0f} uL daily cap.\n\nThe session will end immediately, before the '
-                    'first trial. Start anyway?'.format(
-                        subject, today_ul, len(today_sessions), ', '.join(today_sessions),
-                        VAR_DAILY_WATER_CAP_UL),
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if answer != QMessageBox.Yes:
-                    return
-            water_note = " -- {0:.0f} uL of today's {1:.0f} uL water left".format(
-                max(0.0, VAR_DAILY_WATER_CAP_UL - today_ul), VAR_DAILY_WATER_CAP_UL)
+            water_note = " -- {0:.0f} uL water consumed earlier today".format(today_ul)
         try:
             session_path = self.launcher.start(cfg, subject, user,
                                                 reward_ul=self.reward_ul_input.value())

@@ -767,7 +767,7 @@ def compute_remaining_quota(sessions_dir, this_session_name, protocol_name, subj
     return remaining_max_trials, remaining_cap_s
 
 
-# --- daily water cap (Stage 1/2) -------------------------------------------------------------------
+# --- daily water total (Stage 1/2, logged; the cap was removed 2026-11-06) -------------------------------------------------------------------
 # 1.5 mL consumed per animal per CALENDAR DAY, shared by all of that animal's sessions (per explicit
 # instruction, 2026-10-28: two back-to-back sessions had given UM001 2.1 mL in 9 min, because each
 # session started with a fresh cap). Same consumed-water rule as the in-session cap
@@ -856,6 +856,25 @@ def _csv_header_info(csv_path):
             if subject is not None and protocol is not None:
                 break
     return subject, protocol
+
+
+def protocol_days_before(project_dir, subject_id, today_str, protocol_name):
+    """ Sorted distinct 'YYYYMMDD' dates before today_str on which subject_id ran protocol_name
+    (any session with a CSV, header check only, no full parse). Stage 2 uses len() + 1 as the
+    subject's Stage 2 day number. """
+    pattern = os.path.join(project_dir, 'experiments', '*', 'setups', '*', 'sessions', '*')
+    days = set()
+    for folder in glob.glob(pattern):
+        name = os.path.basename(folder)
+        if not re.match(r'^\d{8}-', name) or name[:8] >= today_str or name[:8] in days:
+            continue
+        csv_path = os.path.join(folder, name + '.csv')
+        try:
+            if os.path.isfile(csv_path) and _csv_header_info(csv_path) == (subject_id, protocol_name):
+                days.add(name[:8])
+        except Exception:
+            continue
+    return sorted(days)
 
 
 def previous_day_withheld(project_dir, subject_id, today_str, protocol_name):

@@ -1537,7 +1537,7 @@ section17_pass = same17 and mid_states_ok and n_tr == 30
 print("Section 17 result: {0}".format("PASS" if section17_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 18: consumed-water accounting (Stage 1/2 water cap + training log)
+# Section 18: consumed-water accounting (Stage 1/2 logging + training log)
 # ==================================================================================================
 
 print()
@@ -1627,7 +1627,7 @@ section19_pass = mono19 and pre_ok and chatter_ok
 print("Section 19 result: {0}".format("PASS" if section19_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 20: daily water cap total + session duration on the Bpod clock
+# Section 20: daily water total + session duration on the Bpod clock
 # ==================================================================================================
 
 print()
@@ -1710,6 +1710,8 @@ try:
     _write_session21(proj21, '20261103-090000', 'M1', ['Withheld'] * 50)          # today
     prev21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261103', 'stage2_threshold_staircase')
     skip21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261101', 'stage2_threshold_staircase')
+    days21 = session_csv_parser.protocol_days_before(proj21, 'M1', '20261103', 'stage2_threshold_staircase')
+    days21_early = session_csv_parser.protocol_days_before(proj21, 'M1', '20261030', 'stage2_threshold_staircase')
 finally:
     shutil.rmtree(proj21, ignore_errors=True)
 scan_ok = (none21 is None and prev21 == ('20261102', 2, 10, ['20261102-090000', '20261102-100000'])
@@ -1725,7 +1727,11 @@ halve_ok = all(abs(a - b) < 1e-9 for a, b in halve_cases)
 print("  35->17.5, 15->12.5 (min), 7->12.5 biased or not, 19% and no history unchanged: {0} ({1})".format(
     halve_ok, [round(a, 2) for a, _ in halve_cases]))
 
-section21_pass = scan_ok and halve_ok
+days_ok = days21 == ['20261030', '20261102'] and days21_early == []
+print("  Stage 2 day count (day-start rule only on days <= 3): this animal + Stage 2 only, one entry "
+      "per day, today excluded: {0} ({1})".format(days_ok, days21))
+
+section21_pass = scan_ok and halve_ok and days_ok
 print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

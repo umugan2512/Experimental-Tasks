@@ -722,15 +722,13 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
 - **A session's hard trial cap and its advancement-qualifying trial count are two different
   numbers** (Stage 1/2): `VAR_TRIAL_CAP` (per session: 250 in Stage 1, 300 in Stage 2 since 2026-11-05) ends the session, checked against
   every *attempted* trial, as does 30 min.
-  - **Water is capped per animal per calendar DAY, not per session** (`VAR_DAILY_WATER_CAP_UL`,
-    1.5 mL **consumed**). This was explicit instruction on 2026-10-28, after two back-to-back
-    sessions gave UM001 2.1 mL in 9 min.
-  - At startup the task sums that animal's earlier sessions of the day
-    (`session_csv_parser.water_consumed_today()`, registered as
-    `WATER_CONSUMED_EARLIER_TODAY_UL`) and caps on that plus this session's water
-    (`DAY_WATER_CONSUMED_UL` per trial).
-  - Already over the cap at startup: `SESSION_END_REASON=water_cap` before trial 1, and no entry
-    in the advancement history. The dashboard warns and asks before launching such a session.
+  - **No water cap since 2026-11-06** (per explicit instruction). From 2026-10-28 to 11-06,
+    water was capped at 1.5 mL **consumed** per animal per calendar day (`VAR_DAILY_WATER_CAP_UL`,
+    `SESSION_END_REASON=water_cap`).
+  - Water is still logged: the task sums that animal's earlier sessions of the day
+    (`session_csv_parser.water_consumed_today()`, `WATER_CONSUMED_EARLIER_TODAY_UL`), plus this
+    session's water (`DAY_WATER_CONSUMED_UL` per trial). The dashboard's launch label shows the
+    day's total.
   - Consumed = licked after delivery, a later trial's lick included
     (`_wheel_shaping_shared/water_tracker.py`, `SESSION_WATER_CONSUMED_UL`). The training log's
     `Water Consumed (uL)`/`Water Delivered (uL)` columns use the same rule.
@@ -841,6 +839,11 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   (`VAR_DAY_START_MIN_THRESHOLD_DEG`, per explicit instruction), raised if the saved threshold
   is lower, biased day or not; `THRESHOLD_DAY_START_RAISED` VAL. That minimum also replaces
   halving's old 10°. The within-session floor is still 0.20 (7°). UM001's 20261104 ended at 7°.
+  **Since 2026-11-06 halving and the 12.5° minimum apply only on a subject's first 3 Stage 2
+  days** (`VAR_DAY_START_RULE_DAYS`, per explicit instruction). The day number is the count of
+  earlier days with a Stage 2 session for that subject, plus 1
+  (`session_csv_parser.protocol_days_before()`, VAL `STAGE2_DAY_NUMBER`). From day 4 on, a day
+  starts where the previous one ended. UM001 was on day 7 by then.
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching
