@@ -887,6 +887,13 @@ class PlotFeeder(object):
         session_side = first_trial_vals.get('SESSION_SIDE') or session_vals.get('SESSION_SIDE')
         if session_side is not None:
             session_status['session_side'] = session_side
+        # Stage 3 since 2026-11-09: side blocks instead of one side per session.
+        block_min, block_max = session_vals.get('BLOCK_MIN'), session_vals.get('BLOCK_MAX')
+        if block_min is not None and block_max is not None:
+            try:
+                session_status['block_range'] = (int(float(block_min)), int(float(block_max)))
+            except (TypeError, ValueError):
+                pass
         # Stage 4 only -- CLICK_LEVEL_ATTENUATED is a per-trial VAL, logged as the string
         # 'True'/'False' (see session_csv_parser's own str-vs-float VAL convention).
         click_attenuated = first_trial_vals.get('CLICK_LEVEL_ATTENUATED')
@@ -973,7 +980,7 @@ class PlotFeeder(object):
             if in_trial_threshold is not None:
                 kwargs['in_trial_threshold_deg'] = in_trial_threshold
 
-            if trial_type == 'repeat':
+            if trial_type == 'repeat' or info['stage'] == 3:   # Stage 3: the side is the block's
                 p_right_target = 1.0 if side == 'R' else 0.0
             elif self._replay_prev_outcome == 'incorrect':
                 p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if self._replay_prev_side == 'R'

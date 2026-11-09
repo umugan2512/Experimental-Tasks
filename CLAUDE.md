@@ -709,6 +709,22 @@ and means today's `stage4_`/`stage5_` files. Stage 1 and 2 still have no auditor
 correct-side concept, or error condition (those start at Stage 3), but the dot **is** coupled to the
 wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curriculum).
 
+- **Stage 3 plays side BLOCKS, not one side per day** (since 2026-11-09, per explicit
+  instruction).
+  - A whole day on one side let a mouse learn "today is left" from reward history without
+    listening, and each day retrained a side habit.
+  - Now each session alternates L/R blocks of a random 30–60 responded trials
+    (`staircase.Stage3Blocks`). The range shrinks one step per qualifying session, down to 10–20
+    (`shrink_stage3_block_range()`), as a bridge to Stage 4's per-trial sides.
+  - The click → side mapping never changes. This is block switching, not a rule reversal.
+  - The first block's side keeps the old day-alternation rule (`stage3_last_side`).
+  - The sub-chance stop skips the first 10 responded trials after a switch.
+  - Session end prints accuracy on the first 5 trials after a switch: the "is it listening"
+    readout.
+  - VALs: `BLOCK_INDEX`/`BLOCK_SIDE`/`BLOCK_LENGTH`/`BLOCK_TRIAL` per trial, and
+    `FIRST_BLOCK_SIDE`/`BLOCK_MIN`/`BLOCK_MAX` per session (older sessions have `SESSION_SIDE`).
+  - Soak-tested only (fake Bpod, full audit PASS). No animal has run it yet.
+
 - **`parameter_progression.md`** (in `_wheel_shaping_shared/` — and unlike the gitignored
   `docs_local/` design docs, it IS committed) is the written record of how every staircased/stepped
   parameter moves within and across sessions, per stage. Check it before changing any

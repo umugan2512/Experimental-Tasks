@@ -1786,11 +1786,51 @@ print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 22: Stage 3 side blocks")
+print("=" * 100)
+
+import random as _random22
+_ranges = [staircase.STAGE3_BLOCK_START]
+for _ in range(6):
+    _ranges.append(staircase.shrink_stage3_block_range(*_ranges[-1]))
+shrink_ok = _ranges == [(30, 60), (25, 50), (20, 40), (15, 30), (10, 20), (10, 20), (10, 20)]
+print("  block range shrinks 30-60 -> 25-50 -> 20-40 -> 15-30 -> 10-20, then stays: {0} ({1})".format(
+    shrink_ok, _ranges[:5]))
+
+_b = staircase.Stage3Blocks('L', 30, 60, _random22.Random(7))
+_sides, _lengths, _run, _skipped = [], [], 0, 0
+for _ in range(2000):
+    _sides.append(_b.side)
+    if _b.just_switched():
+        _skipped += 1
+    _len_before = _b.length
+    _run += 1
+    if _b.record_response():
+        _lengths.append(_run)
+        assert _run == _len_before
+        _run = 0
+_flips = [a != b for a, b in zip(_sides, _sides[1:])]
+blocks_ok = (_sides[0] == 'L' and all(30 <= n <= 60 for n in _lengths) and len(_lengths) >= 30
+             and sum(_flips) == len(_lengths) and len(set(_lengths)) > 5)
+print("  first block = the day's side, every block 30-60 responded trials and random, side flips at "
+      "every block end: {0} ({1} blocks, lengths {2}-{3})".format(
+          blocks_ok, len(_lengths), min(_lengths), max(_lengths)))
+skip_ok = _skipped == 10 * len(_lengths)
+print("  sub-chance skip covers the first 10 responded trials of every block after the first: "
+      "{0} ({1} skipped)".format(skip_ok, _skipped))
+
+section22_pass = shrink_ok and blocks_ok and skip_ok
+print("Section 22 result: {0}".format("PASS" if section22_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
-                 section19_pass and section20_pass and section21_pass)
+                 section19_pass and section20_pass and section21_pass and section22_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

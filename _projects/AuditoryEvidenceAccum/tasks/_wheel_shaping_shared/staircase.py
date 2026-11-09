@@ -328,6 +328,53 @@ class QuiescenceStaircase(object):
                 self.consecutive_failures = 0
 
 
+# Stage 3 side blocks (per explicit instruction, 2026-11-09): instead of one side for a whole day,
+# each session plays long blocks of one side that alternate L/R, with random lengths drawn from
+# [lo, hi] responded trials. The range shrinks one step per session that meets stage3_gates_met(),
+# toward Stage 4's per-trial sides. The click -> side mapping itself never changes.
+STAGE3_BLOCK_START = (30, 60)
+STAGE3_BLOCK_FINAL = (10, 20)
+STAGE3_BLOCK_STEP = (5, 10)
+STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH = 10   # responded trials after a switch the sub-chance stop ignores
+
+
+def shrink_stage3_block_range(lo, hi):
+    """ One STAGE3_BLOCK_STEP down, floored at STAGE3_BLOCK_FINAL -- call once per qualifying
+    Stage 3 session: 30-60 -> 25-50 -> 20-40 -> 15-30 -> 10-20. """
+    return (max(STAGE3_BLOCK_FINAL[0], lo - STAGE3_BLOCK_STEP[0]),
+            max(STAGE3_BLOCK_FINAL[1], hi - STAGE3_BLOCK_STEP[1]))
+
+
+class Stage3Blocks(object):
+    """ Stage 3's block/side bookkeeping. `side` is the current block's side, `index` the block
+    number (0 = the session's first block), `length` its drawn length and `trial_in_block` how many
+    responded trials it has had. Only genuine L/R responses advance a block (record_response()),
+    so aborts and timeouts don't use it up. """
+
+    def __init__(self, first_side, lo, hi, rng):
+        self._lo, self._hi, self._rng = lo, hi, rng
+        self.side = first_side
+        self.index = 0
+        self.trial_in_block = 0
+        self.length = rng.randint(lo, hi)
+
+    def record_response(self):
+        """ Counts one responded trial; returns True if that ended the block (the next trial is
+        the other side, with a freshly drawn length). """
+        self.trial_in_block += 1
+        if self.trial_in_block < self.length:
+            return False
+        self.side = 'L' if self.side == 'R' else 'R'
+        self.index += 1
+        self.trial_in_block = 0
+        self.length = self._rng.randint(self._lo, self._hi)
+        return True
+
+    def just_switched(self, n=STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH):
+        """ True within the first `n` responded trials of every block after the first. """
+        return self.index > 0 and self.trial_in_block < n
+
+
 def stage3_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200):
     """ training_protocol.md Stage 3 ("tone-side association", new stage) advancement -- the doc
     doesn't specify this new stage's own numeric criterion yet, so this reuses Stage 4's values

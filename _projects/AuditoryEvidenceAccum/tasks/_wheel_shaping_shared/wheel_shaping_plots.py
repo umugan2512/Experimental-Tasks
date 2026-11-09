@@ -171,7 +171,8 @@ class WheelShapingPlots(object):
         :param dict session_status: Stage 3/4/5 only -- static-for-the-whole-session display info
             the progress panel can't derive from prev_session_values/add_trial() alone:
             {'in_trial_threshold_deg': 10.0} (Stage 4/5, the in-trial abort threshold in force),
-            {'session_side': 'R'} (Stage 3 only, today's fixed side),
+            {'block_range': (30, 60)} (Stage 3 only, the side-block length range; the current
+            side is the last added trial's; {'session_side': 'R'} for sessions before 2026-11-09),
             {'click_attenuated': True} (Stage 4 only, whether the click-level ramp is still active),
             {'staircase_active': 'response'} (Stage 5 only, this session's Tag-B selection).
         :param float reward_ul: this session's own VAR_REWARD_UL (constant for the whole session,
@@ -398,6 +399,7 @@ class WheelShapingPlots(object):
         self._magnitude_deg.append(signed_mag)
         self._side_colors.append(OUTCOME_COLORS.get(outcome, 'gray'))
 
+        self._cur_side = side
         self._cur_threshold_deg = threshold_deg
         self._cur_gain_mult = gain_mult
         self._cur_iti_s = iti_s
@@ -568,12 +570,19 @@ class WheelShapingPlots(object):
                      '{0:.2f}/1.50s{1}'.format(
                          self._cur_iti_s or 0, self._prev_session_suffix('iti_s', '{0:.2f}s'))]
         elif self._stage == 3:
-            session_side = self._session_status.get('session_side')
+            block_range = self._session_status.get('block_range')
+            if block_range:
+                current_side = getattr(self, '_cur_side', None)
+                side_text = 'blocks {0}-{1}, side now {2}'.format(
+                    block_range[0], block_range[1], current_side or '?')
+            else:   # a session from before side blocks (2026-11-09)
+                current_side = self._session_status.get('session_side')
+                side_text = "today's side: {0}".format(current_side or '?')
             fracs = [trial_frac, threshold_frac, 1.0]
             texts = ['{0} (this session)'.format(self._session_trial_count),
                      '{0:.1f}deg (frozen from Stage 2)'.format(self._cur_threshold_deg or 0),
-                     "today's side: {0}".format(session_side or '?')]
-            colors = ['tab:blue', 'tab:blue', SIDE_COLORS.get(session_side, 'tab:blue')]
+                     side_text]
+            colors = ['tab:blue', 'tab:blue', SIDE_COLORS.get(current_side, 'tab:blue')]
         elif self._stage == 4:
             attenuated = bool(self._session_status.get('click_attenuated'))
             click_frac = 0.5 if attenuated else 1.0

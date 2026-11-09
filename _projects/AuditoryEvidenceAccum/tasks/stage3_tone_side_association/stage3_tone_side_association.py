@@ -6,13 +6,14 @@ what used to be Stage 3 -- see stage4_clicks_direction.py, pushed up to Stage 4 
 stage5_resume_staircases.py, pushed up to Stage 5).
 
 Aim: the click-side association, in its easiest possible form -- the first moment clicks and
-direction appear together, now with the side held FIXED for the whole session (drawn once, L or
-R, at session start) rather than varying per trial. Every trial for the whole session plays clicks
-ONLY for that one session's chosen side (click_train_v2's 'AOS' grid entry already guarantees the
-non-chosen channel gets exactly zero clicks, not just fewer -- the same mechanism Stage 4 uses per
-trial, just held constant here for a whole session instead), so there's nothing to disambiguate
-trial-to-trial: hearing a click train at all means it's this session's side. Stage 4 is where the
-side starts varying per trial again, once the tone-side association itself is established here.
+direction appear together. Every trial plays clicks ONLY for its side (click_train_v2's 'AOS' grid
+entry guarantees the other channel gets exactly zero clicks), and the side comes in long BLOCKS
+that alternate L/R within a session (staircase.Stage3Blocks, per explicit instruction on
+2026-11-09; until then one side was held for the whole day, which let the animal learn "today is
+left" from reward history without listening). A block lasts a random number of responded trials
+in [stage3_block_min, stage3_block_max] (30-60 at first, shrinking one step per qualifying session
+toward 10-20), so the animal has to follow the clicks across a switch. Stage 4 is where the side
+varies per trial. The click -> side mapping itself never changes.
 
 Every other mechanic is a direct, unmodified carryover from Stage 4 (formerly Stage 3) -- the
 quiescence hold, the in-trial wheel-excursion abort threshold (monitored through
@@ -24,28 +25,26 @@ and session-struct export -- none of that depends on whether the side is drawn p
 fixed for the session, so it's reused here exactly as-is.
 
 What's genuinely different from Stage 4:
-  - VAR_SESSION_SIDE: per explicit instruction, this is NOT a fresh random draw every session.
-    The very FIRST time this subject ever runs this stage, it's a coin flip (np.random.choice(
-    ['L', 'R']) -- so different subjects don't all start on the same side). After that, it
+  - VAR_FIRST_BLOCK_SIDE: the side of the session's FIRST block. Per explicit instruction this is
+    NOT a fresh random draw every session. The very FIRST time this subject ever runs this stage,
+    it's a coin flip (so different subjects don't all start on the same side). After that, it
     deterministically ALTERNATES ('R' <-> 'L') once a new CALENDAR DAY starts, but stays
-    UNCHANGED across a same-day Stop/Kill/crash restart (re-running the task again today must
-    not re-randomize or re-alternate, only a genuinely new day does). Persisted as
-    'stage3_last_side'/'stage3_last_side_date' and saved IMMEDIATELY (not just at session end,
-    unlike every other persisted key in this file) so a near-instant crash still leaves the
-    decision durable for a same-day restart to see -- see the state.save() call right after this
-    decision for why that's a safe, deliberate exception to StageState's own "save once at the
-    end" convention. Registered as a session-level VAL (SESSION_SIDE) for training-log visibility
-    and used for every trial this session -- no per-trial draw.
+    UNCHANGED across a same-day Stop/Kill/crash restart. Persisted as
+    'stage3_last_side'/'stage3_last_side_date' and saved IMMEDIATELY (not just at session end)
+    so a near-instant crash still leaves the decision durable for a same-day restart. A restart
+    begins a fresh block sequence from that side. Registered as FIRST_BLOCK_SIDE (SESSION_SIDE
+    before 2026-11-09), with BLOCK_MIN/BLOCK_MAX; every trial registers BLOCK_INDEX, BLOCK_SIDE,
+    BLOCK_LENGTH and BLOCK_TRIAL (responded trials earlier in that block). Only a genuine L/R
+    response advances a block, so aborts and timeouts don't use it up.
+  - The sub-chance stop ignores the first STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH (10) responded
+    trials after each switch, where a mouse is expected to keep turning the old way at first.
+    accuracy_aos, the advancement gate and the stim/ITI staircases count every main trial. The
+    session end prints accuracy on the first 5 responded trials after a switch.
   - No debiasing at all (debiasing.next_side_after_error() is Stage 4's own mechanism for choosing
-    the NEXT trial's side after an error; moot here since the side never changes within a day).
-  - No post-abort "repeat" re-offer either -- Stage 4 deterministically re-presents the SAME side
-    after an abort (TRIAL_TYPE='repeat') specifically because its side otherwise varies freely;
-    here the next trial already uses the same (fixed) side regardless, so there's nothing to
-    re-offer. An aborted trial simply counts as a normal attempt and the next trial proceeds
-    through the ordinary warmup/main sequence. trial_type is therefore only 'warmup'/'main', never
-    'repeat'.
-  - p_right_target is a single constant for the whole session (1.0 if the fixed side is 'R', else
-    0.0), not something that varies trial-to-trial off debiasing history.
+    the NEXT trial's side after an error; here the block decides the side).
+  - No post-abort "repeat" re-offer either -- the next trial is in the same block anyway.
+    trial_type is therefore only 'warmup'/'main', never 'repeat'.
+  - p_right_target is 1.0/0.0 for the current block's side.
   - Advancement gate is a new staircase.stage3_gates_met() (the doc doesn't specify this new
     stage's own numeric criterion yet -- reusing Stage 4's own values as a placeholder pending real
     empirical tuning, same "flagged placeholder" convention already used elsewhere in this
@@ -349,6 +348,8 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'stage3_last_side': None,             # None only before this subject's very first Stage 3
                                            # session ever -- see the side-decision block below.
     'stage3_last_side_date': None,
+    'stage3_block_min': staircase.STAGE3_BLOCK_START[0],   # side-block length range (responded
+    'stage3_block_max': staircase.STAGE3_BLOCK_START[1],   # trials), shrinks per qualifying session
     'iti_s': staircase.STAGE34_ITI_STARTING_S,   # same key Stage 1/2 already persist (Stage 2's
                                            # own ceiling), in case this subject somehow never ran
                                            # Stage 2 -- normally already at/near this value.
@@ -382,22 +383,21 @@ if quiescence_unlocked:
         consecutive_successes=state.get('quiescence_consecutive_successes'),
         consecutive_failures=state.get('quiescence_consecutive_failures'))
 
-# This session's one fixed side. 'AOS' click generation already guarantees zero clicks on the
-# non-chosen channel for the whole trial (see click_train_v2.generate_trial_clicks), so holding
-# `side` constant for the whole session is all that's needed to make every tone this session
-# heard belong to one side only. Per explicit instruction: a coin flip only the very FIRST time
-# this subject ever runs this stage (so different subjects don't all start on the same side);
-# after that, UNCHANGED across a same-day restart, deterministically ALTERNATING once a new
-# calendar day starts.
+# The side of the session's FIRST block (blocks then alternate, see staircase.Stage3Blocks). 'AOS'
+# click generation guarantees zero clicks on the other channel, so every trial's clicks belong to
+# its block's side only. Per explicit instruction: a coin flip only the very FIRST time this
+# subject ever runs this stage (so different subjects don't all start on the same side); after
+# that, UNCHANGED across a same-day restart, deterministically ALTERNATING once a new calendar day
+# starts. (Until 2026-11-09 this was the side of the whole session.)
 _today_str = datetime.date.today().isoformat()
 _last_side = state.get('stage3_last_side')
 _last_side_date = state.get('stage3_last_side_date')
 if _last_side is None:
-    VAR_SESSION_SIDE = str(np.random.choice(['L', 'R']))
+    VAR_FIRST_BLOCK_SIDE = str(np.random.choice(['L', 'R']))
 else:
-    VAR_SESSION_SIDE = staircase.next_alternating_value(
+    VAR_FIRST_BLOCK_SIDE = staircase.next_alternating_value(
         _last_side, _last_side_date, _today_str, ('L', 'R'))
-state.set('stage3_last_side', VAR_SESSION_SIDE)
+state.set('stage3_last_side', VAR_FIRST_BLOCK_SIDE)
 state.set('stage3_last_side_date', _today_str)
 # Saved IMMEDIATELY, not just at session end like every other state.set() in this file -- the
 # side decision above must survive even a near-instant Kill/crash, since a same-day restart needs
@@ -407,7 +407,9 @@ state.set('stage3_last_side_date', _today_str)
 # one -- every OTHER key in state.data at this point is still exactly what was already on disk, so
 # this early save can't write out any half-finished session update.
 state.save()
-VAR_P_RIGHT_TARGET = 1.0 if VAR_SESSION_SIDE == 'R' else 0.0
+VAR_BLOCK_MIN = state.get('stage3_block_min')
+VAR_BLOCK_MAX = state.get('stage3_block_max')
+blocks = staircase.Stage3Blocks(VAR_FIRST_BLOCK_SIDE, VAR_BLOCK_MIN, VAR_BLOCK_MAX, random)
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -447,7 +449,9 @@ my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
-my_bpod.register_value('SESSION_SIDE', VAR_SESSION_SIDE)
+my_bpod.register_value('FIRST_BLOCK_SIDE', VAR_FIRST_BLOCK_SIDE)   # SESSION_SIDE before 2026-11-09
+my_bpod.register_value('BLOCK_MIN', VAR_BLOCK_MIN)
+my_bpod.register_value('BLOCK_MAX', VAR_BLOCK_MAX)
 
 log_python_t0 = host_clock.now()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -486,7 +490,7 @@ bench_plots = WheelShapingPlots(
     prev_session_values={'threshold_deg': VAR_RESPONSE_THRESHOLD_DEG},
     session_status={'click_attenuated': _click_attenuation_remaining > 0,
                      'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG,
-                     'session_side': VAR_SESSION_SIDE},
+                     'block_range': (VAR_BLOCK_MIN, VAR_BLOCK_MAX)},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -495,14 +499,14 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting Stage 3 -- session side fixed to {0}, response threshold frozen at {1:.1f}deg, "
-      "in-trial threshold {2:.1f}deg{3}, click level {4}".format(
-          VAR_SESSION_SIDE, VAR_RESPONSE_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG,
+print("Starting Stage 3 -- side blocks of {5}-{6} responded trials, first block {0}, response "
+      "threshold frozen at {1:.1f}deg, in-trial threshold {2:.1f}deg{3}, click level {4}".format(
+          VAR_FIRST_BLOCK_SIDE, VAR_RESPONSE_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG,
           ' (PLACEHOLDER -- not yet empirically derived)'
           if VAR_CUE_ABORT_THRESHOLD_DEG == VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER else '',
           'ATTENUATED (-{0:.0f}dB, {1} session(s) remaining)'.format(
               VAR_CLICK_ATTENUATION_DB, _click_attenuation_remaining)
-          if _click_attenuation_remaining > 0 else 'FULL'), flush=True)
+          if _click_attenuation_remaining > 0 else 'FULL', VAR_BLOCK_MIN, VAR_BLOCK_MAX), flush=True)
 
 session_start_time = host_clock.now()
 last_initiation_time = session_start_time
@@ -511,7 +515,10 @@ session_trial_count = 0        # MAIN trials only -- feeds VAR_TRIAL_COUNT_ADVAN
 total_attempts = 0              # every trial attempt (warmup+main), feeds abort_rate
 total_aborts = 0
 consecutive_aborts = 0
-main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos + sub-chance check
+main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos
+subchance_correct = []          # the same, minus the first STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH
+                                 # responded trials after a block switch -- feeds the sub-chance stop
+after_switch_correct = []       # main trials within 5 responded trials of a switch (session readout)
 warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
 fresh_trial_count = 0           # trial draws so far this session (every attempt counts -- no
                                  # separate 'repeat' category here, see module docstring)
@@ -530,8 +537,8 @@ while True:
     if consecutive_aborts >= VAR_CONSECUTIVE_ABORT_LIMIT:
         session_end_reason = 'consecutive_aborts'
         break
-    if len(main_trial_correct) >= VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS:
-        recent = main_trial_correct[-(VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS):]
+    if len(subchance_correct) >= VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS:
+        recent = subchance_correct[-(VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS):]
         blocks = [recent[i:i + VAR_SUBCHANCE_BLOCK_SIZE]
                   for i in range(0, len(recent), VAR_SUBCHANCE_BLOCK_SIZE)]
         if all((sum(b) / float(len(b))) < 0.5 for b in blocks):
@@ -545,8 +552,11 @@ while True:
     try:
         fresh_trial_count += 1
         trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
-        side = VAR_SESSION_SIDE
-        p_right_target = VAR_P_RIGHT_TARGET
+        side = blocks.side
+        p_right_target = 1.0 if side == 'R' else 0.0
+        block_index_this_trial = blocks.index
+        block_trial_this_trial = blocks.trial_in_block   # responded trials earlier in this block
+        just_switched_this_trial = blocks.just_switched()
 
         if quiescence_unlocked:
             quiescence_duration_this_trial = float(np.clip(
@@ -578,6 +588,10 @@ while True:
 
         runner.register('TRIAL_TYPE', trial_type)
         runner.register('TRIAL_SIDE', side)
+        runner.register('BLOCK_INDEX', block_index_this_trial)
+        runner.register('BLOCK_SIDE', side)
+        runner.register('BLOCK_LENGTH', blocks.length)
+        runner.register('BLOCK_TRIAL', block_trial_this_trial)
         runner.register('CLICK_TIMES_L', ','.join(
             '{0:.4f}'.format(t) for t in trial_clicks['left_times']))
         runner.register('CLICK_TIMES_R', ','.join(
@@ -942,8 +956,16 @@ while True:
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
+            if not just_switched_this_trial:
+                subchance_correct.append(bool(correct))
+            if block_index_this_trial > 0 and block_trial_this_trial < 5:
+                after_switch_correct.append(bool(correct))
             stim_duration_staircase.record_outcome(bool(correct))
             iti_staircase.record_outcome(bool(correct))
+        # Only a genuine L/R response (warmup or main) advances the side block.
+        if correct is not None and blocks.record_response():
+            print("Block {0} done -- switching to {1} for {2} responded trials".format(
+                blocks.index, blocks.side, blocks.length), flush=True)
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -1030,6 +1052,12 @@ advance_ready = len(history) >= 3 and all(history[-3:])
 if _click_attenuation_remaining > 0:
     state.set('click_attenuation_sessions_remaining', _click_attenuation_remaining - 1)
 
+# A qualifying session shortens the side blocks one step, toward Stage 4's per-trial sides.
+if this_session_gates_met:
+    _new_lo, _new_hi = staircase.shrink_stage3_block_range(VAR_BLOCK_MIN, VAR_BLOCK_MAX)
+    state.set('stage3_block_min', _new_lo)
+    state.set('stage3_block_max', _new_hi)
+
 state.set('stim_duration_s', stim_duration_staircase.current_value)
 state.set('stim_duration_consecutive_successes', stim_duration_staircase.consecutive_successes)
 state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecutive_failures)
@@ -1044,10 +1072,18 @@ if quiescence_unlocked:
 
 state.save()
 
-print("Session: side={0}, {1} main trials, accuracy(AOS)={2:.1%}, abort_rate={3:.1%}, "
-      "gates_met={4}".format(
-          VAR_SESSION_SIDE, session_trial_count, accuracy_aos, abort_rate,
+print("Session: {0} side block(s) from {1}, {2} main trials, accuracy(AOS)={3:.1%}, "
+      "abort_rate={4:.1%}, gates_met={5}".format(
+          blocks.index + 1, VAR_FIRST_BLOCK_SIDE, session_trial_count, accuracy_aos, abort_rate,
           this_session_gates_met), flush=True)
+# Is it listening? A mouse using the clicks switches at once; one going by reward history keeps
+# turning the old way for a few trials after each switch.
+_n_after = len(after_switch_correct)
+print("Accuracy on the first 5 responded trials after a switch: {0} (n={1}); all main trials: "
+      "{2:.1%}".format('{0:.1%}'.format(sum(after_switch_correct) / float(_n_after))
+                       if _n_after else 'n/a', _n_after, accuracy_aos), flush=True)
+print("Block range next session: {0}-{1}".format(
+    state.get('stage3_block_min'), state.get('stage3_block_max')), flush=True)
 print("ADVANCE-READY (3 consecutive qualifying sessions): {0}".format(
     "yes" if advance_ready else "no"), flush=True)
 if not advance_ready:

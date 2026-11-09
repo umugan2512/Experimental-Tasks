@@ -106,6 +106,15 @@ that session, so UM001 (`20261102-160353`) got 22/22 left turns rewarded. The fl
 ratio then let UM001 (`20261102-161142`) oscillate between long runs (R×31, L×29, …), each
 rewarded for ~16 trials before the ratio left the band.
 
+## Side blocks (Stage 3 only, since 2026-11-09)
+
+Each session plays long blocks of one side that alternate L/R (`staircase.Stage3Blocks`). Before
+2026-11-09 one side was held for the whole day. The click -> side mapping never changes.
+
+| Within-session | Across-session |
+|---|---|
+| A block lasts a random number of responded trials in [`stage3_block_min`, `stage3_block_max`]. Only a genuine L/R response (warmup or main) counts, so aborts/timeouts don't use a block up. The side flips at every block end and a new length is drawn. The sub-chance stop skips the first 10 responded trials after each switch (`STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH`). Accuracy, the gate and the stim/ITI staircases count every trial. VALs: `BLOCK_INDEX`, `BLOCK_SIDE`, `BLOCK_LENGTH`, `BLOCK_TRIAL`; session `FIRST_BLOCK_SIDE`, `BLOCK_MIN`, `BLOCK_MAX`. | The first block's side alternates by calendar day (coin flip on the very first session, unchanged on a same-day restart). The range starts at 30–60 (`STAGE3_BLOCK_START`) and shrinks one step per session meeting `stage3_gates_met()`: 25–50, 20–40, 15–30, then 10–20 (`STAGE3_BLOCK_FINAL`). |
+
 ## Session caps (Stage 1/2)
 
 | Cap | Scope | Value |
