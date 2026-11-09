@@ -877,6 +877,23 @@ def protocol_days_before(project_dir, subject_id, today_str, protocol_name):
     return sorted(days)
 
 
+def day_max_threshold_deg(project_dir, subject_id, date_str, protocol_name):
+    """ The highest THRESHOLD_DEG VAL (rounded to 3 decimals) over subject_id's protocol_name
+    sessions on date_str ('YYYYMMDD'), or None -- Stage 2's later-day start uses yesterday's peak. """
+    best = None
+    for _name, trials in _subject_protocol_sessions(project_dir, subject_id, protocol_name, date_str):
+        for t in trials:
+            values = t['vals'].get('THRESHOLD_DEG')
+            for v in (values if isinstance(values, list) else [values]):
+                try:
+                    v = round(float(v), 3)
+                except (TypeError, ValueError):
+                    continue
+                if best is None or v > best:
+                    best = v
+    return best
+
+
 def previous_day_withheld(project_dir, subject_id, today_str, protocol_name):
     """ The side-bias summary Stage 2 uses to pick the day's starting threshold:
     (date_str, n_withheld, n_turns, [session names]) over subject_id's protocol_name sessions on the

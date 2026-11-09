@@ -844,6 +844,18 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   earlier days with a Stage 2 session for that subject, plus 1
   (`session_csv_parser.protocol_days_before()`, VAL `STAGE2_DAY_NUMBER`). From day 4 on, a day
   starts where the previous one ended. UM001 was on day 7 by then.
+  **Since 2026-11-09, from day 4 on a day steps UP instead** (per explicit instruction): it is
+  never halved. The first session starts at max(saved threshold, the previous day's peak
+  `THRESHOLD_DEG`) + 3.5° (`staircase.later_day_start_fraction()`,
+  `session_csv_parser.day_max_threshold_deg()`), with both streaks reset. The direction ratio's
+  sigma also grows +2 per day up to 20 (`direction_sigma` state key, `grow_direction_sigma()`).
+  VALs: `PREV_DAY_MAX_THRESHOLD_DEG`, `THRESHOLD_DAY_START_STEPPED`, `DIRECTION_SIGMA`.
+  - A wider sigma has two effects. Withholding starts later in a one-sided run: 6 same-side
+    turns from a balanced history at sigma 8, 12 at sigma 20. Recovering from a long run takes
+    more opposite turns: after 30 left turns, 3 at sigma 8 and 7 at sigma 20.
+  - The once-per-day check only reaches disk at session end (`state.save()`). It is
+    idempotent: a same-day restart after a crash recomputes the same start from the same saved
+    values and the previous day's sessions.
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching

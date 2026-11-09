@@ -1731,7 +1731,55 @@ days_ok = days21 == ['20261030', '20261102'] and days21_early == []
 print("  Stage 2 day count (day-start rule only on days <= 3): this animal + Stage 2 only, one entry "
       "per day, today excluded: {0} ({1})".format(days_ok, days21))
 
-section21_pass = scan_ok and halve_ok and days_ok
+_l = staircase.later_day_start_fraction
+later_cases = [(_l(19.5 / 35, 30.0 / 35) * 35, 33.5), (_l(30.0 / 35, 20.0 / 35) * 35, 33.5),
+               (_l(33.0 / 35, 34.0 / 35) * 35, 35.0), (_l(20.0 / 35, None) * 35, 23.5)]
+later_ok = all(abs(a - b) < 1e-3 for a, b in later_cases)
+print("  day >= 4 start: max(saved, yesterday's peak) + 3.5deg, cap 35, no peak -> saved: {0} ({1})".format(
+    later_ok, [round(a, 2) for a, _ in later_cases]))
+sigma_cases = [staircase.grow_direction_sigma(8.0), staircase.grow_direction_sigma(19.0),
+               staircase.grow_direction_sigma(20.0)]
+sigma_ok = sigma_cases == [10.0, 20.0, 20.0]
+print("  direction sigma +2/day, ceiling 20: {0} ({1})".format(sigma_ok, sigma_cases))
+
+
+def _recovery_turns(sigma, run=30):
+    t = DirectionRatioTracker(history=['L', 'R'] * 20 + ['L'] * run, sigma=sigma)
+    n = 0
+    while t.over_used_side() == 'L' and n < 80:
+        t.record('R')
+        n += 1
+    return n
+
+
+recover8, recover20 = _recovery_turns(8.0), _recovery_turns(20.0)
+recover_ok = recover20 > recover8
+print("  a wider sigma needs more opposite turns to recover from a 30-turn run: {0} "
+      "(sigma 8: {1}, sigma 20: {2})".format(recover_ok, recover8, recover20))
+
+proj21b = tempfile.mkdtemp(prefix='daymax_')
+try:
+    for _name, _deg in [('20261109-090000', ['23.0', '26.5', '30.000000000000004', '19.5']),
+                        ('20261109-100000', ['19.5', '23.0'])]:
+        _folder = os.path.join(proj21b, 'experiments', 'Stage2', 'setups', 'Stage2', 'sessions', _name)
+        os.makedirs(_folder)
+        _rows = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', 'stage2_threshold_staircase'],
+                 ['INFO', 'pc', '', '', 'SUBJECT-NAME', "['M1', 'x']"]]
+        for _d in _deg:
+            _rows += [['TRIAL', 'pc', '', '', 'New trial', ''],
+                      ['VAL', 'pc', '', '', 'THRESHOLD_DEG', _d],
+                      ['END-TRIAL', 'pc', '', '', 'The trial ended', '']]
+        with open(os.path.join(_folder, _name + '.csv'), 'w', newline='') as f:
+            csv.writer(f, delimiter=';').writerows(_rows)
+    max21 = session_csv_parser.day_max_threshold_deg(proj21b, 'M1', '20261109', 'stage2_threshold_staircase')
+    max21_none = session_csv_parser.day_max_threshold_deg(proj21b, 'M1', '20261108', 'stage2_threshold_staircase')
+finally:
+    shutil.rmtree(proj21b, ignore_errors=True)
+max_ok = max21 == 30.0 and max21_none is None
+print("  yesterday's peak threshold over all that day's sessions, rounded: {0} ({1})".format(
+    max_ok, max21))
+
+section21_pass = scan_ok and halve_ok and days_ok and later_ok and sigma_ok and recover_ok and max_ok
 print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

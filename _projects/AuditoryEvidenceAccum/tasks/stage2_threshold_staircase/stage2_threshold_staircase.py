@@ -71,7 +71,7 @@ import staircase
 import session_state
 import session_struct_export
 import session_csv_parser
-from direction_tracker import DirectionRatioTracker
+from direction_tracker import DirectionRatioTracker, DIRECTION_RATIO_SIGMA
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
 from trial_render import run_trial_render_loop, register_trial_timing
@@ -252,6 +252,7 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
                                       # first -- seeds the debiasing window so withholding doesn't
                                       # restart from an empty window every session
     'bias_day_checked': None,        # 'YYYYMMDD' of the last day the start-of-day halving ran
+    'direction_sigma': DIRECTION_RATIO_SIGMA,   # grows per day from Stage 2 day 4 (see below)
 })
 
 # A side-biased day (many withheld turns) means the threshold was too hard for the animal to keep
@@ -260,29 +261,44 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
 # Stop, Kill or crash continues from the halved value instead of halving again or undoing it.
 # The same check holds the day's start at >= VAR_DAY_START_MIN_THRESHOLD_DEG (not on the first
 # Stage 2 day, which keeps Stage 1's hand-off). Both only on the subject's first
-# VAR_DAY_START_RULE_DAYS Stage 2 days; later days start where the previous one ended. Registered
-# as session-level VALs once the Bpod session exists.
+# VAR_DAY_START_RULE_DAYS Stage 2 days. From day VAR_DAY_START_RULE_DAYS + 1 on (per explicit
+# instruction, 2026-11-09) a day is never halved: it starts one step above the previous day's PEAK
+# threshold (staircase.later_day_start_fraction()), and the direction ratio's sigma grows one step
+# (staircase.grow_direction_sigma()). Registered as session-level VALs once the Bpod session exists.
 _today_str = os.path.basename(os.path.abspath(os.getcwd()))[:8]
 prev_day = None
 stage2_day_number = None
+prev_day_max_threshold_deg = None
 threshold_before_halving_fraction = state.get('threshold_fraction')
 threshold_bias_halved = False
 threshold_day_start_raised = False
+threshold_day_start_stepped = False
+direction_sigma_before = state.get('direction_sigma')
 if state.get('bias_day_checked') != _today_str:
     prev_day = session_csv_parser.previous_day_withheld(
         VAR_PROJECT_DIR, VAR_SUBJECT_ID, _today_str, 'stage2_threshold_staircase')
     stage2_day_number = len(session_csv_parser.protocol_days_before(
         VAR_PROJECT_DIR, VAR_SUBJECT_ID, _today_str, 'stage2_threshold_staircase')) + 1
+    _start = threshold_before_halving_fraction
     if prev_day and stage2_day_number <= VAR_DAY_START_RULE_DAYS:
         _start = staircase.bias_day_start_fraction(
             threshold_before_halving_fraction, prev_day[1] / float(prev_day[2]),
             VAR_BIAS_DAY_WITHHELD_TRIGGER, VAR_DAY_START_MIN_THRESHOLD_DEG / VAR_THRESHOLD_FINAL_DEG)
         threshold_bias_halved = _start < threshold_before_halving_fraction
         threshold_day_start_raised = _start > threshold_before_halving_fraction
-        if _start != threshold_before_halving_fraction:
-            state.set('threshold_fraction', _start)
-            state.set('consecutive_successes', 0)
-            state.set('consecutive_failures', 0)
+    elif prev_day:
+        prev_day_max_threshold_deg = session_csv_parser.day_max_threshold_deg(
+            VAR_PROJECT_DIR, VAR_SUBJECT_ID, prev_day[0], 'stage2_threshold_staircase')
+        _start = staircase.later_day_start_fraction(
+            threshold_before_halving_fraction,
+            None if prev_day_max_threshold_deg is None
+            else prev_day_max_threshold_deg / VAR_THRESHOLD_FINAL_DEG)
+        threshold_day_start_stepped = _start != threshold_before_halving_fraction
+        state.set('direction_sigma', staircase.grow_direction_sigma(direction_sigma_before))
+    if _start != threshold_before_halving_fraction:
+        state.set('threshold_fraction', _start)
+        state.set('consecutive_successes', 0)
+        state.set('consecutive_failures', 0)
     state.set('bias_day_checked', _today_str)
 
 staircase_obj = staircase.ThresholdStaircase(
@@ -306,7 +322,8 @@ session_saw_threshold_step_up = False   # set True the first time this session's
                                          # staircase steps up at least once (see record_outcome call
                                          # below) -- drives the one-way unlock above.
 
-direction_tracker = DirectionRatioTracker(history=state.get('recent_directions'))
+direction_tracker = DirectionRatioTracker(history=state.get('recent_directions'),
+                                          sigma=state.get('direction_sigma'))
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -337,17 +354,29 @@ my_bpod.register_value('THRESHOLD_BIAS_HALVED', int(threshold_bias_halved))
 my_bpod.register_value('THRESHOLD_DAY_START_RAISED', int(threshold_day_start_raised))
 my_bpod.register_value('THRESHOLD_START_BEFORE_HALVING_DEG',
                        round(threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, 3))
+my_bpod.register_value('PREV_DAY_MAX_THRESHOLD_DEG',
+                       prev_day_max_threshold_deg if prev_day_max_threshold_deg is not None else '')
+my_bpod.register_value('THRESHOLD_DAY_START_STEPPED', int(threshold_day_start_stepped))
+my_bpod.register_value('DIRECTION_SIGMA', state.get('direction_sigma'))
 if prev_day:
-    print("Previous Stage 2 day ({0}): {1}/{2} turns withheld ({3:.0%}) -- threshold {4}".format(
-        prev_day[0], prev_day[1], prev_day[2], prev_day[1] / float(prev_day[2]),
-        '{0:.1f} -> {1:.1f}deg ({2}, day-start min {3:.1f}deg)'.format(
-            threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG,
-            cur_threshold_deg_at_start, 'halved' if threshold_bias_halved else 'raised to the minimum',
+    if threshold_bias_halved or threshold_day_start_raised:
+        _start_note = '{0:.1f} -> {1:.1f}deg ({2}, day-start min {3:.1f}deg)'.format(
+            threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, cur_threshold_deg_at_start,
+            'halved' if threshold_bias_halved else 'raised to the minimum',
             VAR_DAY_START_MIN_THRESHOLD_DEG)
-        if threshold_bias_halved or threshold_day_start_raised
-        else 'unchanged (Stage 2 day {0} > {1}: starts where it ended)'.format(
-            stage2_day_number, VAR_DAY_START_RULE_DAYS)
-        if stage2_day_number > VAR_DAY_START_RULE_DAYS else 'unchanged'), flush=True)
+    elif stage2_day_number > VAR_DAY_START_RULE_DAYS:
+        _start_note = ('{0:.1f} -> {1:.1f}deg (Stage 2 day {2}: one step above yesterday\'s peak '
+                       '{3}), direction sigma {4:g} -> {5:g}').format(
+            threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, cur_threshold_deg_at_start,
+            stage2_day_number,
+            '{0:.1f}deg'.format(prev_day_max_threshold_deg)
+            if prev_day_max_threshold_deg is not None else 'unknown',
+            direction_sigma_before, state.get('direction_sigma'))
+    else:
+        _start_note = 'unchanged'
+    print("Previous Stage 2 day ({0}): {1}/{2} turns withheld ({3:.0%}) -- threshold {4}".format(
+        prev_day[0], prev_day[1], prev_day[2], prev_day[1] / float(prev_day[2]), _start_note),
+        flush=True)
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.

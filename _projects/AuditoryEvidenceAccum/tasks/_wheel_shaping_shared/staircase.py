@@ -17,6 +17,14 @@ STAIRCASE_FAILURES_TO_STEP_DOWN = 5  # this many consecutive failures
 ITI_GROWTH_PER_SESSION_S = 0.1    # doc-specified: "~0.1s per session"
 ITI_CEILING_S = 1.5               # doc-specified: Stage 2's final ITI
 
+# Stage 2 from a subject's 4th Stage 2 day on (per explicit instruction, 2026-11-09): each day
+# starts one staircase step above the previous day's PEAK threshold, and the direction ratio's
+# recency-weighting sigma grows a fixed step per day, so a one-sided run takes more consecutive
+# opposite turns to recover from. Same fixed-step shape as grow_iti().
+DAY_START_STEP_FRACTION = 0.10      # 3.5deg of the 35deg final threshold
+DIRECTION_SIGMA_STEP_PER_DAY = 2.0
+DIRECTION_SIGMA_CEILING = 20.0      # the window is 40 trials; above ~20 it's nearly a flat mean
+
 # Stage 1's threshold grows ACROSS sessions (one fixed step per qualifying session), NOT within a
 # session like ThresholdStaircase above -- Stage 1 isn't tracking moment-to-moment performance the
 # way Stage 2 is, it just needs to reach Stage 2's own starting point by the time Stage 1 ends.
@@ -117,6 +125,21 @@ def bias_day_start_fraction(fraction, withheld_fraction, trigger, min_fraction):
     if withheld_fraction is not None and withheld_fraction >= trigger:
         fraction = fraction / 2.0
     return max(min_fraction, fraction)
+
+
+def later_day_start_fraction(saved_fraction, prev_day_max_fraction):
+    """ Stage 2's day-start threshold from a subject's 4th Stage 2 day on: one
+    DAY_START_STEP_FRACTION above the higher of the saved (end-of-yesterday) threshold and
+    yesterday's peak (None = no peak known), ceiling 1.0. Never halved, biased day or not. """
+    base = saved_fraction if prev_day_max_fraction is None else max(saved_fraction,
+                                                                    prev_day_max_fraction)
+    return round(min(1.0, base + DAY_START_STEP_FRACTION), 6)
+
+
+def grow_direction_sigma(prev_sigma):
+    """ +DIRECTION_SIGMA_STEP_PER_DAY per Stage 2 day from day 4 on, ceiling
+    DIRECTION_SIGMA_CEILING -- same call-site shape as grow_iti(). """
+    return round(min(DIRECTION_SIGMA_CEILING, prev_sigma + DIRECTION_SIGMA_STEP_PER_DAY), 6)
 
 
 def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_count_gate=200):
