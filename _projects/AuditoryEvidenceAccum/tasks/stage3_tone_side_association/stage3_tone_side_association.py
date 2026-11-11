@@ -539,9 +539,9 @@ while True:
         break
     if len(subchance_correct) >= VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS:
         recent = subchance_correct[-(VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS):]
-        blocks = [recent[i:i + VAR_SUBCHANCE_BLOCK_SIZE]
+        chunks = [recent[i:i + VAR_SUBCHANCE_BLOCK_SIZE]
                   for i in range(0, len(recent), VAR_SUBCHANCE_BLOCK_SIZE)]
-        if all((sum(b) / float(len(b))) < 0.5 for b in blocks):
+        if all((sum(b) / float(len(b))) < 0.5 for b in chunks):
             session_end_reason = 'subchance_accuracy'
             break
     if trial >= VAR_MAX_TRIALS:
