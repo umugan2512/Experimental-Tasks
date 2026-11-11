@@ -271,8 +271,10 @@ VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunab
                                       # multiplier ON TOP of this calibrated base amplitude during
                                       # the warmup-attenuation sessions, not a substitute for it.
 
-VAR_WARMUP_TRIAL_MIN = 20            # doc SS3.1 (Tag D): 20-40 trials at the easiest level,
-VAR_WARMUP_TRIAL_MAX = 40            # drawn fresh each session, excluded from advancement stats
+VAR_WARMUP_TRIAL_MIN = 20            # warm-up (spec B7, Pinto et al. 2018): at least 20 trials,
+VAR_WARMUP_TRIAL_MAX = 60            # then until the last 10 are >= 85% correct with <= 10 points
+VAR_WARMUP_EXIT_ACCURACY = 0.85      # of L/R accuracy difference, at most 60. Excluded from the
+VAR_WARMUP_EXIT_MAX_BIAS = 0.10      # advancement stats; WARMUP_EXIT_REASON says how it ended.
 
 VAR_SESSION_CAP_S = 45 * 60          # 45-minute cap, per explicit instruction (was the doc SS3.2/
                                       # Tag E 90-minute value)
@@ -529,11 +531,24 @@ main_trial_correct = []         # bools, MAIN trials only (no warmup/correction/
                                  # accuracy_aos and the sub-chance stop
 choice_trials = []              # every responded trial, for the click-weight regression
 correction_trial_count = 0
-warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
+warmup = staircase.WarmupGate(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX, VAR_WARMUP_EXIT_ACCURACY,
+                              VAR_WARMUP_EXIT_MAX_BIAS)
 fresh_trial_count = 0           # non-repeat trial draws so far this session
 prev_error_side = None          # side of the previous responded trial if it was an error
 pending_repeat = False          # an abort re-offers the same side
 repeat_side = None
+
+
+warmup_exit_logged = False
+
+
+def _log_warmup_exit():
+    """ Registered once, on the first main trial: how and when the warm-up ended. """
+    global warmup_exit_logged
+    warmup_exit_logged = True
+    runner.register('WARMUP_EXIT_REASON', warmup.exit_reason)
+    runner.register('WARMUP_TRIALS', warmup.n_drawn)
+    print("Warm-up ended ({0}) after {1} trials".format(warmup.exit_reason, warmup.n_drawn), flush=True)
 
 session_end_reason = None
 trial = 0
@@ -571,7 +586,9 @@ while True:
             fresh_trial_count += 1
             side, is_correction = sides.next_side(prev_error_side)
             trial_type = ('correction' if is_correction else
-                          'warmup' if fresh_trial_count <= warmup_target else 'main')
+                          'warmup' if warmup.next_is_warmup() else 'main')
+            if trial_type == 'main' and not warmup_exit_logged:
+                _log_warmup_exit()
         # The debiaser's target for a fresh draw; a correction or repeat trial's side is fixed.
         p_right_target = (debiaser.last['p_right'] if trial_type in ('warmup', 'main')
                           else (1.0 if side == 'R' else 0.0))
@@ -992,6 +1009,8 @@ while True:
         # trial contributes to neither the numerator nor denominator here (it's already a
         # separately-tracked engagement signal via VAR_NO_INIT_TIMEOUT_S/consecutive_aborts, not
         # folded into "accuracy," matching the same "correct is not None" gate INCLUDED uses).
+        if trial_type == 'warmup' and correct is not None:
+            warmup.record(side, correct)
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))

@@ -322,6 +322,53 @@ class QuiescenceStaircase(object):
                 self.consecutive_failures = 0
 
 
+class WarmupGate(object):
+    """ Stage 3-5's session-opening warm-up, gated on performance (spec B7, after Pinto et al.
+    2018: >= 85% correct and <= 10% side bias) instead of a random 20-40 trials. At least n_min
+    warm-up draws, then it ends as soon as the last `accuracy_window` responded warm-up trials are
+    >= accuracy correct AND the % correct on left and right trials (over the last `bias_window`
+    responded warm-up trials, both sides present) differ by <= max_bias; it ends anyway at n_max.
+    next_is_warmup() once per fresh (non-repeat) draw; record() after each responded warm-up trial.
+    exit_reason: None while running, then 'criterion' or 'cap'. """
+
+    def __init__(self, n_min=20, n_max=60, accuracy=0.85, max_bias=0.10, accuracy_window=10,
+                 bias_window=20):
+        self.n_min, self.n_max = n_min, n_max
+        self.accuracy, self.max_bias = accuracy, max_bias
+        self.accuracy_window, self.bias_window = accuracy_window, bias_window
+        self.n_drawn = 0
+        self.outcomes = []          # (side, correct), responded warm-up trials
+        self.exit_reason = None
+
+    def record(self, side, correct):
+        self.outcomes.append((side, bool(correct)))
+
+    def criterion_met(self):
+        recent = self.outcomes[-self.accuracy_window:]
+        if len(recent) < self.accuracy_window:
+            return False
+        if sum(c for _, c in recent) / float(len(recent)) < self.accuracy:
+            return False
+        window = self.outcomes[-self.bias_window:]
+        by_side = {s: [c for side, c in window if side == s] for s in ('L', 'R')}
+        if not by_side['L'] or not by_side['R']:
+            return False
+        acc = {s: sum(v) / float(len(v)) for s, v in by_side.items()}
+        return abs(acc['L'] - acc['R']) <= self.max_bias
+
+    def next_is_warmup(self):
+        if self.exit_reason is not None:
+            return False
+        if self.n_drawn >= self.n_max:
+            self.exit_reason = 'cap'
+        elif self.n_drawn >= self.n_min and self.criterion_met():
+            self.exit_reason = 'criterion'
+        if self.exit_reason is not None:
+            return False
+        self.n_drawn += 1
+        return True
+
+
 def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200,
                      click_criterion_met=False):
     """ training_protocol.md Stage 4 (formerly "Stage 3" before a new Stage 3 -- tone-side

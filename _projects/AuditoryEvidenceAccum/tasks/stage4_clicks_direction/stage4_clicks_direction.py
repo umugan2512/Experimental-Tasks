@@ -272,8 +272,10 @@ VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunab
                                       # multiplier ON TOP of this calibrated base amplitude during
                                       # the warmup-attenuation sessions, not a substitute for it.
 
-VAR_WARMUP_TRIAL_MIN = 20            # doc SS3.1 (Tag D): 20-40 trials at the easiest level,
-VAR_WARMUP_TRIAL_MAX = 40            # drawn fresh each session, excluded from advancement stats
+VAR_WARMUP_TRIAL_MIN = 20            # warm-up (spec B7, Pinto et al. 2018): at least 20 trials,
+VAR_WARMUP_TRIAL_MAX = 60            # then until the last 10 are >= 85% correct with <= 10 points
+VAR_WARMUP_EXIT_ACCURACY = 0.85      # of L/R accuracy difference, at most 60. Excluded from the
+VAR_WARMUP_EXIT_MAX_BIAS = 0.10      # advancement stats; WARMUP_EXIT_REASON says how it ended.
 
 VAR_SESSION_CAP_S = 45 * 60          # 45-minute cap, per explicit instruction (was the doc SS3.2/
                                       # Tag E 90-minute value)
@@ -483,7 +485,8 @@ total_attempts = 0              # every trial attempt (warmup+main+repeat), feed
 total_aborts = 0
 consecutive_aborts = 0
 main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos + sub-chance check
-warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
+warmup = staircase.WarmupGate(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX, VAR_WARMUP_EXIT_ACCURACY,
+                              VAR_WARMUP_EXIT_MAX_BIAS)
 fresh_trial_count = 0           # non-repeat trial draws so far this session
 
 # Hu debiaser, seeded with this subject's responded trials from earlier Stage 3-5 sessions.
@@ -491,6 +494,18 @@ debiaser = debiasing.HuDebiaser(history=state.get('hu_debias_history'))
 choice_trials = []              # every responded trial, for the click-weight regression
 pending_repeat = False
 repeat_side = None
+
+
+warmup_exit_logged = False
+
+
+def _log_warmup_exit():
+    """ Registered once, on the first main trial: how and when the warm-up ended. """
+    global warmup_exit_logged
+    warmup_exit_logged = True
+    runner.register('WARMUP_EXIT_REASON', warmup.exit_reason)
+    runner.register('WARMUP_TRIALS', warmup.n_drawn)
+    print("Warm-up ended ({0}) after {1} trials".format(warmup.exit_reason, warmup.n_drawn), flush=True)
 
 session_end_reason = None
 trial = 0
@@ -528,7 +543,9 @@ while True:
             pending_repeat = False
         else:
             fresh_trial_count += 1
-            trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
+            trial_type = 'warmup' if warmup.next_is_warmup() else 'main'
+            if trial_type == 'main' and warmup.n_drawn and not warmup_exit_logged:
+                _log_warmup_exit()
             side = debiaser.next_side(np.random)
             p_right_target = debiaser.last['p_right']
 
@@ -941,6 +958,8 @@ while True:
         # trial contributes to neither the numerator nor denominator here (it's already a
         # separately-tracked engagement signal via VAR_NO_INIT_TIMEOUT_S/consecutive_aborts, not
         # folded into "accuracy," matching the same "correct is not None" gate INCLUDED uses).
+        if trial_type == 'warmup' and correct is not None:
+            warmup.record(side, correct)
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))

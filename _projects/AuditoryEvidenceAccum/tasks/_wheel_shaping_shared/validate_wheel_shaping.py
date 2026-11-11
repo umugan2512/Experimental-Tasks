@@ -2329,6 +2329,47 @@ print("Section 35 result: {0}".format("PASS" if section35_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 36: B7: the warm-up ends on performance (>= 85%, <= 10 points side bias), 20-60 trials")
+print("=" * 100)
+
+def _warm(outcomes_fn, n=100, **kw):
+    g = staircase.WarmupGate(**kw)
+    i = 0
+    while g.next_is_warmup() and i < n:
+        side = 'R' if i % 2 else 'L'
+        g.record(side, outcomes_fn(i, side))
+        i += 1
+    return g
+
+
+_perfect = _warm(lambda i, s: True)
+_bad = _warm(lambda i, s: i % 3 != 0)                 # 67% correct
+_biased = _warm(lambda i, s: s == 'R' or i % 5 != 0)  # 100% on R, 80% on L: 20 points
+_late = _warm(lambda i, s: i >= 30)                   # gets good after 30 trials
+warm_ok = (_perfect.exit_reason == 'criterion' and _perfect.n_drawn == 20
+           and _bad.exit_reason == 'cap' and _bad.n_drawn == 60
+           and _biased.exit_reason == 'cap'
+           and _late.exit_reason == 'criterion' and _late.n_drawn == 39)   # last 10 = 9/10 correct
+print("  perfect -> criterion at 20 ({0}, {1}); 67% -> cap at 60 ({2}, {3}); side-biased -> cap ({4}); "
+      "good from trial 30 -> criterion at 39 ({5}, {6}): {7}".format(
+          _perfect.exit_reason, _perfect.n_drawn, _bad.exit_reason, _bad.n_drawn, _biased.exit_reason,
+          _late.exit_reason, _late.n_drawn, warm_ok))
+warm_wired = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    warm_wired[_st] = ('staircase.WarmupGate(' in _src and 'warmup.next_is_warmup()' in _src
+                       and 'warmup.record(side, correct)' in _src and 'warmup_target' not in _src
+                       and stage_var(_st, 'VAR_WARMUP_TRIAL_MAX') == 60
+                       and "runner.register('WARMUP_EXIT_REASON'" in _src)
+print("  Stages 3-5 use the gate and register WARMUP_EXIT_REASON: {0}".format(warm_wired))
+section36_pass = warm_ok and all(warm_wired.values())
+
+print("Section 36 result: {0}".format("PASS" if section36_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2347,6 +2388,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section32_pass and
                  section33_pass and
                  section34_pass and
-                 section35_pass)
+                 section35_pass and
+                 section36_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
