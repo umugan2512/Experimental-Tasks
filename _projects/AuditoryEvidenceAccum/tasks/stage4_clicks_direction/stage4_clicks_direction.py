@@ -329,9 +329,8 @@ VAR_CAMERA_SNIPPET_S = 1.0
 # --- persisted cross-session state (same file as Stage 1/2) ------------------------------------------
 
 state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
-    'threshold_fraction': 1.0,        # Stage 2's own ceiling, in case this subject somehow never
-                                       # ran Stage 2 -- normally already set to Stage 2's real
-                                       # ending value by the time Stage 4 first runs.
+    'threshold_fraction': staircase.THRESHOLD_FRACTION_DEFAULT,   # fallback only -- normally
+                                       # already set to Stage 2's real ending value.
     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER,
     'click_attenuation_sessions_remaining': VAR_CLICK_ATTENUATION_SESSIONS,
     'sessions_trial_count_history': [],   # shared list name with Stage 1/2 -- harmless, unused by

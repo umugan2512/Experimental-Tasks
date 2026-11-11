@@ -277,8 +277,8 @@ VAR_CAMERA_SNIPPET_S = 1.0
 # --- persisted cross-session state (same file as Stage 1/2/3) ----------------------------------------
 
 state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
-    'threshold_fraction': staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION * 0.5,   # sensible
-                                       # fallback only -- normally already set by Stage 2/3.
+    'threshold_fraction': staircase.THRESHOLD_FRACTION_DEFAULT,   # fallback only -- normally
+                                       # already set to Stage 2's real ending value.
     'consecutive_successes': 0,
     'consecutive_failures': 0,
     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER,

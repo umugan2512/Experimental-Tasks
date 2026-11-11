@@ -2083,6 +2083,21 @@ print("Section 30 result: {0}".format("PASS" if section30_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 31: B9: one threshold_fraction fallback for Stages 3-5")
+print("=" * 100)
+
+tf_checks = {_st: "'threshold_fraction': staircase.THRESHOLD_FRACTION_DEFAULT" in stage_source(_st)
+             for _st in (3, 4, 5)}
+print("  Stages 3-5 fall back to staircase.THRESHOLD_FRACTION_DEFAULT ({0}): {1}".format(
+    staircase.THRESHOLD_FRACTION_DEFAULT, tf_checks))
+section31_pass = all(tf_checks.values()) and staircase.THRESHOLD_FRACTION_DEFAULT == 1.0
+
+print("Section 31 result: {0}".format("PASS" if section31_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2096,6 +2111,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section27_pass and
                  section28_pass and
                  section29_pass and
-                 section30_pass)
+                 section30_pass and
+                 section31_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
