@@ -37,10 +37,10 @@ needed), all embedded in ONE window (no separate popups)**:
   full panel set is taller than most screens). Fed incrementally: each new trial found in the
   parsed CSV since the last poll has its `add_trial()` arguments reconstructed from the raw STATE/
   EVENT/VAL rows (`classify_trial()` for outcome/side, direct VAL lookups for threshold/gain/ITI/
-  trial_type/response_time/click counts). `p_right_target` (Stage 3/4's debiasing target) is the
-  one value never logged -- it's fully recoverable anyway, since `debiasing.next_side_after_error()`'s
-  target is a deterministic function of only the PREVIOUS trial's own logged outcome/side, replayed
-  here trial-by-trial rather than guessed.
+  trial_type/response_time/click counts). `p_right_target` (Stage 3-5's debiasing target) is the
+  P_RIGHT_TARGET VAL since the Hu debiaser (2026-11-11). Older sessions never logged it; their
+  repeat-after-error target (p=0.80, a deterministic function of the previous trial's own logged
+  outcome/side) is replayed trial-by-trial instead.
 - A camera snippet, refreshed from `CameraRecorder`'s own new live-frame JPEG export
   (`<video_stem>_latest.jpg`, see `_shared/camera_recorder.py`) rather than the growing
   `session_video.avi` file itself -- confirmed directly that `cv2.VideoWriter` (XVID/.avi) writes
@@ -112,7 +112,6 @@ import session_csv_parser     # noqa: E402
 import build_training_log     # noqa: E402
 import sync_training_log      # noqa: E402
 import wheel_shaping_plots    # noqa: E402
-import debiasing               # noqa: E402
 
 import openpyxl  # noqa: E402
 
@@ -850,6 +849,10 @@ def _val_str(trial, key, session_vals=None):
     return v
 
 
+# The pre-2026-11-11 repeat-after-error probability, only to replay old sessions' side target.
+_OLD_DEBIAS_REPEAT_PROB = 0.80
+
+
 class PlotFeeder(object):
     """ Owns one long-lived WheelShapingPlots instance for the currently-watched session and feeds
     it incrementally -- each poll() call only replays trials beyond the count already fed, mirroring
@@ -982,9 +985,11 @@ class PlotFeeder(object):
 
             if trial_type == 'repeat' or info['stage'] == 3:   # Stage 3: the side is the block's
                 p_right_target = 1.0 if side == 'R' else 0.0
-            elif self._replay_prev_outcome == 'incorrect':
-                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if self._replay_prev_side == 'R'
-                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
+            elif _val_float(trial, 'P_RIGHT_TARGET', self.session_vals) is not None:
+                p_right_target = _val_float(trial, 'P_RIGHT_TARGET', self.session_vals)
+            elif self._replay_prev_outcome == 'incorrect':   # sessions before the Hu debiaser
+                p_right_target = (_OLD_DEBIAS_REPEAT_PROB if self._replay_prev_side == 'R'
+                                   else 1.0 - _OLD_DEBIAS_REPEAT_PROB)
             else:
                 p_right_target = 0.5
             kwargs['p_right_target'] = p_right_target

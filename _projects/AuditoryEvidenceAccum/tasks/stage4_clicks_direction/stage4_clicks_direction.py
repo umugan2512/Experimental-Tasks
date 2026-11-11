@@ -29,10 +29,10 @@ procedure (derive_intrial_threshold.py) only runs at the END of Stage 5 -- repla
 'in_trial_threshold_deg' once that has run at least once for this subject.
 
 Every session opens with a warm-up block (20-40 trials, drawn fresh each session, TRIAL_TYPE=
-'warmup') excluded from the accuracy/abort-rate stats that feed advancement. After an error, the
-SAME side is re-presented with high probability (debiasing.next_side_after_error(), a small
-literal implementation of the doc's own rule -- deliberately NOT trial_scheduler.py's more
-elaborate lookback machinery, which implements a different policy). A session ends at the first
+'warmup') excluded from the accuracy/abort-rate stats that feed advancement. Sides come from Hu
+et al. (2009)'s debiaser (debiasing.HuDebiaser, spec B2, 2026-11-11), which replaced "after an error
+re-present the same side with p=0.80" -- that rule paid a lose-shift animal 62% without listening.
+An abort still re-offers the same side (TRIAL_TYPE='repeat'). A session ends at the first
 of: the 90-minute cap, 3 continuous minutes with no trial initiated, 20 consecutive aborts, or
 sub-chance accuracy across 3 consecutive 20-trial blocks (SS3.2) -- SESSION_END_REASON records
 which. Advance after three consecutive sessions meeting staircase.stage4_gates_met() (>70% correct
@@ -337,6 +337,7 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'click_attenuation_sessions_remaining': VAR_CLICK_ATTENUATION_SESSIONS,
     'sessions_trial_count_history': [],   # shared list name with Stage 1/2 -- harmless, unused by
                                            # this stage's own advancement gate (stage4_sessions_history)
+    'hu_debias_history': [],              # [[side, correct], ...] responded trials, Stage 3-5
     'stage4_sessions_history': [],        # bools: did each past Stage-4 session meet
                                            # staircase.stage4_gates_met()? (3-consecutive check)
     'stim_duration_s': VAR_STIM_DURATION_S,   # read only, to report a value left by the old cue
@@ -483,8 +484,8 @@ main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos 
 warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
 fresh_trial_count = 0           # non-repeat trial draws so far this session
 
-prev_outcome = None             # 'correct'/'incorrect'/None -- drives debiasing
-prev_side = None
+# Hu debiaser, seeded with this subject's responded trials from earlier Stage 3-5 sessions.
+debiaser = debiasing.HuDebiaser(history=state.get('hu_debias_history'))
 pending_repeat = False
 repeat_side = None
 
@@ -525,13 +526,8 @@ while True:
         else:
             fresh_trial_count += 1
             trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
-            if prev_outcome == 'incorrect':
-                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if prev_side == 'R'
-                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
-                side = debiasing.next_side_after_error(prev_side)
-            else:
-                p_right_target = 0.5
-                side = np.random.choice(['L', 'R'])
+            side = debiaser.next_side(np.random)
+            p_right_target = debiaser.last['p_right']
 
         if quiescence_unlocked:
             quiescence_scale_this_trial = quiescence_obj.current_s
@@ -560,6 +556,12 @@ while True:
 
         runner.register('TRIAL_TYPE', trial_type)
         runner.register('TRIAL_SIDE', side)
+        if trial_type != 'repeat':
+            runner.register('P_RIGHT_TARGET', round(debiaser.last['p_right'], 4))
+            runner.register('P_RIGHT_DRAW', round(debiaser.last['prob_right'], 4))
+            runner.register('E_RIGHT', round(debiaser.last['e_right'], 4))
+            runner.register('E_LEFT', round(debiaser.last['e_left'], 4))
+            runner.register('F_RIGHT_EMPIRICAL', round(debiaser.last['f_right'], 4))
         runner.register('CLICK_TIMES_L', ','.join(
             '{0:.4f}'.format(t) for t in trial_clicks['left_times']))
         runner.register('CLICK_TIMES_R', ','.join(
@@ -927,8 +929,8 @@ while True:
             response = None
         correct = rewarded if outcome_state in ('Reward', 'ErrorConsumption') else None
 
-        prev_outcome = 'correct' if correct else ('incorrect' if correct is False else None)
-        prev_side = side
+        if correct is not None:
+            debiaser.record(side, correct)
 
         # accuracy_aos (session end) is conditional on a genuine L/R response -- a NoResponse
         # trial contributes to neither the numerator nor denominator here (it's already a
@@ -1031,6 +1033,7 @@ if quiescence_unlocked:
     state.set('quiescence_consecutive_successes', quiescence_obj.consecutive_successes)
     state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
 
+state.set('hu_debias_history', debiaser.history())
 state.save()
 
 print("Session: {0} main trials, accuracy(AOS)={1:.1%}, abort_rate={2:.1%}, gates_met={3}".format(

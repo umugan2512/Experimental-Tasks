@@ -14,7 +14,7 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   7. QuiescenceStaircase (unlocked as early as Stage 2): step-up/step-down, floor/ceiling, same
      shape as Section 1
   8. stage4_gates_met()/stage5_gates_met()/select_stage5_staircase_to_tighten() (Tag B policy)
-  9. debiasing.next_side_after_error(): statistical repeat-rate check over many draws
+  9. debiasing.HuDebiaser: always-right and win-stay/lose-shift agents earn ~16% / ~50%
   10. session_csv_parser.STREAM_KEYS fix: repeated VAL rows (e.g. WHEEL_POS) are retained as a
       list, not collapsed to the last value -- the additions.txt T3 regression this guards against
   11. derive_intrial_threshold.py: sliding-window excursion percentile against a synthetic trace
@@ -671,31 +671,65 @@ section8_pass = section8a_pass and section8b_pass and section8c_pass
 print("Section 8 result: {0}".format("PASS" if section8_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 9: debiasing.next_side_after_error() -- statistical repeat-rate check
+# Section 9: debiasing.HuDebiaser (Hu et al. 2009, spec B2) against the reference strategies
 # ==================================================================================================
 
 print()
 print("=" * 100)
-print("Section 9: debiasing.next_side_after_error()")
+print("Section 9: debiasing.HuDebiaser vs side-biased and history-driven agents")
 print("=" * 100)
 
-rng = np.random.RandomState(12345)
-n_draws = 20000
-repeats = sum(1 for _ in range(n_draws)
-              if debiasing.next_side_after_error('L', rng=rng) == 'L')
-realized_rate = repeats / float(n_draws)
-rate_within_tol = abs(realized_rate - debiasing.VAR_DEBIAS_REPEAT_PROB) < 0.02
-print("  Realized repeat rate over {0} draws (target {1:.2f}): {2:.4f} -- within 2%: {3}".format(
-    n_draws, debiasing.VAR_DEBIAS_REPEAT_PROB, realized_rate, rate_within_tol))
 
-flip_only = all(debiasing.next_side_after_error('R', rng=rng, repeat_prob=0.0) == 'L'
-                 for _ in range(50))
-repeat_only = all(debiasing.next_side_after_error('R', rng=rng, repeat_prob=1.0) == 'R'
-                   for _ in range(50))
-print("  repeat_prob=0.0 always flips: {0}".format(flip_only))
-print("  repeat_prob=1.0 always repeats: {0}".format(repeat_only))
+def _hu_run(agent, n=20000, seed=9):
+    rng9 = np.random.RandomState(seed)
+    d9 = debiasing.HuDebiaser()
+    prev, rewarded, post_err, post_err_ok, p_rs = None, 0, 0, 0, []
+    for _ in range(n):
+        side = d9.next_side(rng9)
+        p_rs.append(d9.last['p_right'])
+        choice = agent(side, prev, rng9)
+        ok = choice == side
+        rewarded += ok
+        if prev is not None and not prev[1]:
+            post_err += 1
+            post_err_ok += ok
+        d9.record(side, ok)
+        prev = (choice, ok)
+    return rewarded / float(n), post_err_ok / float(max(post_err, 1)), min(p_rs), max(p_rs)
 
-section9_pass = rate_within_tol and flip_only and repeat_only
+
+def _always_right(side, prev, rng9):
+    return 'R'
+
+
+def _wsls(side, prev, rng9):   # win-stay / lose-shift, never listens
+    if prev is None:
+        return 'R'
+    return prev[0] if prev[1] else ('L' if prev[0] == 'R' else 'R')
+
+
+_ar = _hu_run(_always_right)
+_ws = _hu_run(_wsls)
+always_right_ok = abs(_ar[0] - 0.16) < 0.02
+wsls_ok = abs(_ws[0] - 0.50) < 0.02
+caps_ok = all(0.15 - 1e-9 <= x <= 0.85 + 1e-9 for x in (_ar[2], _ar[3], _ws[2], _ws[3]))
+print("  always-right agent earns {0:.1%} (expect ~16%; 29% under the old repeat-after-error rule): {1}".format(
+    _ar[0], always_right_ok))
+print("  win-stay/lose-shift agent earns {0:.1%} overall, {1:.1%} after errors (expect ~50%; old rule "
+      "62% / 80%): {2}".format(_ws[0], _ws[1], wsls_ok))
+print("  p_R stays within the 0.15-0.85 caps: {0} (always-right {1:.3f}-{2:.3f}, WSLS {3:.3f}-{4:.3f})".format(
+    caps_ok, _ar[2], _ar[3], _ws[2], _ws[3]))
+_d9 = debiasing.HuDebiaser()
+_first = _d9.next_side(np.random.RandomState(1))
+first_ok = _d9.last['prob_right'] == 0.5
+_d9b = debiasing.HuDebiaser(history=[['R', True]] * 250)
+persist_ok = len(_d9b.history()) == debiasing.HU_HISTORY_KEEP and _d9b.history()[-1] == ['R', True]
+print("  an empty history draws 50/50: {0}; history round-trips, capped at {1}: {2}".format(
+    first_ok, debiasing.HU_HISTORY_KEEP, persist_ok))
+no_old_rule = not hasattr(debiasing, 'next_side_after_error') and not hasattr(debiasing, 'VAR_DEBIAS_REPEAT_PROB')
+print("  the repeat-after-error rule is gone: {0}".format(no_old_rule))
+
+section9_pass = always_right_ok and wsls_ok and caps_ok and first_ok and persist_ok and no_old_rule
 print("Section 9 result: {0}".format("PASS" if section9_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -2113,6 +2147,27 @@ print("Section 32 result: {0}".format("PASS" if section32_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 33: B2: Stages 4/5 draw sides from the Hu debiaser and persist its history")
+print("=" * 100)
+
+hu_checks = {}
+for _st in (4, 5):
+    _src = stage_source(_st)
+    hu_checks[_st] = ('debiaser.next_side(np.random)' in _src and 'next_side_after_error' not in _src
+                      and 'VAR_DEBIAS_REPEAT_PROB' not in _src and "state.set('hu_debias_history'" in _src
+                      and all("runner.register('%s'" % k in _src for k in
+                              ('P_RIGHT_TARGET', 'E_RIGHT', 'E_LEFT', 'F_RIGHT_EMPIRICAL'))
+                      and "trial_type = 'repeat'" in _src)
+print("  Stages 4/5: Hu sides, P_RIGHT_TARGET/E_RIGHT/E_LEFT/F_RIGHT_EMPIRICAL registered, history "
+      "saved, abort re-offer kept: {0}".format(hu_checks))
+section33_pass = all(hu_checks.values())
+
+print("Section 33 result: {0}".format("PASS" if section33_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2128,6 +2183,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section29_pass and
                  section30_pass and
                  section31_pass and
-                 section32_pass)
+                 section32_pass and
+                 section33_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
