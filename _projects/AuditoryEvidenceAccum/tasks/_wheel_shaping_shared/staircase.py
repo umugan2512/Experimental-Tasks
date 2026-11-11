@@ -156,6 +156,16 @@ def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_c
     return trial_count >= trial_count_gate and iti_s >= ITI_CEILING_S and direction_ratio_in_band
 
 
+# --- Every stage ----------------------------------------------------------------------------------
+
+# J2: threshold crossing -> dot offset, one window for every stage and both outcomes (spec A5,
+# 2026-11-11; was 0.4-0.9s). Any jitter gives most of the separability and 300ms of width is past
+# the knee of the J1 simulation (Methods B 4.2); the 0.3s lower bound keeps the offset transient out
+# of the first few hundred ms after the crossing (valve click, earliest outcome responses).
+DOT_DISAPPEAR_MIN_S = 0.3
+DOT_DISAPPEAR_MAX_S = 0.6
+
+
 # --- Stage 3/4/5 (training_protocol.md Revision 2) -----------------------------------------------
 
 QUIESCENCE_STEP_UP_S = 0.025        # doc: "+25ms per 20 consecutive successful initiations"

@@ -406,6 +406,25 @@ def audit(folder):
                     'INFO', 'max {0:.0f}ms, median {1:.0f}ms; > {2:.0f}ms on {3} trial(s){4}'.format(
                         max(xs), statistics.median(xs), BUDGET['stream_read_gap_max_ms'], len(over),
                         ' ({0})'.format(', '.join(str(i) for i in over[:10])) if over else '')))
+    # J2 (crossing -> dot offset): the offset the render loop actually painted vs the drawn delay,
+    # per outcome (since 2026-11-11 DOT_CLEAR_TIME, and DOT_DISAPPEAR_JITTER_S in every stage).
+    j2 = {}
+    for t in trials:
+        req, frz, clr = (_val(t, 'DOT_DISAPPEAR_JITTER_S'), _val(t, 'DOT_FREEZE_TIME'),
+                         _val(t, 'DOT_CLEAR_TIME'))
+        if None not in (req, frz, clr):
+            last = {k: (t['vals'].get(k) or [None])[-1] for k in ('CORRECT', 'OUTCOME')}
+            outcome = ('rewarded' if last['CORRECT'] in ('True', '1') or last['OUTCOME'] == 'Rewarded'
+                       else 'unrewarded')
+            j2.setdefault(outcome, []).append((clr - frz, req))
+    if j2:
+        pairs = [p for ps in j2.values() for p in ps]
+        late = [m - r for m, r in pairs]
+        add('dot offset painted within 50ms of its drawn J2 delay', all(-0.005 <= d < 0.05 for d in late),
+            'measured - drawn: max {0:.1f}ms, median {1:.1f}ms; measured J2 {2}'.format(
+                max(late) * 1e3, statistics.median(late) * 1e3, ', '.join(
+                    '{0} {1:.2f}-{2:.2f}s (n={3})'.format(k, min(m for m, _ in v), max(m for m, _ in v), len(v))
+                    for k, v in sorted(j2.items()))))
     gc_ms = [x for x in (_val(t, 'GC_MAX_MS') for t in trials) if x is not None]
     if gc_ms:   # since 2026-11-03: full collections held off for the session (_hold_full_gc)
         out.append(('longest garbage collection per trial (holds every thread)', 'INFO',

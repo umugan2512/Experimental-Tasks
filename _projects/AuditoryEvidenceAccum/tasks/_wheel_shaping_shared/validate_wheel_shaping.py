@@ -1970,6 +1970,26 @@ print("Section 26 result: {0}".format("PASS" if section26_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 27: A5: J2 (crossing -> dot offset) is 0.3-0.6s in every stage, from one constant")
+print("=" * 100)
+
+j2_checks = {}
+for _st in (1, 2, 3, 4, 5):
+    _src = stage_source(_st)
+    j2_checks[_st] = ('VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S' in _src
+                      and 'VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S' in _src
+                      and 'uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)' in _src)
+window_ok = (staircase.DOT_DISAPPEAR_MIN_S, staircase.DOT_DISAPPEAR_MAX_S) == (0.3, 0.6)
+print("  shared window 0.3-0.6s: {0}; every stage draws J2 from it (one window for both outcomes): "
+      "{1}".format(window_ok, j2_checks))
+section27_pass = window_ok and all(j2_checks.values())
+
+print("Section 27 result: {0}".format("PASS" if section27_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -1979,6 +1999,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section23_pass and
                  section24_pass and
                  section25_pass and
-                 section26_pass)
+                 section26_pass and
+                 section27_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

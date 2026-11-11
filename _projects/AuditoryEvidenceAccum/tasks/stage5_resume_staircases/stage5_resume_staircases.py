@@ -217,8 +217,8 @@ VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2     # (now a native, abort-guarded DotOnsetDelay state at the
                                      # end of cue_sma -- see the trial loop)
-VAR_DOT_DISAPPEAR_MIN_S = 0.4
-VAR_DOT_DISAPPEAR_MAX_S = 0.9
+VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S   # J2, shared by all stages (spec A5)
+VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S
 
 VAR_DOT_EDGE_FRACTION = 0.9
 VAR_RENDER_HZ = 30

@@ -195,9 +195,9 @@ VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target r
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1    # J1 (training_protocol.md SS1.5) -- runs at its FINAL value
-VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes (doc: "the LED->dot and
-VAR_DOT_DISAPPEAR_MIN_S = 0.4       # crossing->offset relationships should never change during
-VAR_DOT_DISAPPEAR_MAX_S = 0.9       # training")
+VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes
+VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S   # J2, shared by all stages (spec A5)
+VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S
 
 VAR_DOT_EDGE_FRACTION = 0.9         # SS1.3: place the threshold at ~90% of edge azimuth
 VAR_GAIN_INITIAL_MULT = 3.0         # decays via staircase.decay_gain() (-0.1x/qualifying session,
@@ -512,6 +512,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         runner.register('MOVEMENT_DIRECTION', side if side is not None else 'none')
         runner.register('OUTCOME', outcome)
         runner.register('GAIN_MULT', cur_gain_mult)
+        runner.register('DOT_DISAPPEAR_JITTER_S', disappear_delay_s)
         if rewarded:
             runner.register('THRESHOLD_CROSSING_TIME', send_t + visited[outcome_state][-1][0])
 
