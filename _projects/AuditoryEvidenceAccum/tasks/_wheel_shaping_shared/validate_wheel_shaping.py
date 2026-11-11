@@ -874,48 +874,57 @@ print("=" * 100)
 print("Section 13: BoundedStaircase + next_alternating_value()")
 print("=" * 100)
 
-sd = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
-for _ in range(staircase.STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP - 1):
+# The former Stage 3/4 cue ramp's numbers (removed 2026-11-11, spec B3) as a generic test case.
+_SD13_STARTING_S, _SD13_FINAL_S, _SD13_STEP_S = 0.35, 2.0, 0.25
+_SD13_SUCCESSES_TO_STEP_UP, _SD13_FAILURES_TO_STEP_DOWN = 20, 5
+
+
+def _bounded13(current_s):
+    return staircase.BoundedStaircase(current_s, _SD13_STEP_S, _SD13_STEP_S, _SD13_SUCCESSES_TO_STEP_UP,
+                                      _SD13_FAILURES_TO_STEP_DOWN, _SD13_STARTING_S, _SD13_FINAL_S)
+
+sd = _bounded13(_SD13_STARTING_S)
+for _ in range(_SD13_SUCCESSES_TO_STEP_UP - 1):
     sd.record_outcome(True)
-print("  19 consecutive correct: duration unchanged (0.25s): {0}".format(
-    sd.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+print("  19 consecutive correct: duration unchanged (0.35s): {0}".format(
+    sd.current_value == _SD13_STARTING_S))
 sd.record_outcome(True)
 print("  20th consecutive correct: duration steps UP by {0}s: {1}".format(
-    staircase.STAGE34_STIM_DURATION_STEP_S,
-    sd.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
-                          + staircase.STAGE34_STIM_DURATION_STEP_S)))
+    _SD13_STEP_S,
+    sd.current_value == (_SD13_STARTING_S
+                          + _SD13_STEP_S)))
 
-sd2 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_FINAL_S)
+sd2 = _bounded13(_SD13_FINAL_S)
 for _ in range(500):
     sd2.record_outcome(True)
 print("  duration never exceeds the final ceiling after many correct: {0}".format(
-    sd2.current_value == staircase.STAGE34_STIM_DURATION_FINAL_S))
+    sd2.current_value == _SD13_FINAL_S))
 
-sd3 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+sd3 = _bounded13(_SD13_STARTING_S)
 for _ in range(500):
     sd3.record_outcome(False)
 print("  duration never drops below the starting floor after many incorrect: {0}".format(
-    sd3.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+    sd3.current_value == _SD13_STARTING_S))
 
-sd4 = staircase.new_stim_duration_staircase(
-    staircase.STAGE34_STIM_DURATION_STARTING_S + staircase.STAGE34_STIM_DURATION_STEP_S)
-for _ in range(staircase.STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN - 1):
+sd4 = _bounded13(
+    _SD13_STARTING_S + _SD13_STEP_S)
+for _ in range(_SD13_FAILURES_TO_STEP_DOWN - 1):
     sd4.record_outcome(False)
 print("  4 consecutive incorrect: duration unchanged: {0}".format(
-    sd4.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
-                           + staircase.STAGE34_STIM_DURATION_STEP_S)))
+    sd4.current_value == (_SD13_STARTING_S
+                           + _SD13_STEP_S)))
 sd4.record_outcome(False)
 print("  5th consecutive incorrect: duration steps back DOWN: {0}".format(
-    sd4.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+    sd4.current_value == _SD13_STARTING_S))
 
 # A single incorrect after a long correct streak resets the success counter (no step), same
 # "streak resets on the opposite outcome" convention as ThresholdStaircase.
-sd5 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+sd5 = _bounded13(_SD13_STARTING_S)
 for _ in range(19):
     sd5.record_outcome(True)
 sd5.record_outcome(False)
 print("  a single incorrect after 19 correct resets the streak (no step, consecutive_successes="
-      "0): {0}".format(sd5.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+      "0): {0}".format(sd5.current_value == _SD13_STARTING_S
                         and sd5.consecutive_successes == 0))
 
 # next_alternating_value(): same-day unchanged, new-day alternates.
@@ -932,12 +941,12 @@ print("  a multi-day gap still just alternates once, from the last-used side: {0
     gap_day == 'L'))
 
 section13_pass = (
-    sd.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
-                          + staircase.STAGE34_STIM_DURATION_STEP_S)
-    and sd2.current_value == staircase.STAGE34_STIM_DURATION_FINAL_S
-    and sd3.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
-    and sd4.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
-    and sd5.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+    sd.current_value == (_SD13_STARTING_S
+                          + _SD13_STEP_S)
+    and sd2.current_value == _SD13_FINAL_S
+    and sd3.current_value == _SD13_STARTING_S
+    and sd4.current_value == _SD13_STARTING_S
+    and sd5.current_value == _SD13_STARTING_S
     and sd5.consecutive_successes == 0
     and same_day == 'R' and new_day_from_r == 'L' and new_day_from_l == 'R' and gap_day == 'L')
 print("Section 13 result: {0}".format("PASS" if section13_pass else "FAIL -- see checks above"))
@@ -1994,7 +2003,7 @@ print("Section 28: A6: initial cue 0.35s, and every trial's cue window has a cli
 print("=" * 100)
 
 import click_train_v2 as _ct28
-cue_ok = (staircase.STAGE34_STIM_DURATION_STARTING_S == 0.35 and stage_var(5, 'VAR_STIM_DURATION_S') == 0.35)
+cue_ok = (staircase.CUE_DURATION_S == 0.35 and 'VAR_STIM_DURATION_S = staircase.CUE_DURATION_S' in stage_source(5))
 print("  Stage 3/4 cue starts (and floors) at 0.35s, Stage 5's fixed cue is 0.35s: {0}".format(cue_ok))
 _rng28 = np.random.RandomState(28)
 _n, _resampled, _empty = 20000, 0, 0
@@ -2029,6 +2038,29 @@ print("Section 28 result: {0}".format("PASS" if section28_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 29: B3: the cue is fixed at 0.35s in Stages 3-5 (no cue-duration staircase)")
+print("=" * 100)
+
+cue_fixed = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    cue_fixed[_st] = ('VAR_STIM_DURATION_S = staircase.CUE_DURATION_S' in _src
+                      and 'stim_duration_staircase' not in _src and "state.set('stim_duration_s'" not in _src
+                      and ('CLICK_START_OFFSET_S + stim_duration_this_trial' in _src
+                           or 'CLICK_START_OFFSET_S + VAR_STIM_DURATION_S' in _src))
+for _st in (3, 4):
+    cue_fixed['reset logged %d' % _st] = "register_value('STIM_DURATION_RESET_FROM_S'" in stage_source(_st)
+gone_ok = not any(hasattr(staircase, n) for n in ('new_stim_duration_staircase', 'STAGE34_STIM_DURATION_STARTING_S'))
+print("  Stages 3-5 play VAR_STIM_DURATION_S = CUE_DURATION_S, never write 'stim_duration_s', "
+      "Stage 3/4 log a leftover saved value: {0}; staircase.py has no cue ramp: {1}".format(cue_fixed, gone_ok))
+section29_pass = all(cue_fixed.values()) and gone_ok and staircase.CUE_DURATION_S == 0.35
+
+print("Section 29 result: {0}".format("PASS" if section29_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2040,6 +2072,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section25_pass and
                  section26_pass and
                  section27_pass and
-                 section28_pass)
+                 section28_pass and
+                 section29_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

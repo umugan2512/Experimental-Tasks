@@ -184,7 +184,7 @@ VAR_THRESHOLD_FINAL_DEG = 35
 VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per explicit
                                       # instruction. (MAIN trials only)
 
-VAR_STIM_DURATION_S = 0.35           # same as Stage 3/4 (spec A6) -- extended only from Stage 6 on
+VAR_STIM_DURATION_S = staircase.CUE_DURATION_S   # 0.35s, as Stage 3/4 (spec A6) -- extended from Stage 6
 VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
 VAR_DELAY_DURATION_MAX_S = 0.2
 

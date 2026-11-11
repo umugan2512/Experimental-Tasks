@@ -218,27 +218,11 @@ STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION = 0.90   # doc: "current -> final (90% 
                                                     # own 1.0 ceiling (which stays unchanged; Stage 5
                                                     # just treats 0.90 as "done" for advancement).
 
-# Stage 3/4's stimulus-duration and ITI ramps, per explicit instruction ("similar to degree or ISI
-# ramp" -- i.e. the same step-up-on-consecutive-correct/step-down-on-consecutive-incorrect shape
-# ThresholdStaircase already established for the movement threshold). Doc doesn't specify either
-# ramp at all (0.25s stimulus duration and 1.5s ITI were previously FIXED Stage 3/4 constants) --
-# every value below is a flagged/tunable placeholder, same convention as
-# VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER elsewhere. Both start at the doc's own original fixed
-# value and grow toward a longer (easier -- more time/evidence per trial, or more consumption/
-# rest time) final value as performance improves, shrinking back toward that starting value on a
-# consecutive-incorrect streak -- never below it, since that was the doc's own doc-specified
-# floor to begin with. Shared across Stage 3 and Stage 4 (one continuous persisted value each,
-# not reset when a subject advances from Stage 3 to Stage 4), same cross-stage persistence
-# convention as the response-threshold `threshold_fraction`.
-STAGE34_STIM_DURATION_STARTING_S = 0.35   # this ramp's starting point AND floor. 0.35s since
-                                           # 2026-11-11 (spec A6; was 0.25s): Ott et al. 2024's
-                                           # stimulus duration. At 20Hz, gamma=1 that is ~7 clicks
-                                           # instead of 5, and an empty train e^-7 instead of e^-5.
-STAGE34_STIM_DURATION_FINAL_S = 2.0       # click_train_v2's own module-level default duration --
-                                           # a natural, already-present "full" reference
-STAGE34_STIM_DURATION_STEP_S = 0.25
-STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP = 20   # same consecutive-counts as ThresholdStaircase
-STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN = 5
+# Stages 3-5 play a FIXED cue (spec A6/B3, 2026-11-11): 0.35s, Ott et al. 2024's stimulus
+# duration. The former STAGE34_STIM_DURATION_* staircase (0.25 -> 2.0s) is gone: it added a
+# second change while direction was being learned, and with one-sided clicks it only added
+# more same-side clicks. Cue extension becomes its own stage (Stage 6, not built).
+CUE_DURATION_S = 0.35
 
 # No ITI staircase after Stage 2 (2026-11-11 spec A2): Stages 3-5 use a fixed VAR_ITI_S = 1.5s and
 # VAR_INCORRECT_ITI_S = 4.0s. The former STAGE34_ITI_* ramp (1.5 -> 3.0s) is gone.
@@ -247,9 +231,9 @@ STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN = 5
 class BoundedStaircase(object):
     """ Generic step-up-after-N-consecutive-successes / step-down-after-N-consecutive-failures
     staircase, bounded by [floor_value, ceiling_value] -- the same mechanic as ThresholdStaircase/
-    QuiescenceStaircase above, generalized so Stage 3/4's new stimulus-duration and ITI ramps
-    don't need their own near-duplicate classes (they're the identical shape, just different
-    units/step-sizes/bounds). Each consecutive counter resets to 0 on the OPPOSITE outcome, same
+    QuiescenceStaircase above, generalized for any further bounded ramp (Stage 3/4's former
+    stimulus-duration and ITI ramps used it; both are gone since 2026-11-11, spec A2/B3). Each
+    consecutive counter resets to 0 on the OPPOSITE outcome, same
     "streak resets on the opposite outcome" convention used throughout this file.
 
     Constructed fresh from persisted StageState each session (current_value/consecutive_successes/
@@ -283,16 +267,6 @@ class BoundedStaircase(object):
             if self.consecutive_failures >= self._failures_to_step_down:
                 self.current_value = max(self._floor_value, self.current_value - self._step_down)
                 self.consecutive_failures = 0
-
-
-def new_stim_duration_staircase(current_s, consecutive_successes=0, consecutive_failures=0):
-    """ Factory for Stage 3/4's shared stimulus-duration BoundedStaircase -- see
-    STAGE34_STIM_DURATION_* constants above for the actual numbers. """
-    return BoundedStaircase(
-        current_s, STAGE34_STIM_DURATION_STEP_S, STAGE34_STIM_DURATION_STEP_S,
-        STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP, STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN,
-        STAGE34_STIM_DURATION_STARTING_S, STAGE34_STIM_DURATION_FINAL_S,
-        consecutive_successes, consecutive_failures)
 
 
 def next_alternating_value(last_value, last_date_str, today_str, choices):

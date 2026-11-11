@@ -215,13 +215,7 @@ VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per 
                                       # instruction. (MAIN trials only -- warmup/
                                       # repeat excluded, see session_trial_count below)
 
-# Stimulus duration is no longer a fixed VAR_ constant -- it's now a within-session
-# staircase.BoundedStaircase (see stim_duration_staircase below, constructed once persisted state
-# is loaded, SHARED with Stage 3 -- one continuous value, not reset across the stage boundary),
-# starting from the doc's own original 0.25s and growing/shrinking per trial. Its per-trial
-# CURRENT value overrides click_train_v2's own 2.0s module default via its additive
-# stim_duration_s parameter (generation/ISI math itself untouched), same mechanism the old fixed
-# constant used.
+VAR_STIM_DURATION_S = staircase.CUE_DURATION_S   # fixed 0.35s cue through Stages 3-5 (spec A6/B3)
 VAR_DELAY_DURATION_MIN_S = 0.1       # Tag A: cue-to-go gap, 100-200ms FIXED range at Stage 4
 VAR_DELAY_DURATION_MAX_S = 0.2       # (staircased 0-750ms only from Stage 7 onward, not built here)
 
@@ -338,9 +332,8 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
                                            # this stage's own advancement gate (stage4_sessions_history)
     'stage4_sessions_history': [],        # bools: did each past Stage-4 session meet
                                            # staircase.stage4_gates_met()? (3-consecutive check)
-    'stim_duration_s': staircase.STAGE34_STIM_DURATION_STARTING_S,
-    'stim_duration_consecutive_successes': 0,
-    'stim_duration_consecutive_failures': 0,
+    'stim_duration_s': VAR_STIM_DURATION_S,   # read only, to report a value left by the old cue
+                                               # staircase; never written since 2026-11-11
     'quiescence_unlocked': False,    # set by Stage 2 only -- fallback for a subject that somehow
                                       # skipped it (see VAR_QUIESCENCE_S above).
     'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
@@ -352,13 +345,9 @@ VAR_RESPONSE_THRESHOLD_DEG = state.get('threshold_fraction') * VAR_THRESHOLD_FIN
 VAR_CUE_ABORT_THRESHOLD_DEG = state.get('in_trial_threshold_deg')
 _click_attenuation_remaining = state.get('click_attenuation_sessions_remaining')
 
-STIM_DURATION_RESET_FROM_S = None
-if (state.get('stim_duration_s') or 0) < staircase.STAGE34_STIM_DURATION_STARTING_S - 1e-9:
-    STIM_DURATION_RESET_FROM_S = state.get('stim_duration_s')   # saved under the old 0.25s floor
-    state.set('stim_duration_s', staircase.STAGE34_STIM_DURATION_STARTING_S)
-stim_duration_staircase = staircase.new_stim_duration_staircase(
-    state.get('stim_duration_s'), state.get('stim_duration_consecutive_successes'),
-    state.get('stim_duration_consecutive_failures'))
+STIM_DURATION_RESET_FROM_S = (state.get('stim_duration_s')
+                              if abs((state.get('stim_duration_s') or 0) - VAR_STIM_DURATION_S) > 1e-9
+                              else None)   # left by the old cue staircase
 # Read-only: Stage 1/2 own 'iti_s'. A value above VAR_ITI_S came from the old Stage 3/4 ramp.
 ITI_RESET_FROM_S = (state.get('iti_s') if (state.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
 
@@ -546,9 +535,7 @@ while True:
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
 
         # additions.txt T1: fresh per-trial seed, not a globally reseeded generator.
-        # The staircase's CURRENT value is captured once here, at trial start -- record_outcome()
-        # (below, once this trial's outcome is known) only changes what the NEXT trial sees.
-        stim_duration_this_trial = stim_duration_staircase.current_value
+        stim_duration_this_trial = VAR_STIM_DURATION_S
         iti_this_trial = VAR_ITI_S
         trial_clicks, stim_seed, stim_resamples = click_train.draw_trial_clicks_with_cue(
             'AOS', side, stim_duration_this_trial)
@@ -942,7 +929,6 @@ while True:
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
-            stim_duration_staircase.record_outcome(bool(correct))
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -1029,9 +1015,6 @@ advance_ready = len(history) >= 3 and all(history[-3:])
 if _click_attenuation_remaining > 0:
     state.set('click_attenuation_sessions_remaining', _click_attenuation_remaining - 1)
 
-state.set('stim_duration_s', stim_duration_staircase.current_value)
-state.set('stim_duration_consecutive_successes', stim_duration_staircase.consecutive_successes)
-state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecutive_failures)
 
 if quiescence_unlocked:
     state.set('quiescence_s', quiescence_obj.current_s)
