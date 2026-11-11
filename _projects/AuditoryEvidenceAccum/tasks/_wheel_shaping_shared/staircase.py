@@ -228,16 +228,8 @@ STAGE34_STIM_DURATION_STEP_S = 0.25
 STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP = 20   # same consecutive-counts as ThresholdStaircase
 STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN = 5
 
-STAGE34_ITI_STARTING_S = 1.5               # doc's own original fixed Stage 3/4 correct-trial ITI
-                                            # (also Stage 2's own final ITI_CEILING_S) -- this
-                                            # ramp's own starting point AND floor. The separate
-                                            # error-trial VAR_INCORRECT_ITI_S (4.0s) is NOT ramped
-                                            # -- only the one continuous ITI value Stage 2's own
-                                            # grow_iti() already established gets this treatment.
-STAGE34_ITI_FINAL_S = 3.0
-STAGE34_ITI_STEP_S = 0.25
-STAGE34_ITI_SUCCESSES_TO_STEP_UP = 20
-STAGE34_ITI_FAILURES_TO_STEP_DOWN = 5
+# No ITI staircase after Stage 2 (2026-11-11 spec A2): Stages 3-5 use a fixed VAR_ITI_S = 1.5s and
+# VAR_INCORRECT_ITI_S = 4.0s. The former STAGE34_ITI_* ramp (1.5 -> 3.0s) is gone.
 
 
 class BoundedStaircase(object):
@@ -288,16 +280,6 @@ def new_stim_duration_staircase(current_s, consecutive_successes=0, consecutive_
         current_s, STAGE34_STIM_DURATION_STEP_S, STAGE34_STIM_DURATION_STEP_S,
         STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP, STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN,
         STAGE34_STIM_DURATION_STARTING_S, STAGE34_STIM_DURATION_FINAL_S,
-        consecutive_successes, consecutive_failures)
-
-
-def new_iti_staircase(current_s, consecutive_successes=0, consecutive_failures=0):
-    """ Factory for Stage 3/4's shared ITI BoundedStaircase -- see STAGE34_ITI_* constants above
-    for the actual numbers. """
-    return BoundedStaircase(
-        current_s, STAGE34_ITI_STEP_S, STAGE34_ITI_STEP_S,
-        STAGE34_ITI_SUCCESSES_TO_STEP_UP, STAGE34_ITI_FAILURES_TO_STEP_DOWN,
-        STAGE34_ITI_STARTING_S, STAGE34_ITI_FINAL_S,
         consecutive_successes, consecutive_failures)
 
 

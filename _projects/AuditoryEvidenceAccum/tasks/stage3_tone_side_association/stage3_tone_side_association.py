@@ -52,19 +52,19 @@ What's genuinely different from Stage 4:
     consecutive qualifying sessions.
 
 Shared with Stage 4 (new in both, per explicit instruction -- "similar to [the response threshold]
-degree or ISI[/ITI] ramp"): the click-train stimulus duration and the correct-trial ITI are now
-each a within-session, performance-gated staircase.BoundedStaircase (same step-up-after-N-
+degree or ISI[/ITI] ramp"): the click-train stimulus duration is a within-session,
+performance-gated staircase.BoundedStaircase (same step-up-after-N-
 consecutive-correct/step-down-after-N-consecutive-incorrect shape as the existing movement-
 threshold ThresholdStaircase), growing toward a longer/easier final value and shrinking back
-toward the doc's own original fixed value on a bad streak -- never below it. Each is ONE
-continuous value shared across Stage 3 and Stage 4 (persisted as 'stim_duration_s'/'iti_s' plus
-their own consecutive-count keys, not reset when a subject advances from Stage 3 to Stage 4).
-'iti_s' is in fact the SAME key Stage 1/2 already persist (Stage 1 starts it at 0.5s, Stage 2
-grows it once per qualifying session to a 1.5s ceiling) -- Stage 3/4 simply take over that same
-value with a finer, within-session staircase instead of Stage 2's once-per-session step, so the
-whole curriculum's ITI is one continuously-evolving number from Stage 1 onward. See
-staircase.py's own STAGE34_STIM_DURATION_*/STAGE34_ITI_* constants for the actual numbers (both
-doc-unspecified -- flagged/tunable placeholders).
+toward the doc's own original fixed value on a bad streak -- never below it. It is ONE
+continuous value shared across Stage 3 and Stage 4 (persisted as 'stim_duration_s' plus its own
+consecutive-count keys). See staircase.py's STAGE34_STIM_DURATION_* constants.
+
+The ITIs are FIXED from Stage 3 on (2026-11-11 spec A2): correct VAR_ITI_S = 1.5s (where Stage 2
+leaves 'iti_s'), error VAR_INCORRECT_ITI_S = 4.0s. A correct-ITI staircase raised the ITI on
+correct streaks, which cut the reward rate for good performance and shrank the error/correct
+contrast from 2.7x toward 1.33x while direction was being learned. A saved 'iti_s' above 1.5s
+(from the old ramp) is registered as ITI_RESET_FROM_S; Stages 3-5 no longer write 'iti_s'.
 
 Hardware/module connection plumbing, thread-inversion render loop, and camera integration are all
 reused as-is from _shared/ and mirror full_protocol_lookback_test.py's already-hardware-validated
@@ -245,12 +245,9 @@ VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10d
                                       # END of Stage 5. Replace the persisted 'in_trial_threshold_deg'
                                       # once that has run at least once for this subject.
 
-# Correct-trial ITI is also no longer a fixed VAR_ constant -- see iti_staircase below, the SAME
-# persisted 'iti_s' value Stage 1/2 already grow toward their own 1.5s ceiling, now continued as
-# a within-session staircase instead of a once-per-session step.
-VAR_INCORRECT_ITI_S = 4.0            # error-trial ITI -- longer, per the doc's epoch table. NOT
-                                      # staircased -- only the one continuous ITI dimension
-                                      # Stage 1/2 already established gets this treatment.
+VAR_ITI_S = 1.5                      # fixed correct-trial ITI from Stage 3 on (spec A2):
+                                      # Stage 2's final 'iti_s'. No staircase after Stage 2.
+VAR_INCORRECT_ITI_S = 4.0            # fixed error-trial ITI, per the doc's epoch table
 VAR_CONSUMPTION_WINDOW_S = 3.0       # not doc-specified for this stage -- same flagged/tunable
                                       # placeholder convention as every other unspecified duration
                                       # in this codebase; matches full_protocol_lookback_test.py's
@@ -350,11 +347,6 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'stage3_last_side_date': None,
     'stage3_block_min': staircase.STAGE3_BLOCK_START[0],   # side-block length range (responded
     'stage3_block_max': staircase.STAGE3_BLOCK_START[1],   # trials), shrinks per qualifying session
-    'iti_s': staircase.STAGE34_ITI_STARTING_S,   # same key Stage 1/2 already persist (Stage 2's
-                                           # own ceiling), in case this subject somehow never ran
-                                           # Stage 2 -- normally already at/near this value.
-    'iti_consecutive_successes': 0,
-    'iti_consecutive_failures': 0,
     'stim_duration_s': staircase.STAGE34_STIM_DURATION_STARTING_S,
     'stim_duration_consecutive_successes': 0,
     'stim_duration_consecutive_failures': 0,
@@ -372,9 +364,8 @@ _click_attenuation_remaining = state.get('click_attenuation_sessions_remaining')
 stim_duration_staircase = staircase.new_stim_duration_staircase(
     state.get('stim_duration_s'), state.get('stim_duration_consecutive_successes'),
     state.get('stim_duration_consecutive_failures'))
-iti_staircase = staircase.new_iti_staircase(
-    state.get('iti_s'), state.get('iti_consecutive_successes'),
-    state.get('iti_consecutive_failures'))
+# Read-only: Stage 1/2 own 'iti_s'. A value above VAR_ITI_S came from the old Stage 3/4 ramp.
+ITI_RESET_FROM_S = (state.get('iti_s') if (state.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
 
 quiescence_unlocked = state.get('quiescence_unlocked')
 if quiescence_unlocked:
@@ -448,6 +439,10 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+if ITI_RESET_FROM_S is not None:
+    my_bpod.register_value('ITI_RESET_FROM_S', ITI_RESET_FROM_S)
+    print("ITI fixed at {0:.2f}s from Stage 3 on (saved value was {1:.2f}s)".format(
+        VAR_ITI_S, ITI_RESET_FROM_S), flush=True)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 my_bpod.register_value('FIRST_BLOCK_SIDE', VAR_FIRST_BLOCK_SIDE)   # SESSION_SIDE before 2026-11-09
@@ -568,10 +563,10 @@ while True:
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
 
         # additions.txt T1: fresh per-trial seed, not a globally reseeded generator.
-        # Both staircases' CURRENT values are captured once here, at trial start -- record_outcome()
+        # The staircase's CURRENT value is captured once here, at trial start -- record_outcome()
         # (below, once this trial's outcome is known) only changes what the NEXT trial sees.
         stim_duration_this_trial = stim_duration_staircase.current_value
-        iti_this_trial = iti_staircase.current_value
+        iti_this_trial = VAR_ITI_S
         stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
         trial_clicks = click_train.generate_trial_clicks(
             'AOS', side, rng=np.random.RandomState(stim_seed),
@@ -965,7 +960,6 @@ while True:
             if block_index_this_trial > 0 and block_trial_this_trial < 5:
                 after_switch_correct.append(bool(correct))
             stim_duration_staircase.record_outcome(bool(correct))
-            iti_staircase.record_outcome(bool(correct))
         # Only a genuine L/R response (warmup or main) advances the side block.
         if correct is not None and blocks.record_response():
             print("Block {0} done -- switching to {1} for {2} responded trials".format(
@@ -1065,9 +1059,6 @@ if this_session_gates_met:
 state.set('stim_duration_s', stim_duration_staircase.current_value)
 state.set('stim_duration_consecutive_successes', stim_duration_staircase.consecutive_successes)
 state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecutive_failures)
-state.set('iti_s', iti_staircase.current_value)
-state.set('iti_consecutive_successes', iti_staircase.consecutive_successes)
-state.set('iti_consecutive_failures', iti_staircase.consecutive_failures)
 
 if quiescence_unlocked:
     state.set('quiescence_s', quiescence_obj.current_s)

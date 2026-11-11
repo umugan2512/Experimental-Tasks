@@ -203,7 +203,7 @@ VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # see
                                       # RE-DERIVED (via derive_intrial_threshold.py, manually, by
                                       # the experimenter) at the end of Stage 5, for a future stage.
 
-VAR_ITI_S = 1.5
+VAR_ITI_S = 1.5                      # fixed, as in Stages 3/4 (spec A2)
 VAR_INCORRECT_ITI_S = 4.0
 VAR_CONSUMPTION_WINDOW_S = 3.0
 
@@ -288,6 +288,8 @@ threshold_obj = staircase.ThresholdStaircase(
     current_fraction=state.get('threshold_fraction'),
     consecutive_successes=state.get('consecutive_successes'),
     consecutive_failures=state.get('consecutive_failures'))
+# Read-only: Stage 1/2 own 'iti_s'. A value above VAR_ITI_S came from the old Stage 3/4 ramp.
+ITI_RESET_FROM_S = (state.get('iti_s') if (state.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
 quiescence_obj = staircase.QuiescenceStaircase(
     current_s=state.get('quiescence_s'),
     consecutive_successes=state.get('quiescence_consecutive_successes'),
@@ -340,6 +342,10 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+if ITI_RESET_FROM_S is not None:
+    my_bpod.register_value('ITI_RESET_FROM_S', ITI_RESET_FROM_S)
+    print("ITI fixed at {0:.2f}s from Stage 3 on (saved value was {1:.2f}s)".format(
+        VAR_ITI_S, ITI_RESET_FROM_S), flush=True)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 

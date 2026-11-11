@@ -1902,6 +1902,53 @@ print("Section 24 result: {0}".format("PASS" if section24_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 25: A2: fixed ITIs in Stages 3-5 (correct 1.5s, error 4.0s), no ITI staircase")
+print("=" * 100)
+
+import re as _re25
+_TASKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+STAGE_DIRS = {1: 'stage1_wheel_shaping', 2: 'stage2_threshold_staircase', 3: 'stage3_tone_side_association',
+              4: 'stage4_clicks_direction', 5: 'stage5_resume_staircases'}
+
+
+def stage_source(stage):
+    """ A stage script's source text (used by the source-level checks from here on). """
+    with open(os.path.join(_TASKS_DIR, STAGE_DIRS[stage], STAGE_DIRS[stage] + '.py'), encoding='utf-8') as f:
+        return f.read()
+
+
+def stage_var(stage, name):
+    """ The literal value of a module-level `NAME = <number>` in a stage script, or None. """
+    m = _re25.search(r'^' + name + r'\s*=\s*([0-9.]+)', stage_source(stage), _re25.M)
+    return float(m.group(1)) if m else None
+
+
+iti_checks = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    iti_checks[_st] = (stage_var(_st, 'VAR_ITI_S') == 1.5 and stage_var(_st, 'VAR_INCORRECT_ITI_S') == 4.0
+                       and 'iti_staircase' not in _src and "state.set('iti_s'" not in _src
+                       and "register_value('ITI_RESET_FROM_S'" in _src
+                       and ('state_timer=iti_this_trial' in _src or 'state_timer=VAR_ITI_S' in _src))
+print("  Stages 3-5: VAR_ITI_S 1.5, VAR_INCORRECT_ITI_S 4.0, no ITI staircase, never write 'iti_s', "
+      "register ITI_RESET_FROM_S: {0}".format(iti_checks))
+_ns25 = {'VAR_ITI_S': 1.5}
+for _saved, _want in ((2.25, 2.25), (1.5, None), (1.3, None), (None, None)):
+    _ns25['state'] = type('S', (), {'get': staticmethod(lambda k, v=_saved: v)})
+    exec(_re25.search(r'^ITI_RESET_FROM_S = .*$', stage_source(3), _re25.M).group(0), _ns25)
+    iti_checks['reset %s' % _saved] = _ns25['ITI_RESET_FROM_S'] == _want
+print("  a saved 'iti_s' above 1.5s is reported, at or below it isn't: {0}".format(
+    {k: v for k, v in iti_checks.items() if str(k).startswith('reset')}))
+no_ramp_ok = not hasattr(staircase, 'new_iti_staircase') and not hasattr(staircase, 'STAGE34_ITI_STARTING_S')
+print("  staircase.py has no ITI ramp left: {0}".format(no_ramp_ok))
+section25_pass = all(iti_checks.values()) and no_ramp_ok
+
+print("Section 25 result: {0}".format("PASS" if section25_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -1909,6 +1956,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section17_pass and section18_pass and
                  section19_pass and section20_pass and section21_pass and section22_pass and
                  section23_pass and
-                 section24_pass)
+                 section24_pass and
+                 section25_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

@@ -234,12 +234,9 @@ VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10d
                                       # END of Stage 5. Replace the persisted 'in_trial_threshold_deg'
                                       # once that has run at least once for this subject.
 
-# Correct-trial ITI is also no longer a fixed VAR_ constant -- see iti_staircase below, the SAME
-# persisted 'iti_s' value Stage 1/2 already grow toward their own 1.5s ceiling and Stage 3 shares,
-# now continued as a within-session staircase instead of a once-per-session step.
-VAR_INCORRECT_ITI_S = 4.0            # error-trial ITI -- longer, per the doc's epoch table. NOT
-                                      # staircased -- only the one continuous ITI dimension
-                                      # Stage 1/2 already established gets this treatment.
+VAR_ITI_S = 1.5                      # fixed correct-trial ITI from Stage 3 on (spec A2):
+                                      # Stage 2's final 'iti_s'. No staircase after Stage 2.
+VAR_INCORRECT_ITI_S = 4.0            # fixed error-trial ITI, per the doc's epoch table
 VAR_CONSUMPTION_WINDOW_S = 3.0       # not doc-specified for this stage -- same flagged/tunable
                                       # placeholder convention as every other unspecified duration
                                       # in this codebase; matches full_protocol_lookback_test.py's
@@ -339,11 +336,6 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
                                            # this stage's own advancement gate (stage4_sessions_history)
     'stage4_sessions_history': [],        # bools: did each past Stage-4 session meet
                                            # staircase.stage4_gates_met()? (3-consecutive check)
-    'iti_s': staircase.STAGE34_ITI_STARTING_S,   # same key Stage 1/2/3 already persist (Stage 2's
-                                           # own ceiling), in case this subject somehow never ran
-                                           # Stage 2 -- normally already at/near this value.
-    'iti_consecutive_successes': 0,
-    'iti_consecutive_failures': 0,
     'stim_duration_s': staircase.STAGE34_STIM_DURATION_STARTING_S,
     'stim_duration_consecutive_successes': 0,
     'stim_duration_consecutive_failures': 0,
@@ -361,9 +353,8 @@ _click_attenuation_remaining = state.get('click_attenuation_sessions_remaining')
 stim_duration_staircase = staircase.new_stim_duration_staircase(
     state.get('stim_duration_s'), state.get('stim_duration_consecutive_successes'),
     state.get('stim_duration_consecutive_failures'))
-iti_staircase = staircase.new_iti_staircase(
-    state.get('iti_s'), state.get('iti_consecutive_successes'),
-    state.get('iti_consecutive_failures'))
+# Read-only: Stage 1/2 own 'iti_s'. A value above VAR_ITI_S came from the old Stage 3/4 ramp.
+ITI_RESET_FROM_S = (state.get('iti_s') if (state.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
 
 quiescence_unlocked = state.get('quiescence_unlocked')
 if quiescence_unlocked:
@@ -409,6 +400,10 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+if ITI_RESET_FROM_S is not None:
+    my_bpod.register_value('ITI_RESET_FROM_S', ITI_RESET_FROM_S)
+    print("ITI fixed at {0:.2f}s from Stage 3 on (saved value was {1:.2f}s)".format(
+        VAR_ITI_S, ITI_RESET_FROM_S), flush=True)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
@@ -543,10 +538,10 @@ while True:
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
 
         # additions.txt T1: fresh per-trial seed, not a globally reseeded generator.
-        # Both staircases' CURRENT values are captured once here, at trial start -- record_outcome()
+        # The staircase's CURRENT value is captured once here, at trial start -- record_outcome()
         # (below, once this trial's outcome is known) only changes what the NEXT trial sees.
         stim_duration_this_trial = stim_duration_staircase.current_value
-        iti_this_trial = iti_staircase.current_value
+        iti_this_trial = VAR_ITI_S
         stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
         trial_clicks = click_train.generate_trial_clicks(
             'AOS', side, rng=np.random.RandomState(stim_seed),
@@ -939,7 +934,6 @@ while True:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
             stim_duration_staircase.record_outcome(bool(correct))
-            iti_staircase.record_outcome(bool(correct))
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -1029,9 +1023,6 @@ if _click_attenuation_remaining > 0:
 state.set('stim_duration_s', stim_duration_staircase.current_value)
 state.set('stim_duration_consecutive_successes', stim_duration_staircase.consecutive_successes)
 state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecutive_failures)
-state.set('iti_s', iti_staircase.current_value)
-state.set('iti_consecutive_successes', iti_staircase.consecutive_successes)
-state.set('iti_consecutive_failures', iti_staircase.consecutive_failures)
 
 if quiescence_unlocked:
     state.set('quiescence_s', quiescence_obj.current_s)
