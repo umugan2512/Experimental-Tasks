@@ -189,6 +189,26 @@ def generate_floored_poisson_train(rate_hz, duration_s, isi_floor_s, rng=None):
     return np.array(times)
 
 
+def draw_trial_clicks_with_cue(difficulty, side, stim_duration_s, train_duration_s=None,
+                               seed_rng=None, max_resamples=100):
+    """ generate_trial_clicks() with a fresh seed, redrawn until the higher-evidence `side` has at
+    least one click inside the cue window (the first stim_duration_s). A short train can come out
+    empty -- ~0.1% of AOS trials at 0.35s / 20Hz -- leaving a trial with a correct side but no cue.
+    train_duration_s (>= stim_duration_s) generates a longer train, e.g. one that keeps playing
+    after the cue window. Returns (trial_clicks, stim_seed, n_resamples). """
+    seed_rng = seed_rng or np.random
+    train_duration_s = stim_duration_s if train_duration_s is None else train_duration_s
+    for n_resamples in range(max_resamples + 1):
+        stim_seed = int(seed_rng.randint(0, 2 ** 31 - 1))
+        clicks = generate_trial_clicks(difficulty, side, rng=np.random.RandomState(stim_seed),
+                                       stim_duration_s=train_duration_s)
+        cue_side_times = clicks['right_times'] if side == 'R' else clicks['left_times']
+        if np.any(np.asarray(cue_side_times) < stim_duration_s):
+            return clicks, stim_seed, n_resamples
+    raise RuntimeError('no click inside a {0}s cue window after {1} draws'.format(
+        stim_duration_s, max_resamples + 1))
+
+
 def generate_trial_clicks(difficulty, side, rng=None, stim_duration_s=None):
     """
     :param str difficulty: one of DIFFICULTY_GRID's keys

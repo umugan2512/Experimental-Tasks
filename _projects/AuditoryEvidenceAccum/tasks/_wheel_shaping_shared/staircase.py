@@ -230,8 +230,10 @@ STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION = 0.90   # doc: "current -> final (90% 
 # floor to begin with. Shared across Stage 3 and Stage 4 (one continuous persisted value each,
 # not reset when a subject advances from Stage 3 to Stage 4), same cross-stage persistence
 # convention as the response-threshold `threshold_fraction`.
-STAGE34_STIM_DURATION_STARTING_S = 0.25   # doc's own original fixed Stage 3/4 value, now reused
-                                           # as this ramp's own starting point AND floor
+STAGE34_STIM_DURATION_STARTING_S = 0.35   # this ramp's starting point AND floor. 0.35s since
+                                           # 2026-11-11 (spec A6; was 0.25s): Ott et al. 2024's
+                                           # stimulus duration. At 20Hz, gamma=1 that is ~7 clicks
+                                           # instead of 5, and an empty train e^-7 instead of e^-5.
 STAGE34_STIM_DURATION_FINAL_S = 2.0       # click_train_v2's own module-level default duration --
                                            # a natural, already-present "full" reference
 STAGE34_STIM_DURATION_STEP_S = 0.25

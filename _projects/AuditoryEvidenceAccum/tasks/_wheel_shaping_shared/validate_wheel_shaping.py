@@ -1990,6 +1990,45 @@ print("Section 27 result: {0}".format("PASS" if section27_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 28: A6: initial cue 0.35s, and every trial's cue window has a click on its side")
+print("=" * 100)
+
+import click_train_v2 as _ct28
+cue_ok = (staircase.STAGE34_STIM_DURATION_STARTING_S == 0.35 and stage_var(5, 'VAR_STIM_DURATION_S') == 0.35)
+print("  Stage 3/4 cue starts (and floors) at 0.35s, Stage 5's fixed cue is 0.35s: {0}".format(cue_ok))
+_rng28 = np.random.RandomState(28)
+_n, _resampled, _empty = 20000, 0, 0
+for _ in range(_n):
+    _side = 'R' if _rng28.random_sample() < 0.5 else 'L'
+    _c, _seed, _k = _ct28.draw_trial_clicks_with_cue('AOS', _side, 0.35, seed_rng=_rng28)
+    _resampled += _k > 0
+    _times = _c['right_times'] if _side == 'R' else _c['left_times']
+    _empty += not np.any(np.asarray(_times) < 0.35)
+    _again = _ct28.generate_trial_clicks('AOS', _side, rng=np.random.RandomState(_seed), stim_duration_s=0.35)
+    assert list(_again['left_times']) == list(_c['left_times'])   # STIM_SEED reproduces the train
+_raw_empty = sum(_ct28.generate_trial_clicks('AOS', 'R', rng=np.random.RandomState(s), stim_duration_s=0.35)['n_right'] == 0
+                 for s in range(20000)) / 20000.0
+resample_ok = _empty == 0 and _resampled / float(_n) < 0.005
+print("  {0} draws at 0.35s: {1} with an empty cue side after resampling, {2:.2%} needed a redraw "
+      "(raw empty-train rate {3:.2%}): {4}".format(_n, _empty, _resampled / float(_n), _raw_empty, resample_ok))
+_c, _seed, _k = _ct28.draw_trial_clicks_with_cue('AOS', 'L', 0.35, train_duration_s=5.75, seed_rng=_rng28)
+tail_ok = (max(_c['left_times']) > 1.0 and np.any(np.asarray(_c['left_times']) < 0.35) and _c['n_right'] == 0)
+print("  a 5.75s train still needs a click inside the 0.35s cue window, and keeps clicking after it: "
+      "{0}".format(tail_ok))
+mig_checks = []
+for _st in (3, 4):
+    _src = stage_source(_st)
+    mig_checks.append("register_value('STIM_DURATION_RESET_FROM_S'" in _src and 'draw_trial_clicks_with_cue' in _src)
+mig_checks.append('draw_trial_clicks_with_cue' in stage_source(5))
+print("  Stages 3-5 draw through draw_trial_clicks_with_cue, Stages 3/4 log a raised saved cue: {0}".format(mig_checks))
+section28_pass = cue_ok and resample_ok and tail_ok and all(mig_checks)
+
+print("Section 28 result: {0}".format("PASS" if section28_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2000,6 +2039,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section24_pass and
                  section25_pass and
                  section26_pass and
-                 section27_pass)
+                 section27_pass and
+                 section28_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

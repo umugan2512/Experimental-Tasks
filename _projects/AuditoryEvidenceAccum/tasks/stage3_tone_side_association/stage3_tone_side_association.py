@@ -363,6 +363,10 @@ VAR_RESPONSE_THRESHOLD_DEG = state.get('threshold_fraction') * VAR_THRESHOLD_FIN
 VAR_CUE_ABORT_THRESHOLD_DEG = state.get('in_trial_threshold_deg')
 _click_attenuation_remaining = state.get('click_attenuation_sessions_remaining')
 
+STIM_DURATION_RESET_FROM_S = None
+if (state.get('stim_duration_s') or 0) < staircase.STAGE34_STIM_DURATION_STARTING_S - 1e-9:
+    STIM_DURATION_RESET_FROM_S = state.get('stim_duration_s')   # saved under the old 0.25s floor
+    state.set('stim_duration_s', staircase.STAGE34_STIM_DURATION_STARTING_S)
 stim_duration_staircase = staircase.new_stim_duration_staircase(
     state.get('stim_duration_s'), state.get('stim_duration_consecutive_successes'),
     state.get('stim_duration_consecutive_failures'))
@@ -441,6 +445,8 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+if STIM_DURATION_RESET_FROM_S is not None:
+    my_bpod.register_value('STIM_DURATION_RESET_FROM_S', STIM_DURATION_RESET_FROM_S)
 if ITI_RESET_FROM_S is not None:
     my_bpod.register_value('ITI_RESET_FROM_S', ITI_RESET_FROM_S)
     print("ITI fixed at {0:.2f}s from Stage 3 on (saved value was {1:.2f}s)".format(
@@ -569,10 +575,8 @@ while True:
         # (below, once this trial's outcome is known) only changes what the NEXT trial sees.
         stim_duration_this_trial = stim_duration_staircase.current_value
         iti_this_trial = VAR_ITI_S
-        stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
-        trial_clicks = click_train.generate_trial_clicks(
-            'AOS', side, rng=np.random.RandomState(stim_seed),
-            stim_duration_s=stim_duration_this_trial)
+        trial_clicks, stim_seed, stim_resamples = click_train.draw_trial_clicks_with_cue(
+            'AOS', side, stim_duration_this_trial)
         # Warmup attenuation is a multiplier ON TOP of the calibrated base amplitude (dB below the
         # calibrated target), not a substitute for it.
         attenuation_mult = (10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)
@@ -598,6 +602,8 @@ while True:
         runner.register('N_CLICKS_L', trial_clicks['n_left'])
         runner.register('N_CLICKS_R', trial_clicks['n_right'])
         runner.register('STIM_SEED', stim_seed)
+        if stim_resamples:
+            runner.register('STIM_RESAMPLES', stim_resamples)
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)

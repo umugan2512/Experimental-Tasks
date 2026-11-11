@@ -5,7 +5,7 @@ training_protocol.md Revision 2, Stage 5 (formerly "Stage 4" before a new Stage 
 association -- was inserted, pushing this and the old Stage 3 each up by one) -- "resume
 threshold and quiescence staircases".
 
-Structural twin of stage4_clicks_direction.py (same 0.25s cue, same 100-200ms delay range --
+Structural twin of stage4_clicks_direction.py (same 0.35s cue, same 100-200ms delay range --
 Stage 5 doesn't extend either, that's Stages 6/7; same warm-up block, debiasing rule, abort
 re-offer, and engagement-based session-end triggers) with two staircases in play: response
 threshold (staircase.ThresholdStaircase, the SAME class Stage 2 uses, continuing from wherever
@@ -184,7 +184,7 @@ VAR_THRESHOLD_FINAL_DEG = 35
 VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per explicit
                                       # instruction. (MAIN trials only)
 
-VAR_STIM_DURATION_S = 0.25           # unchanged from Stage 4 -- extended only from Stage 6 onward
+VAR_STIM_DURATION_S = 0.35           # same as Stage 3/4 (spec A6) -- extended only from Stage 6 on
 VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
 VAR_DELAY_DURATION_MAX_S = 0.2
 
@@ -471,9 +471,8 @@ while True:
                                                    stream=runner.stream)
             applied_thresholds = thresholds_this_trial
 
-        stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
-        trial_clicks = click_train.generate_trial_clicks(
-            'AOS', side, rng=np.random.RandomState(stim_seed), stim_duration_s=VAR_STIM_DURATION_S)
+        trial_clicks, stim_seed, stim_resamples = click_train.draw_trial_clicks_with_cue(
+            'AOS', side, VAR_STIM_DURATION_S)
         left_wave, right_wave = click_train.build_waveform(
             trial_clicks, hifi.sampling_rate,
             amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
@@ -492,6 +491,8 @@ while True:
         runner.register('N_CLICKS_L', trial_clicks['n_left'])
         runner.register('N_CLICKS_R', trial_clicks['n_right'])
         runner.register('STIM_SEED', stim_seed)
+        if stim_resamples:
+            runner.register('STIM_RESAMPLES', stim_resamples)
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', round(cur_response_threshold_deg, 3))
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
