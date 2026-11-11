@@ -709,21 +709,31 @@ and means today's `stage4_`/`stage5_` files. Stage 1 and 2 still have no auditor
 correct-side concept, or error condition (those start at Stage 3), but the dot **is** coupled to the
 wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curriculum).
 
-- **Stage 3 plays side BLOCKS, not one side per day** (since 2026-11-09, per explicit
-  instruction).
-  - A whole day on one side let a mouse learn "today is left" from reward history without
-    listening, and each day retrained a side habit.
-  - Now each session alternates L/R blocks of a random 30–60 responded trials
-    (`staircase.Stage3Blocks`). The range shrinks one step per qualifying session, down to 10–20
-    (`shrink_stage3_block_range()`), as a bridge to Stage 4's per-trial sides.
-  - The click → side mapping never changes. This is block switching, not a rule reversal.
-  - The first block's side keeps the old day-alternation rule (`stage3_last_side`).
-  - The sub-chance stop skips the first 10 responded trials after a switch.
-  - Session end prints accuracy on the first 5 trials after a switch: the "is it listening"
-    readout.
-  - VALs: `BLOCK_INDEX`/`BLOCK_SIDE`/`BLOCK_LENGTH`/`BLOCK_TRIAL` per trial, and
-    `FIRST_BLOCK_SIDE`/`BLOCK_MIN`/`BLOCK_MAX` per session (older sessions have `SESSION_SIDE`).
-  - Soak-tested only (fake Bpod, full audit PASS). No animal has run it yet.
+- **2026-11-11 training changes (the user's `training_changes_spec.md`, after Ott et al. 2024
+  and Pinto et al. 2018)** -- details per parameter in `parameter_progression.md`:
+  - Quiescence: IBL's truncated exponential (`staircase.draw_quiescence_hold()`), ceiling 0.55s,
+    but Stages 2-4 stop at 0.25s (`STAGE234_QUIESCENCE_CEILING_S`). Verified against iblrig's
+    `base_choice_world.py`: IBL's hold is Exp(0.35) truncated to 0.4-0.7s, so the scale is
+    0.636·q, not q as the spec first said.
+  - Stages 3-5: fixed ITIs (1.5s / 4.0s), abort ITI = error ITI (4.0s), fixed 0.35s cue (no cue
+    staircase), every cue with >= 1 click on its side, J2 0.3-0.6s in every stage, the error flash
+    0.7-1.0s after the crossing with no lick exit, a performance-gated warm-up
+    (`staircase.WarmupGate`), and the Hu et al. (2009) debiaser (`debiasing.HuDebiaser`) instead of
+    repeat-after-error.
+  - **Stage 3 has no side blocks any more** (they lasted 2026-11-09 to 11-11): win-stay/lose-shift
+    scored 93-98% within blocks without listening. It now uses random Hu sides plus fading
+    correction trials and a click tail (`stage3_scaffold.py`), gated on a click-weight logistic
+    regression (`choice_regression.py`, also Stage 4's gate). See "Stage 3: fading scaffolds" in
+    `parameter_progression.md`.
+  - Training log: a column for every session-by-session variable (`SESSION_VAL_FIELDS`), every
+    persisted state key mapped in `STATE_KEY_COLUMNS` (the suite fails on an unmapped one), and no
+    sheets with "test" in the name (`drop_test_sheets()`, also on the two-computer merge).
+  - Live plots: each stage's progress panel shows the numbers its gate uses, with targets.
+  - Stages 3-5 are soak-tested only (fake Bpod, full audit PASS); no animal has run them. Before
+    the first Stage 3 animal, measure the click tail's HiFi load on the rig (~4.4MB per trial).
+  - **The soak harness (scratchpad `soak.py`) lives in the session's temp folder and was once
+    wiped.** It was rebuilt by replaying its Write/Edit and scripted edits from the session
+    transcript (`~/.claude/projects/.../*.jsonl`). Consider moving it into the repo.
 
 - **`parameter_progression.md`** (in `_wheel_shaping_shared/` — and unlike the gitignored
   `docs_local/` design docs, it IS committed) is the written record of how every staircased/stepped
