@@ -2061,6 +2061,28 @@ print("Section 29 result: {0}".format("PASS" if section29_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 30: B8: the error flash comes 0.7-1.0s after the error crossing, never at a lick")
+print("=" * 100)
+
+flash_checks = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    _m = _re25.search(r"state_name='ErrorConsumption',\s*state_timer=(\w+),\s*state_change_conditions=\{([^}]*)\}", _src)
+    flash_checks[_st] = (stage_var(_st, 'VAR_ERROR_FLASH_DELAY_MIN_S') == 0.7
+                         and stage_var(_st, 'VAR_ERROR_FLASH_DELAY_MAX_S') == 1.0
+                         and _m is not None and _m.group(1) == 'error_flash_delay_s' and 'Port1In' not in _m.group(2)
+                         and "runner.register('ERROR_FLASH_DELAY_S', error_flash_delay_s)" in _src)
+after_j2 = stage_var(3, 'VAR_ERROR_FLASH_DELAY_MIN_S') >= staircase.DOT_DISAPPEAR_MAX_S + 0.1 - 1e-9
+print("  Stages 3-5: ErrorConsumption lasts error_flash_delay_s ~ U(0.7, 1.0), no Port1In exit, delay "
+      "registered: {0}; the flash starts >= 100ms after the latest dot offset: {1}".format(flash_checks, after_j2))
+section30_pass = all(flash_checks.values()) and after_j2
+
+print("Section 30 result: {0}".format("PASS" if section30_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2073,6 +2095,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section26_pass and
                  section27_pass and
                  section28_pass and
-                 section29_pass)
+                 section29_pass and
+                 section30_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

@@ -312,6 +312,12 @@ SOFTCODE_PUNISH = 3                  # sent by AbortPunish/ErrorPunish's entry: 
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (abort / incorrect
                                       # choice) -- the dot alone is the go cue, see WheelDotPeriod.
+# ErrorConsumption -> ErrorPunish: the error flash comes 0.7-1.0s after the error crossing, drawn per
+# trial independently of J2 and never ended by a lick (spec B8). It used to come at the first lick
+# or 0.5s, so it was locked to lick onset, overlapped most of the J2 window, and could hide the dot
+# offset on error trials only. 0.7s is 100ms after the latest possible dot offset (0.6s).
+VAR_ERROR_FLASH_DELAY_MIN_S = 0.7
+VAR_ERROR_FLASH_DELAY_MAX_S = 1.0
 VAR_ERROR_FLASH_S = 0.35             # punishment flash duration (LED + full-white screen), on
                                       # WheelAbort and the incorrect-choice path only.
 
@@ -612,6 +618,7 @@ while True:
         # and RUN happened to finish.)
         dot_onset_jitter_s = random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
         disappear_delay_s = random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
+        error_flash_delay_s = random.uniform(VAR_ERROR_FLASH_DELAY_MIN_S, VAR_ERROR_FLASH_DELAY_MAX_S)
 
         cue_sma = StateMachine(my_bpod)
 
@@ -742,8 +749,8 @@ while True:
 
         sma.add_state(
             state_name='ErrorConsumption',
-            state_timer=0.5,
-            state_change_conditions={'Port1In': 'ErrorPunish', Bpod.Events.Tup: 'ErrorPunish'},
+            state_timer=error_flash_delay_s,
+            state_change_conditions={Bpod.Events.Tup: 'ErrorPunish'},
             output_actions=[('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
@@ -980,6 +987,8 @@ while True:
             dot_disappear_t = threshold_crossing_t + disappear_delay_s
             runner.register('THRESHOLD_CROSSING_TIME', threshold_crossing_t)
             runner.register('DOT_DISAPPEAR_JITTER_S', disappear_delay_s)
+            if outcome_state == 'ErrorConsumption':
+                runner.register('ERROR_FLASH_DELAY_S', error_flash_delay_s)
             runner.register('DOT_DISAPPEAR_TIME', dot_disappear_t)
             runner.register('CORRECT', rewarded)
         elif outcome_state == 'NoResponse':
