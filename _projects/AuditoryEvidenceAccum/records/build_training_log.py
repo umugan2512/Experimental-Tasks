@@ -89,6 +89,84 @@ _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed
                        # are combined into one row/struct with it (same protocol only)
 
 
+# Every variable that changes session by session gets a column (per explicit instruction,
+# 2026-11-11). (row key, VAL name, 'num'/'str', 'first'/'last'): 'first' reads the session's first
+# value and a merged bout's first member, 'last' the last ones. A column is blank for stages that
+# don't register it.
+SESSION_VAL_FIELDS = [
+    ('stage2_day', 'STAGE2_DAY_NUMBER', 'num', 'first'),
+    ('prev_day_peak_deg', 'PREV_DAY_MAX_THRESHOLD_DEG', 'num', 'first'),
+    ('direction_sigma', 'DIRECTION_SIGMA', 'num', 'last'),
+    ('spout_position_mm', 'SPOUT_POSITION_MM', 'num', 'last'),
+    ('quiescence_scale_start_s', 'QUIESCENCE_SCALE_S', 'num', 'first'),
+    ('quiescence_scale_end_s', 'QUIESCENCE_SCALE_S', 'num', 'last'),
+    ('cue_duration_s', 'STIM_DURATION_S', 'num', 'last'),
+    ('fade_step', 'FADE_STEP', 'num', 'first'),
+    ('fade_step_next', 'FADE_STEP_NEXT', 'num', 'last'),
+    ('p_corr', 'P_CORR', 'num', 'first'),
+    ('click_tail_mode', 'CLICK_TAIL_MODE', 'str', 'first'),
+    ('asym_step', 'ASYM_STEP', 'str', 'first'),
+    ('click_weight', 'CLICK_WEIGHT', 'num', 'last'),
+    ('click_weight_z', 'CLICK_WEIGHT_Z', 'num', 'last'),
+    ('prev_choice_weight', 'PREV_CHOICE_WEIGHT', 'num', 'last'),
+    ('win_stay_weight', 'WIN_STAY_WEIGHT', 'num', 'last'),
+    ('click_criterion_met', 'CLICK_CRITERION_MET', 'str', 'last'),
+    ('advance_ready', 'STAGE3_ADVANCE_READY', 'str', 'last'),
+    ('warmup_exit_reason', 'WARMUP_EXIT_REASON', 'str', 'first'),
+    ('p_right_target_end', 'P_RIGHT_TARGET', 'num', 'last'),
+    ('iti_reset_from_s', 'ITI_RESET_FROM_S', 'num', 'first'),
+    ('cue_reset_from_s', 'STIM_DURATION_RESET_FROM_S', 'num', 'first'),
+]
+
+# Every key a stage script persists in wheel_shaping_state.json, and the column that shows it (None:
+# internal bookkeeping -- streak counters, history lists, once-a-day flags). The suite fails on a
+# persisted key missing here, so a new session-by-session variable can't be left out of the log.
+STATE_KEY_COLUMNS = {
+    'threshold_fraction': 'threshold_end_deg',
+    'gain_mult': 'gain_mult_end',
+    'iti_s': 'iti_end_s',
+    'spout_position_mm': 'spout_position_mm',
+    'direction_sigma': 'direction_sigma',
+    'quiescence_s': 'quiescence_scale_end_s',
+    'quiescence_unlocked': 'quiescence_scale_end_s',   # blank scale = not unlocked
+    'click_attenuation_sessions_remaining': 'click_level_attenuated',
+    'stage3_progress': 'fade_step_next',
+    'stage4_sessions_history': 'simple_gates_met',
+    'stage5_sessions_history': 'simple_gates_met',
+    'stage5_last_staircase_advanced': 'staircase_advanced_this_session',
+    'hu_debias_history': 'p_right_target_end',
+    'consecutive_successes': None,
+    'consecutive_failures': None,
+    'quiescence_consecutive_successes': None,
+    'quiescence_consecutive_failures': None,
+    'recent_directions': None,
+    'sessions_trial_count_history': None,
+    'bias_day_checked': None,
+}
+
+
+def _session_val_fields(trials, session_vals):
+    """ The SESSION_VAL_FIELDS values of one session, plus the Stage 2 day-start rule. """
+    out = {}
+    for key, val, kind, which in SESSION_VAL_FIELDS:
+        if kind == 'num':
+            find = (session_csv_parser.find_val_forward if which == 'first'
+                    else session_csv_parser.find_val_backward)
+            out[key] = find(trials, session_vals, val)
+        else:
+            ordered = trials if which == 'first' else list(reversed(trials))
+            value = next((t['vals'][val] for t in ordered if val in t['vals']), session_vals.get(val))
+            out[key] = value[-1] if isinstance(value, list) else value
+    flags = {name: session_csv_parser.find_val_backward(trials, session_vals, val)
+             for name, val in (('halved', 'THRESHOLD_BIAS_HALVED'), ('raised', 'THRESHOLD_DAY_START_RAISED'),
+                               ('stepped', 'THRESHOLD_DAY_START_STEPPED'))}
+    if any(v is not None for v in flags.values()):
+        out['day_start_rule'] = ', '.join(name for name, v in flags.items() if v) or 'unchanged'
+    else:
+        out['day_start_rule'] = None
+    return out
+
+
 def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_ratio_end,
                                accuracy_aos, abort_rate, response_threshold_end_deg,
                                threshold_final_deg, quiescence_end_s, click_criterion_met=False,
@@ -293,7 +371,9 @@ def summarize_session(path, parsed=None):
     struct_mat_path = os.path.splitext(path)[0] + '_struct.mat'
     session_struct_path = struct_mat_path if os.path.exists(struct_mat_path) else None
 
-    return {
+    correction_trial_count = sum(1 for t in trials if t['vals'].get('TRIAL_TYPE') == 'correction')
+    return dict(_session_val_fields(trials, session_vals), **{
+        'correction_trial_count': correction_trial_count,
         'session_started': session_started,
         'started_dt': started_dt,
         'ended_dt': ended_dt,
@@ -347,7 +427,7 @@ def summarize_session(path, parsed=None):
         'right_freq_hz': right_freq_hz,
         'session_csv_path': path,
         'session_struct_path': session_struct_path,
-    }
+    })
 
 
 # --- scan every session on THIS machine ----------------------------------------------------------
@@ -394,6 +474,16 @@ def _quick_session_header(csv_path):
     if subject is not None:
         subject = _load_subject_aliases().get(subject, subject)
     return subject, started or ''
+
+
+def drop_test_sheets(wb):
+    """ Removes every sheet with 'test' in its name (case-insensitive): the training log only
+    holds real animals (per explicit instruction, 2026-11-11). Update-in-place never removed an
+    old sheet by itself, so e.g. 'test_stage1' stayed. Returns the removed names. """
+    removed = [name for name in wb.sheetnames if 'test' in name.lower()]
+    for name in removed:
+        wb.remove(wb[name])
+    return removed
 
 
 def is_real_animal_subject(name):
@@ -524,7 +614,14 @@ def combine_group(group):
     abort_rate = ((sum(s['wheel_abort_count'] for s in group) / float(total_trials))
                   if total_trials else None)
 
-    return {
+    vals = {key: (first if which == 'first' else last).get(key)
+            for key, _val, _kind, which in SESSION_VAL_FIELDS}
+    vals['day_start_rule'] = first.get('day_start_rule')
+    responded2 = sum(s['reward_count'] + s['withheld_count'] for s in group)
+    vals['withheld_pct'] = (round(100.0 * sum(s['withheld_count'] for s in group) / responded2, 1)
+                            if responded2 and first['protocol'] == 'stage2_threshold_staircase' else None)
+    vals['correction_trial_count'] = sum(s.get('correction_trial_count', 0) for s in group)
+    return dict(vals, **{
         'session_started': '; '.join(s['session_started'] for s in group),
         'protocol': first['protocol'],
         'date': first['date'],
@@ -576,7 +673,7 @@ def combine_group(group):
         'right_freq_hz': last['right_freq_hz'],
         'session_csv_path': '; '.join(s['session_csv_path'] for s in group),
         'session_struct_path': None,   # filled in by the caller
-    }
+    })
 
 
 def _stage_sort_key(protocol_name):
@@ -642,6 +739,14 @@ COLUMNS = [
     ('iti_end_s', 'ITI (s)'),
     ('gain_mult_end', 'Gain mult (Stage 1)'),
     ('direction_ratio_end', 'Direction ratio (Stage 2)'),
+    ('stage2_day', 'Stage 2 day'),
+    ('day_start_rule', 'Day start rule (Stage 2)'),   # halved / raised / stepped / unchanged
+    ('prev_day_peak_deg', 'Prev day peak (deg)'),
+    ('direction_sigma', 'Direction sigma (Stage 2)'),
+    ('withheld_pct', 'Withheld % (Stage 2)'),
+    ('spout_position_mm', 'Spout schedule (mm)'),
+    ('quiescence_scale_start_s', 'Quiescence scale start (s)'),
+    ('quiescence_scale_end_s', 'Quiescence scale end (s)'),
     ('simple_gates_met', 'Simple gates met'),   # covers Stage 2 (partial) and Stage 3/4/5 (whole
                                                  # criterion) -- see _compute_simple_gates_met()
     # Stage 3/4/5 only, below -- every cross-session-varying value those protocols' own task
@@ -660,6 +765,23 @@ COLUMNS = [
     ('aborts_response', 'Aborts: Response'),
     ('warmup_trial_count', 'Warmup Trials'),
     ('repeat_trial_count', 'Repeat Trials'),
+    ('correction_trial_count', 'Correction Trials (Stage 3)'),
+    ('warmup_exit_reason', 'Warm-up exit'),
+    ('cue_duration_s', 'Cue (s)'),
+    ('fade_step', 'Fade step (Stage 3)'),
+    ('fade_step_next', 'Fade step next'),
+    ('p_corr', 'P(correction)'),
+    ('click_tail_mode', 'Click tail until'),
+    ('asym_step', 'Asymmetric threshold step'),
+    ('click_weight', 'Click weight'),
+    ('click_weight_z', 'Click weight z'),
+    ('prev_choice_weight', 'Prev-choice weight'),
+    ('win_stay_weight', 'Win-stay weight'),
+    ('click_criterion_met', 'Click criterion met'),
+    ('advance_ready', 'Advance ready (Stage 3)'),
+    ('p_right_target_end', 'Debias P(R) end'),
+    ('iti_reset_from_s', 'ITI reset from (s)'),
+    ('cue_reset_from_s', 'Cue reset from (s)'),
     ('session_water_ul', 'Session Water (uL)'),
     ('staircase_advanced_this_session', 'Staircase Advanced (Stage 5)'),
     ('git_commit', 'Git Commit'),
@@ -962,6 +1084,8 @@ def build_workbook():
         print("  {0}: {1} new row(s), {2} updated row(s)".format(subject, new_count, updated_count),
               flush=True)
 
+    for name in drop_test_sheets(wb):
+        print("  removed test sheet '{0}'".format(name), flush=True)
     _save_if_changed(wb, _OUTPUT_PATH)
     print("Wrote {0} -- {1} new row(s), {2} updated row(s) across {3} subject(s) run on this "
           "computer. Every other subject's sheet in the workbook was left untouched.".format(

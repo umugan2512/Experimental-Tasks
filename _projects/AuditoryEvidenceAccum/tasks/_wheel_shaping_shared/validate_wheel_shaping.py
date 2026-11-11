@@ -2370,6 +2370,44 @@ print("Section 36 result: {0}".format("PASS" if section36_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 37: Training log: a column for every session-by-session variable, no test sheets")
+print("=" * 100)
+
+import io
+import openpyxl as _ox37
+_col_keys = {k for k, _l in build_training_log.COLUMNS}
+_persisted = set()
+for _st in (1, 2, 3, 4, 5):
+    _persisted.update(_re25.findall(r"state\.set\('(\w+)'", stage_source(_st)))
+_unmapped = sorted(k for k in _persisted if k not in build_training_log.STATE_KEY_COLUMNS)
+_bad_cols = sorted(c for c in build_training_log.STATE_KEY_COLUMNS.values() if c and c not in _col_keys)
+_field_cols = sorted(k for k, _v, _kind, _w in build_training_log.SESSION_VAL_FIELDS if k not in _col_keys)
+guard_ok = not _unmapped and not _bad_cols and not _field_cols
+print("  every persisted state key maps to a log column or is listed as internal: {0} (unmapped {1}, "
+      "unknown columns {2}, fields without a column {3})".format(guard_ok, _unmapped, _bad_cols, _field_cols))
+_wb37 = _ox37.Workbook()
+_wb37.active.title = 'UM001'
+_wb37.create_sheet('test_stage1')
+_wb37.create_sheet('UMtest')
+_wb37.create_sheet('UM002')
+_removed = build_training_log.drop_test_sheets(_wb37)
+drop_ok = _removed == ['test_stage1', 'UMtest'] and _wb37.sheetnames == ['UM001', 'UM002']
+import xlsx_sheet_merge as _xm37
+_b1, _b2 = io.BytesIO(), io.BytesIO()
+_t = _ox37.Workbook(); _t.active.title = 'UM001'; _t.create_sheet('test_stage1'); _t.save(_b1)
+_o = _ox37.Workbook(); _o.active.title = 'UM002'; _o.save(_b2)
+_merged = _ox37.load_workbook(io.BytesIO(_xm37.merge_workbooks(_b1.getvalue(), _b2.getvalue(), {'UM002'})))
+merge_ok = _merged.sheetnames == ['UM001', 'UM002']
+print("  test sheets are dropped on build ({0}) and on a two-computer merge ({1}): {2}".format(
+    _removed, _merged.sheetnames, drop_ok and merge_ok))
+section37_pass = guard_ok and drop_ok and merge_ok
+
+print("Section 37 result: {0}".format("PASS" if section37_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2389,6 +2427,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section33_pass and
                  section34_pass and
                  section35_pass and
-                 section36_pass)
+                 section36_pass and
+                 section37_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
