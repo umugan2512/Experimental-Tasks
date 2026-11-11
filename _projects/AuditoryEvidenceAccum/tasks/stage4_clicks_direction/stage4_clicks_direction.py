@@ -256,8 +256,10 @@ VAR_DOT_EDGE_FRACTION = 0.9
 VAR_RENDER_HZ = 30
 
 VAR_CLICK_ATTENUATION_DB = 6.0       # doc: "start ~6dB below final"
-VAR_CLICK_ATTENUATION_SESSIONS = 2   # doc: "for 2-3 sessions" -- picked 2, tunable; decremented
-                                      # once per session RUN (not per qualifying session)
+VAR_CLICK_ATTENUATION_SESSIONS = 2   # doc: "for 2-3 sessions" -- picked 2, tunable. Counted
+                                      # down only by a full session (>= VAR_TRIAL_COUNT_ADVANCE
+                                      # responded main trials), so a crashed or stopped-early
+                                      # session doesn't use one up (spec B9)
 
 VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same "pick a
                                       # reasonable default" convention as other unset parameters
@@ -1020,7 +1022,7 @@ history.append(this_session_gates_met)
 state.set('stage4_sessions_history', history[-3:])
 advance_ready = len(history) >= 3 and all(history[-3:])
 
-if _click_attenuation_remaining > 0:
+if _click_attenuation_remaining > 0 and session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
     state.set('click_attenuation_sessions_remaining', _click_attenuation_remaining - 1)
 
 

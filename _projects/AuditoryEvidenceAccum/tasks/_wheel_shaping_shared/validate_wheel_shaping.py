@@ -2098,6 +2098,21 @@ print("Section 31 result: {0}".format("PASS" if section31_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 32: B9: an attenuated-click session only counts down when it was a full session")
+print("=" * 100)
+
+att_checks = {_st: ("if _click_attenuation_remaining > 0 and session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:"
+                    in stage_source(_st)) for _st in (3, 4)}
+print("  Stages 3/4 count an attenuated session only with >= VAR_TRIAL_COUNT_ADVANCE responded main "
+      "trials: {0}".format(att_checks))
+section32_pass = all(att_checks.values())
+
+print("Section 32 result: {0}".format("PASS" if section32_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2112,6 +2127,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section28_pass and
                  section29_pass and
                  section30_pass and
-                 section31_pass)
+                 section31_pass and
+                 section32_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
