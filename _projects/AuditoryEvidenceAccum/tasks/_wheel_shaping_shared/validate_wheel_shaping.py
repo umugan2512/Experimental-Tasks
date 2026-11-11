@@ -1949,6 +1949,27 @@ print("Section 25 result: {0}".format("PASS" if section25_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 26: A4: an abort costs the error ITI (AbortITI = VAR_INCORRECT_ITI_S)")
+print("=" * 100)
+
+abort_checks = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    _abort_iti = _re25.search(r"state_name='AbortITI',\s*state_timer=(\w+)", _src)
+    abort_checks[_st] = ('VAR_ABORT_TIMEOUT' not in _src
+                         and 'abort_timeout_this_trial = VAR_INCORRECT_ITI_S' in _src
+                         and _abort_iti is not None and _abort_iti.group(1) == 'abort_timeout_this_trial'
+                         and "runner.register('ABORT_ITI_S', abort_timeout_this_trial)" in _src)
+print("  Stages 3-5: AbortITI lasts VAR_INCORRECT_ITI_S, no VAR_ABORT_TIMEOUT_* left, ABORT_ITI_S "
+      "registered: {0}".format(abort_checks))
+section26_pass = all(abort_checks.values())
+
+print("Section 26 result: {0}".format("PASS" if section26_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -1957,6 +1978,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section19_pass and section20_pass and section21_pass and section22_pass and
                  section23_pass and
                  section24_pass and
-                 section25_pass)
+                 section25_pass and
+                 section26_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

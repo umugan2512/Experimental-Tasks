@@ -235,8 +235,6 @@ VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per 
 # constant used.
 VAR_DELAY_DURATION_MIN_S = 0.1       # Tag A: cue-to-go gap, 100-200ms FIXED range at this stage
 VAR_DELAY_DURATION_MAX_S = 0.2       # (staircased 0-750ms only from Stage 7 onward, not built here)
-VAR_ABORT_TIMEOUT_MIN_S = 1.0        # SS3.3: abort timeout before the next trial starts
-VAR_ABORT_TIMEOUT_MAX_S = 2.0
 
 VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10deg -- PLACEHOLDER
                                       # only. Reused from full_protocol_lookback_test.py's own
@@ -247,6 +245,10 @@ VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10d
 
 VAR_ITI_S = 1.5                      # fixed correct-trial ITI from Stage 3 on (spec A2):
                                       # Stage 2's final 'iti_s'. No staircase after Stage 2.
+# An abort (wheel moved during cue, delay or J1) costs the same time as an error (spec A4):
+# AbortITI lasts VAR_INCORRECT_ITI_S. With a cheaper abort, breaking fixation would be the cheaper
+# exit from a trial the animal expects to get wrong -- concentrated at low |gamma| once the cue has
+# wrong-side clicks, which biases the psychometric and accumulator fits.
 VAR_INCORRECT_ITI_S = 4.0            # fixed error-trial ITI, per the doc's epoch table
 VAR_CONSUMPTION_WINDOW_S = 3.0       # not doc-specified for this stage -- same flagged/tunable
                                       # placeholder convention as every other unspecified duration
@@ -610,7 +612,7 @@ while True:
 
         delay_duration_this_trial = random.uniform(VAR_DELAY_DURATION_MIN_S,
                                                      VAR_DELAY_DURATION_MAX_S)
-        abort_timeout_this_trial = random.uniform(VAR_ABORT_TIMEOUT_MIN_S, VAR_ABORT_TIMEOUT_MAX_S)
+        abort_timeout_this_trial = VAR_INCORRECT_ITI_S
         # J1 is a native, abort-guarded state at the END of cue_sma (DotOnsetDelay), so the wheel
         # must stay within the cue-abort tolerance right up to the moment the dot appears -- the
         # dot itself appears the instant `sma`'s first state (WheelDotPeriod) is entered, signalled
@@ -891,6 +893,7 @@ while True:
             abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
             runner.register('ABORT', abort_time_abs)
             runner.register('ABORT_EPOCH', abort_epoch)
+            runner.register('ABORT_ITI_S', abort_timeout_this_trial)
             # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
             # ErrorConsumption)? False here (and for NoResponse) -- analysis applies its own
             # filters downstream, this is not a second, redundant filter.

@@ -187,8 +187,6 @@ VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per 
 VAR_STIM_DURATION_S = 0.25           # unchanged from Stage 4 -- extended only from Stage 6 onward
 VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
 VAR_DELAY_DURATION_MAX_S = 0.2
-VAR_ABORT_TIMEOUT_MIN_S = 1.0
-VAR_ABORT_TIMEOUT_MAX_S = 2.0
 
 VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same default
                                       # as Stage 4. Waveform amplitude is derived from this via
@@ -204,6 +202,10 @@ VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # see
                                       # the experimenter) at the end of Stage 5, for a future stage.
 
 VAR_ITI_S = 1.5                      # fixed, as in Stages 3/4 (spec A2)
+# An abort (wheel moved during cue, delay or J1) costs the same time as an error (spec A4):
+# AbortITI lasts VAR_INCORRECT_ITI_S. With a cheaper abort, breaking fixation would be the cheaper
+# exit from a trial the animal expects to get wrong -- concentrated at low |gamma| once the cue has
+# wrong-side clicks, which biases the psychometric and accumulator fits.
 VAR_INCORRECT_ITI_S = 4.0
 VAR_CONSUMPTION_WINDOW_S = 3.0
 
@@ -502,7 +504,7 @@ while True:
 
         delay_duration_this_trial = random.uniform(VAR_DELAY_DURATION_MIN_S,
                                                      VAR_DELAY_DURATION_MAX_S)
-        abort_timeout_this_trial = random.uniform(VAR_ABORT_TIMEOUT_MIN_S, VAR_ABORT_TIMEOUT_MAX_S)
+        abort_timeout_this_trial = VAR_INCORRECT_ITI_S
         # J1 is a native, abort-guarded state at the END of cue_sma (DotOnsetDelay), so the wheel
         # must stay within the cue-abort tolerance right up to the moment the dot appears -- the
         # dot itself appears the instant `sma`'s first state (WheelDotPeriod) is entered, signalled
@@ -790,6 +792,7 @@ while True:
             abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
             runner.register('ABORT', abort_time_abs)
             runner.register('ABORT_EPOCH', abort_epoch)
+            runner.register('ABORT_ITI_S', abort_timeout_this_trial)
             # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
             # ErrorConsumption)? False here (and for NoResponse) -- analysis applies its own
             # filters downstream, this is not a second, redundant filter.
