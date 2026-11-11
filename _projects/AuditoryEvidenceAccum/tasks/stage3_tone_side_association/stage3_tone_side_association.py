@@ -5,51 +5,40 @@ training_protocol.md Revision 2, Stage 3 -- "tone-side association" (new stage, 
 what used to be Stage 3 -- see stage4_clicks_direction.py, pushed up to Stage 4 to make room, and
 stage5_resume_staircases.py, pushed up to Stage 5).
 
-Aim: the click-side association, in its easiest possible form -- the first moment clicks and
-direction appear together. Every trial plays clicks ONLY for its side (click_train_v2's 'AOS' grid
-entry guarantees the other channel gets exactly zero clicks), and the side comes in long BLOCKS
-that alternate L/R within a session (staircase.Stage3Blocks, per explicit instruction on
-2026-11-09; until then one side was held for the whole day, which let the animal learn "today is
-left" from reward history without listening). A block lasts a random number of responded trials
-in [stage3_block_min, stage3_block_max] (30-60 at first, shrinking one step per qualifying session
-toward 10-20), so the animal has to follow the clicks across a switch. Stage 4 is where the side
-varies per trial. The click -> side mapping itself never changes.
+Aim: the click -> side association, from trial 1, with random sides and two temporary aids that
+fade on a fixed schedule (2026-11-11 spec A7; see _wheel_shaping_shared/stage3_scaffold.py). Every
+trial plays clicks ONLY on its side (click_train_v2's 'AOS'). There are no side blocks any more:
+within a block the last rewarded side predicts the next as well as the clicks do, and that simpler
+predictor wins (a win-stay/lose-shift agent scored 93-98% without listening), so overall accuracy
+couldn't show whether the association existed.
 
-Every other mechanic is a direct, unmodified carryover from Stage 4 (formerly Stage 3) -- the
-quiescence hold, the in-trial wheel-excursion abort threshold (monitored through
-CuePeriod+DelayPeriod, aborting into a short timeout), the delay period (Tag A, 100-200ms fixed),
-LED+dot choice period, reward/error/no-response handling, the click-level attenuation ramp (~6dB
-below final for the first VAR_CLICK_ATTENUATION_SESSIONS session runs), HiFi output calibrated via
-Calibration/sound_calibration.py, camera recording, GIT_COMMIT/REWARD_UL provenance registration,
-and session-struct export -- none of that depends on whether the side is drawn per-trial or held
-fixed for the session, so it's reused here exactly as-is.
+  - Sides come from the Hu debiaser (debiasing.HuDebiaser), as in Stages 4/5.
+  - Correction trials (TRIAL_TYPE='correction'): after an error the next trial repeats the same side
+    with probability P_CORR, with fresh clicks. They are left out of accuracy, the click-weight
+    regression, the sub-chance stop and the debiaser's error rates, but count as choice history.
+  - Click tail (CLICK_TAIL_MODE): the train keeps playing after the 0.35s cue window, through the
+    delay and J1 and on through the response window until the crossing, response timeout or abort
+    ('crossing'), so the sound is present at the turn and at reward. At the last fade step it stops
+    at dot onset ('dot_onset'), silent during the response as in Stage 4. CueComplete no longer
+    stops the HiFi; the state that ends the clicks sends the STOP (one per machine).
+    CLICK_STOP_S / N_CLICKS_PLAYED log when it stopped and how many clicks played.
+  - Fade schedule, one step per qualifying session (>= 100 responded main trials, abort rate < 30%,
+    click-weight criterion met): P_CORR 0.8/0.6/0.4/0.2/0/0, tail 'crossing' x5 then 'dot_onset'.
+    Two consecutive sessions with click-weight z < 1 step back one step. Persisted as
+    'stage3_progress'.
+  - Click-weight criterion (choice_regression.py), registered each session as CLICK_WEIGHT,
+    CLICK_WEIGHT_Z, PREV_CHOICE_WEIGHT, WIN_STAY_WEIGHT, CLICK_CRITERION_MET.
+  - Reserve scaffold: an asymmetric threshold (correct turn 40% of nominal, wrong 130%) if the
+    criterion was never met by the end of session 4 at step 0, fading to symmetric in 4 qualifying
+    sessions before step 1. Uses threshold slots 0/1 (the steady +-4deg ones, which no state machine
+    listens to -- quiescence is checked in Python). Never met by session 8: STAGE3_FLAG_CHECK_SPEAKERS.
+  - An abort re-offers the same side (TRIAL_TYPE='repeat', fresh clicks), as in Stage 4.
+  - Advance to Stage 4 after 2 consecutive qualifying sessions at the last step.
 
-What's genuinely different from Stage 4:
-  - VAR_FIRST_BLOCK_SIDE: the side of the session's FIRST block. Per explicit instruction this is
-    NOT a fresh random draw every session. The very FIRST time this subject ever runs this stage,
-    it's a coin flip (so different subjects don't all start on the same side). After that, it
-    deterministically ALTERNATES ('R' <-> 'L') once a new CALENDAR DAY starts, but stays
-    UNCHANGED across a same-day Stop/Kill/crash restart. Persisted as
-    'stage3_last_side'/'stage3_last_side_date' and saved IMMEDIATELY (not just at session end)
-    so a near-instant crash still leaves the decision durable for a same-day restart. A restart
-    begins a fresh block sequence from that side. Registered as FIRST_BLOCK_SIDE (SESSION_SIDE
-    before 2026-11-09), with BLOCK_MIN/BLOCK_MAX; every trial registers BLOCK_INDEX, BLOCK_SIDE,
-    BLOCK_LENGTH and BLOCK_TRIAL (responded trials earlier in that block). Only a genuine L/R
-    response advances a block, so aborts and timeouts don't use it up.
-  - The sub-chance stop ignores the first STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH (10) responded
-    trials after each switch, where a mouse is expected to keep turning the old way at first.
-    accuracy_aos, the advancement gate and the stim/ITI staircases count every main trial. The
-    session end prints accuracy on the first 5 responded trials after a switch.
-  - No debiasing at all (debiasing.next_side_after_error() is Stage 4's own mechanism for choosing
-    the NEXT trial's side after an error; here the block decides the side).
-  - No post-abort "repeat" re-offer either -- the next trial is in the same block anyway.
-    trial_type is therefore only 'warmup'/'main', never 'repeat'.
-  - p_right_target is 1.0/0.0 for the current block's side.
-  - Advancement gate is a new staircase.stage3_gates_met() (the doc doesn't specify this new
-    stage's own numeric criterion yet -- reusing Stage 4's own values as a placeholder pending real
-    empirical tuning, same "flagged placeholder" convention already used elsewhere in this
-    codebase): >70% correct at gamma=+-1.0 (AOS), abort rate <20%, >200 main trials/session, three
-    consecutive qualifying sessions.
+Every other mechanic is unchanged from Stage 4: the quiescence hold, the in-trial wheel-excursion
+abort threshold, the 100-200ms delay, the dot choice period, reward/error/no-response handling, the
+-6dB click attenuation for the first VAR_CLICK_ATTENUATION_SESSIONS full sessions, calibrated HiFi
+output, camera recording and session-struct export.
 
 The cue is FIXED at VAR_STIM_DURATION_S = 0.35s through Stages 3-5 (2026-11-11 spec A6/B3).
 The former within-session cue-duration staircase is gone: it added a second change while
@@ -88,6 +77,9 @@ sys.path.insert(0, os.path.join(_TASK_DIR, '..', '_wheel_shaping_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '_shared'))
 sys.path.insert(0, os.path.join(_TASK_DIR, '..', '..', '..', '..', 'Calibration'))
 import staircase
+import stage3_scaffold
+import debiasing
+import choice_regression
 import session_state
 import session_struct_export
 import session_csv_parser
@@ -341,13 +333,8 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
     'click_attenuation_sessions_remaining': VAR_CLICK_ATTENUATION_SESSIONS,
     'sessions_trial_count_history': [],   # shared list name with Stage 1/2 -- harmless, unused by
                                            # this stage's own advancement gate (stage3_sessions_history)
-    'stage3_sessions_history': [],        # bools: did each past Stage-3 session meet
-                                           # staircase.stage3_gates_met()? (3-consecutive check)
-    'stage3_last_side': None,             # None only before this subject's very first Stage 3
-                                           # session ever -- see the side-decision block below.
-    'stage3_last_side_date': None,
-    'stage3_block_min': staircase.STAGE3_BLOCK_START[0],   # side-block length range (responded
-    'stage3_block_max': staircase.STAGE3_BLOCK_START[1],   # trials), shrinks per qualifying session
+    'stage3_progress': dict(stage3_scaffold.DEFAULT_PROGRESS),   # fade step, reserve scaffold, ...
+    'hu_debias_history': [],              # [[side, correct], ...] responded trials, Stage 3-5
     'stim_duration_s': VAR_STIM_DURATION_S,   # read only, to report a value left by the old cue
                                                # staircase; never written since 2026-11-11
     'quiescence_unlocked': False,    # set by Stage 2 only -- fallback for a subject that somehow
@@ -375,33 +362,20 @@ if quiescence_unlocked:
         consecutive_failures=state.get('quiescence_consecutive_failures'),
         ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
 
-# The side of the session's FIRST block (blocks then alternate, see staircase.Stage3Blocks). 'AOS'
-# click generation guarantees zero clicks on the other channel, so every trial's clicks belong to
-# its block's side only. Per explicit instruction: a coin flip only the very FIRST time this
-# subject ever runs this stage (so different subjects don't all start on the same side); after
-# that, UNCHANGED across a same-day restart, deterministically ALTERNATING once a new calendar day
-# starts. (Until 2026-11-09 this was the side of the whole session.)
-_today_str = datetime.date.today().isoformat()
-_last_side = state.get('stage3_last_side')
-_last_side_date = state.get('stage3_last_side_date')
-if _last_side is None:
-    VAR_FIRST_BLOCK_SIDE = str(np.random.choice(['L', 'R']))
-else:
-    VAR_FIRST_BLOCK_SIDE = staircase.next_alternating_value(
-        _last_side, _last_side_date, _today_str, ('L', 'R'))
-state.set('stage3_last_side', VAR_FIRST_BLOCK_SIDE)
-state.set('stage3_last_side_date', _today_str)
-# Saved IMMEDIATELY, not just at session end like every other state.set() in this file -- the
-# side decision above must survive even a near-instant Kill/crash, since a same-day restart needs
-# to see it to avoid re-randomizing/re-alternating. A deliberate, narrow exception to StageState's
-# own "save once at the end" convention (see its own docstring for why that's normally right): safe
-# here because this is one single, atomic, already-fully-decided value, not a partially-computed
-# one -- every OTHER key in state.data at this point is still exactly what was already on disk, so
-# this early save can't write out any half-finished session update.
-state.save()
-VAR_BLOCK_MIN = state.get('stage3_block_min')
-VAR_BLOCK_MAX = state.get('stage3_block_max')
-blocks = staircase.Stage3Blocks(VAR_FIRST_BLOCK_SIDE, VAR_BLOCK_MIN, VAR_BLOCK_MAX, random)
+# Where this subject is in the fade schedule (stage3_scaffold.py), fixed for the whole session.
+progress = dict(stage3_scaffold.DEFAULT_PROGRESS)
+progress.update(state.get('stage3_progress') or {})
+VAR_FADE_STEP = progress['fade_step']
+VAR_ASYM_STEP = progress['asym_step']              # None = symmetric threshold (the normal case)
+VAR_P_CORR = stage3_scaffold.p_corr(VAR_FADE_STEP, VAR_ASYM_STEP)
+VAR_CLICK_TAIL_MODE = stage3_scaffold.tail_mode(VAR_FADE_STEP)
+VAR_ASYM_CORRECT_FRACTION, VAR_ASYM_WRONG_FRACTION = stage3_scaffold.asym_fractions(VAR_ASYM_STEP)
+# How long the click train runs: through the delay and J1, plus the whole response window when
+# the tail plays until the crossing.
+VAR_CLICK_TRAIN_S = (VAR_STIM_DURATION_S + VAR_DELAY_DURATION_MAX_S + VAR_DOT_ONSET_JITTER_MAX_S
+                     + (VAR_RESPONSE_TIMEOUT_S if VAR_CLICK_TAIL_MODE == 'crossing' else 0.0))
+debiaser = debiasing.HuDebiaser(history=state.get('hu_debias_history'))
+sides = stage3_scaffold.Stage3Sides(debiaser, VAR_P_CORR, np.random)
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -413,14 +387,32 @@ reset_positions_trigger_id, rotary_channel = rotary_setup.build_reset_trigger(
     rotary_bpod_module, marker_code=rotary_setup.DOT_ONSET_MARKER_CODE)
 
 # 6 thresholds -- same ordering convention as full_protocol_lookback_test.py: steady (hold-still),
-# response (choice), cue-abort (in-trial) -- index order determines event numbering.
-ALL_THRESHOLDS_DEG = [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
-                       -VAR_RESPONSE_THRESHOLD_DEG, VAR_RESPONSE_THRESHOLD_DEG,
-                       -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG]
+# response (choice), cue-abort (in-trial) -- index order determines event numbering. With the
+# reserve asymmetric threshold on, slots 0/1 (steady, not used by any state machine) carry the
+# correct turn's lower threshold and slots 2/3 the wrong turn's higher one.
+if VAR_ASYM_STEP is None:
+    ALL_THRESHOLDS_DEG = [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
+                           -VAR_RESPONSE_THRESHOLD_DEG, VAR_RESPONSE_THRESHOLD_DEG,
+                           -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG]
+else:
+    _correct_deg = VAR_ASYM_CORRECT_FRACTION * VAR_RESPONSE_THRESHOLD_DEG
+    _wrong_deg = VAR_ASYM_WRONG_FRACTION * VAR_RESPONSE_THRESHOLD_DEG
+    ALL_THRESHOLDS_DEG = [-_correct_deg, _correct_deg, -_wrong_deg, _wrong_deg,
+                           -VAR_CUE_ABORT_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG]
 event_names = rotary_setup.set_and_enable_thresholds(rotary, ALL_THRESHOLDS_DEG)
 rotary.enable_evt_transmission()
 left_event, right_event = event_names[2], event_names[3]
 wheel_abort_event_neg, wheel_abort_event_pos = event_names[4], event_names[5]
+# The correct turn is AWAY from the click side on this rig (see the choice machine below): clicks on
+# R are rewarded by the negative crossing.
+if VAR_ASYM_STEP is None:
+    REWARDED_EVENT = {'R': left_event, 'L': right_event}
+else:
+    REWARDED_EVENT = {'R': event_names[0], 'L': event_names[1]}
+UNREWARDED_EVENT = {'R': right_event, 'L': left_event}
+# The render loop's position fallback must not freeze the dot before the wrong turn's (higher)
+# threshold has actually been crossed.
+RENDER_THRESHOLD_DEG = VAR_RESPONSE_THRESHOLD_DEG * max(1.0, VAR_ASYM_WRONG_FRACTION)
 
 hifi = hifi_setup.connect_hifi(my_bpod)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
@@ -447,9 +439,14 @@ if ITI_RESET_FROM_S is not None:
         VAR_ITI_S, ITI_RESET_FROM_S), flush=True)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
-my_bpod.register_value('FIRST_BLOCK_SIDE', VAR_FIRST_BLOCK_SIDE)   # SESSION_SIDE before 2026-11-09
-my_bpod.register_value('BLOCK_MIN', VAR_BLOCK_MIN)
-my_bpod.register_value('BLOCK_MAX', VAR_BLOCK_MAX)
+my_bpod.register_value('FADE_STEP', VAR_FADE_STEP)
+my_bpod.register_value('P_CORR', VAR_P_CORR)
+my_bpod.register_value('CLICK_TAIL_MODE', VAR_CLICK_TAIL_MODE)
+my_bpod.register_value('ASYM_STEP', 'off' if VAR_ASYM_STEP is None else VAR_ASYM_STEP)
+if VAR_ASYM_STEP is not None:
+    my_bpod.register_value('ASYM_CORRECT_THRESHOLD_DEG', _correct_deg)
+    my_bpod.register_value('ASYM_WRONG_THRESHOLD_DEG', _wrong_deg)
+my_bpod.register_value('HU_HISTORY_SEEDED', debiaser.seeded_trials)
 
 log_python_t0 = host_clock.now()
 runner = TrialRunner(my_bpod, rotary, log_python_t0, still_poll_hz=VAR_STILL_POLL_HZ,
@@ -488,7 +485,8 @@ bench_plots = WheelShapingPlots(
     prev_session_values={'threshold_deg': VAR_RESPONSE_THRESHOLD_DEG},
     session_status={'click_attenuated': _click_attenuation_remaining > 0,
                      'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG,
-                     'block_range': (VAR_BLOCK_MIN, VAR_BLOCK_MAX)},
+                     'fade_step': VAR_FADE_STEP, 'p_corr': VAR_P_CORR,
+                     'tail_mode': VAR_CLICK_TAIL_MODE, 'asym_step': VAR_ASYM_STEP},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -497,14 +495,28 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-print("Starting Stage 3 -- side blocks of {5}-{6} responded trials, first block {0}, response "
-      "threshold frozen at {1:.1f}deg, in-trial threshold {2:.1f}deg{3}, click level {4}".format(
-          VAR_FIRST_BLOCK_SIDE, VAR_RESPONSE_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG,
+
+def _register_clicks_played(stop_t, audio_start_t, trial_clicks):
+    """ CLICK_STOP_S: the HiFi STOP's state start minus the click train's time zero (the audio
+    start + CLICK_START_OFFSET_S), both host times; N_CLICKS_PLAYED: clicks before it. """
+    click_stop_s = stop_t - (audio_start_t + click_train.CLICK_START_OFFSET_S)
+    runner.register('CLICK_STOP_S', round(click_stop_s, 4))
+    runner.register('N_CLICKS_PLAYED', int(sum(1 for t in list(trial_clicks['left_times'])
+                                               + list(trial_clicks['right_times']) if t < click_stop_s)))
+
+
+print("Starting Stage 3 -- fade step {0} (correction trials p={1:.1f}, click tail until {2}){3}, "
+      "response threshold frozen at {4:.1f}deg, in-trial threshold {5:.1f}deg{6}, click level "
+      "{7}".format(
+          VAR_FADE_STEP, VAR_P_CORR, VAR_CLICK_TAIL_MODE.replace('_', ' '),
+          '' if VAR_ASYM_STEP is None else ', ASYMMETRIC threshold step {0} (correct {1:.0%}, wrong '
+          '{2:.0%})'.format(VAR_ASYM_STEP, VAR_ASYM_CORRECT_FRACTION, VAR_ASYM_WRONG_FRACTION),
+          VAR_RESPONSE_THRESHOLD_DEG, VAR_CUE_ABORT_THRESHOLD_DEG,
           ' (PLACEHOLDER -- not yet empirically derived)'
           if VAR_CUE_ABORT_THRESHOLD_DEG == VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER else '',
           'ATTENUATED (-{0:.0f}dB, {1} session(s) remaining)'.format(
               VAR_CLICK_ATTENUATION_DB, _click_attenuation_remaining)
-          if _click_attenuation_remaining > 0 else 'FULL', VAR_BLOCK_MIN, VAR_BLOCK_MAX), flush=True)
+          if _click_attenuation_remaining > 0 else 'FULL'), flush=True)
 
 session_start_time = host_clock.now()
 last_initiation_time = session_start_time
@@ -513,13 +525,15 @@ session_trial_count = 0        # MAIN trials only -- feeds VAR_TRIAL_COUNT_ADVAN
 total_attempts = 0              # every trial attempt (warmup+main), feeds abort_rate
 total_aborts = 0
 consecutive_aborts = 0
-main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos
-subchance_correct = []          # the same, minus the first STAGE3_SUBCHANCE_SKIP_AFTER_SWITCH
-                                 # responded trials after a block switch -- feeds the sub-chance stop
-after_switch_correct = []       # main trials within 5 responded trials of a switch (session readout)
+main_trial_correct = []         # bools, MAIN trials only (no warmup/correction/repeat) -- feeds
+                                 # accuracy_aos and the sub-chance stop
+choice_trials = []              # every responded trial, for the click-weight regression
+correction_trial_count = 0
 warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
-fresh_trial_count = 0           # trial draws so far this session (every attempt counts -- no
-                                 # separate 'repeat' category here, see module docstring)
+fresh_trial_count = 0           # non-repeat trial draws so far this session
+prev_error_side = None          # side of the previous responded trial if it was an error
+pending_repeat = False          # an abort re-offers the same side
+repeat_side = None
 
 session_end_reason = None
 trial = 0
@@ -527,7 +541,7 @@ trial = 0
 while True:
     now = host_clock.now()
     if now - session_start_time >= VAR_SESSION_CAP_S:
-        session_end_reason = 'cap_90min'
+        session_end_reason = 'cap_90min'   # the label predates the 45-min cap
         break
     if now - last_initiation_time >= VAR_NO_INIT_TIMEOUT_S:
         session_end_reason = 'no_initiation_3min'
@@ -535,8 +549,8 @@ while True:
     if consecutive_aborts >= VAR_CONSECUTIVE_ABORT_LIMIT:
         session_end_reason = 'consecutive_aborts'
         break
-    if len(subchance_correct) >= VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS:
-        recent = subchance_correct[-(VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS):]
+    if len(main_trial_correct) >= VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS:
+        recent = main_trial_correct[-(VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS):]
         chunks = [recent[i:i + VAR_SUBCHANCE_BLOCK_SIZE]
                   for i in range(0, len(recent), VAR_SUBCHANCE_BLOCK_SIZE)]
         if all((sum(b) / float(len(b))) < 0.5 for b in chunks):
@@ -548,13 +562,19 @@ while True:
 
     trial += 1
     try:
-        fresh_trial_count += 1
-        trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
-        side = blocks.side
-        p_right_target = 1.0 if side == 'R' else 0.0
-        block_index_this_trial = blocks.index
-        block_trial_this_trial = blocks.trial_in_block   # responded trials earlier in this block
-        just_switched_this_trial = blocks.just_switched()
+        if pending_repeat:
+            trial_type = 'repeat'
+            side = repeat_side
+            is_correction = False
+            pending_repeat = False
+        else:
+            fresh_trial_count += 1
+            side, is_correction = sides.next_side(prev_error_side)
+            trial_type = ('correction' if is_correction else
+                          'warmup' if fresh_trial_count <= warmup_target else 'main')
+        # The debiaser's target for a fresh draw; a correction or repeat trial's side is fixed.
+        p_right_target = (debiaser.last['p_right'] if trial_type in ('warmup', 'main')
+                          else (1.0 if side == 'R' else 0.0))
 
         if quiescence_unlocked:
             quiescence_scale_this_trial = quiescence_obj.current_s
@@ -568,7 +588,7 @@ while True:
         stim_duration_this_trial = VAR_STIM_DURATION_S
         iti_this_trial = VAR_ITI_S
         trial_clicks, stim_seed, stim_resamples = click_train.draw_trial_clicks_with_cue(
-            'AOS', side, stim_duration_this_trial)
+            'AOS', side, stim_duration_this_trial, train_duration_s=VAR_CLICK_TRAIN_S)
         # Warmup attenuation is a multiplier ON TOP of the calibrated base amplitude (dB below the
         # calibrated target), not a substitute for it.
         attenuation_mult = (10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)
@@ -577,16 +597,22 @@ while True:
             trial_clicks, hifi.sampling_rate,
             amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE * attenuation_mult,
             amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE * attenuation_mult,
-            stim_duration_s=stim_duration_this_trial)
+            stim_duration_s=VAR_CLICK_TRAIN_S)
         hifi.load(0, np.array([left_wave, right_wave]))
         hifi.push()
 
         runner.register('TRIAL_TYPE', trial_type)
         runner.register('TRIAL_SIDE', side)
-        runner.register('BLOCK_INDEX', block_index_this_trial)
-        runner.register('BLOCK_SIDE', side)
-        runner.register('BLOCK_LENGTH', blocks.length)
-        runner.register('BLOCK_TRIAL', block_trial_this_trial)
+        if trial_type in ('warmup', 'main'):
+            runner.register('P_RIGHT_TARGET', round(debiaser.last['p_right'], 4))
+            runner.register('P_RIGHT_DRAW', round(debiaser.last['prob_right'], 4))
+            runner.register('E_RIGHT', round(debiaser.last['e_right'], 4))
+            runner.register('E_LEFT', round(debiaser.last['e_left'], 4))
+            runner.register('F_RIGHT_EMPIRICAL', round(debiaser.last['f_right'], 4))
+        runner.register('P_CORR', VAR_P_CORR)
+        runner.register('FADE_STEP', VAR_FADE_STEP)
+        runner.register('CLICK_TAIL_MODE', VAR_CLICK_TAIL_MODE)
+        runner.register('ASYM_STEP', 'off' if VAR_ASYM_STEP is None else VAR_ASYM_STEP)
         runner.register('CLICK_TIMES_L', ','.join(
             '{0:.4f}'.format(t) for t in trial_clicks['left_times']))
         runner.register('CLICK_TIMES_R', ','.join(
@@ -682,11 +708,13 @@ while True:
             state_change_conditions={Bpod.Events.Tup: 'exit'},
             output_actions=[])
 
+        # No HiFi STOP here: the clicks keep playing into the choice machine (the click tail), and
+        # whichever state ends them there sends the STOP -- one per machine.
         cue_sma.add_state(
             state_name='CueComplete',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'exit'},
-            output_actions=[(hifi_channel, hifi_stop_msg_id)])
+            output_actions=[])
 
         # Confirmed on real hardware: the correct response is turning the wheel OPPOSITE to the
         # click side, not toward it -- left_event/right_event's own left/right naming is purely a
@@ -694,8 +722,13 @@ while True:
         # physical turn direction one-to-one, and on this rig it's inverted relative to the
         # click side. If this rig's wiring/mounting ever changes, re-confirm this mapping on
         # hardware again rather than assuming it still holds.
-        rewarded_event = left_event if side == 'R' else right_event
-        unrewarded_event = right_event if rewarded_event == left_event else left_event
+        rewarded_event = REWARDED_EVENT[side]
+        unrewarded_event = UNREWARDED_EVENT[side]
+        # Which state stops the click train: dot onset at the last fade step, otherwise whichever
+        # state ends the response (crossing, timeout, or an early turn / missing dot).
+        stop_clicks = [(hifi_channel, hifi_stop_msg_id)]
+        stop_at_dot = VAR_CLICK_TAIL_MODE == 'dot_onset'
+        stop_on_end = [] if stop_at_dot else stop_clicks
 
         # Built now (everything it needs is already known) so it can be uploaded and run the moment
         # cue_sma ends, from the same thread -- see _run_cue_then_choice() below.
@@ -712,19 +745,19 @@ while True:
                 unrewarded_event: 'MovedBeforeDot',
                 Bpod.Events.Tup: 'DotTimeout',
             },
-            output_actions=[('SoftCode', SOFTCODE_DOT_ON)])
+            output_actions=[('SoftCode', SOFTCODE_DOT_ON)] + (stop_clicks if stop_at_dot else []))
 
         sma.add_state(
             state_name='MovedBeforeDot',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[])
+            output_actions=stop_on_end)
 
         sma.add_state(
             state_name='DotTimeout',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[])
+            output_actions=stop_on_end)
 
         sma.add_state(
             state_name='WheelDotPeriod',
@@ -740,7 +773,7 @@ while True:
             state_name='Reward',
             state_timer=VAR_REWARD_DURATION,
             state_change_conditions={Bpod.Events.Tup: 'Consumption'},
-            output_actions=[(Bpod.OutputChannels.Valve, 1), ('SoftCode', SOFTCODE_CROSSED)])
+            output_actions=[(Bpod.OutputChannels.Valve, 1), ('SoftCode', SOFTCODE_CROSSED)] + stop_on_end)
 
         sma.add_state(
             state_name='Consumption',
@@ -752,7 +785,7 @@ while True:
             state_name='ErrorConsumption',
             state_timer=error_flash_delay_s,
             state_change_conditions={Bpod.Events.Tup: 'ErrorPunish'},
-            output_actions=[('SoftCode', SOFTCODE_CROSSED)])
+            output_actions=[('SoftCode', SOFTCODE_CROSSED)] + stop_on_end)
 
         sma.add_state(
             state_name='ErrorPunish',
@@ -770,7 +803,7 @@ while True:
             state_name='NoResponse',
             state_timer=0,
             state_change_conditions={Bpod.Events.Tup: 'ITI'},
-            output_actions=[])
+            output_actions=stop_on_end)
 
         sma.add_state(
             state_name='ITI',
@@ -839,7 +872,7 @@ while True:
         decision_thread.start()
 
         render = run_trial_render_loop(
-            runner, dot, camera, decision_done, VAR_RESPONSE_THRESHOLD_DEG, disappear_delay_s,
+            runner, dot, camera, decision_done, RENDER_THRESHOLD_DEG, disappear_delay_s,
             render_interval, SOFTCODE_DOT_ON, (SOFTCODE_CROSSED,),
             quiescence=(quiescence_duration_this_trial, VAR_STEADY_THRESHOLD_DEG),
             punish_softcode=SOFTCODE_PUNISH, punish_flash_s=VAR_ERROR_FLASH_S,
@@ -893,6 +926,11 @@ while True:
             runner.register('ABORT', abort_time_abs)
             runner.register('ABORT_EPOCH', abort_epoch)
             runner.register('ABORT_ITI_S', abort_timeout_this_trial)
+            if 't' in cue_audio:   # the abort's HiFi STOP ended the click train
+                _register_clicks_played(cue_send_t + cue_visited['WheelAbort'][-1][0],
+                                        cue_audio['t'], trial_clicks)
+            pending_repeat = True
+            repeat_side = side
             # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
             # ErrorConsumption)? False here (and for NoResponse) -- analysis applies its own
             # filters downstream, this is not a second, redundant filter.
@@ -957,14 +995,21 @@ while True:
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
-            if not just_switched_this_trial:
-                subchance_correct.append(bool(correct))
-            if block_index_this_trial > 0 and block_trial_this_trial < 5:
-                after_switch_correct.append(bool(correct))
-        # Only a genuine L/R response (warmup or main) advances the side block.
-        if correct is not None and blocks.record_response():
-            print("Block {0} done -- switching to {1} for {2} responded trials".format(
-                blocks.index, blocks.side, blocks.length), flush=True)
+        if correct is not None:
+            if trial_type == 'correction':
+                correction_trial_count += 1
+            else:   # correction trials are not current trials of the debiaser (spec A7)
+                debiaser.record(side, correct)
+            choice_trials.append({'choice': response, 'stim': side, 'rewarded': bool(correct),
+                                  'fit': trial_type == 'main'})
+            prev_error_side = side if correct is False else None
+        elif outcome_state == 'NoResponse':
+            prev_error_side = None
+
+        # When the click train stopped, and how many clicks the animal heard.
+        _stop_state = 'DotOn' if VAR_CLICK_TAIL_MODE == 'dot_onset' else outcome_state
+        if 't' in cue_audio and _stop_state in visited and was_visited(visited, _stop_state):
+            _register_clicks_played(send_t + visited[_stop_state][-1][0], cue_audio['t'], trial_clicks)
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -1043,46 +1088,61 @@ accuracy_aos = (sum(main_trial_correct) / float(len(main_trial_correct))
                 if main_trial_correct else 0.0)
 abort_rate = (total_aborts / float(total_attempts)) if total_attempts else 0.0
 
-this_session_gates_met = staircase.stage3_gates_met(
-    accuracy_aos, abort_rate, session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE)
-history = state.get('stage3_sessions_history')
-history.append(this_session_gates_met)
-state.set('stage3_sessions_history', history[-3:])
-advance_ready = len(history) >= 3 and all(history[-3:])
+# Is the choice driven by the clicks rather than by trial history? (spec A7)
+click_fit = choice_regression.fit_choice_regression(choice_trials)
+click_criterion_met = bool(click_fit and click_fit['criterion_met'])
+if click_fit:
+    runner.register('CLICK_WEIGHT', round(click_fit['b_click'], 4))
+    runner.register('CLICK_WEIGHT_Z', round(click_fit['z_click'], 3))
+    runner.register('PREV_CHOICE_WEIGHT', round(click_fit['b_prev'], 4))
+    runner.register('WIN_STAY_WEIGHT', round(click_fit['b_win'], 4))
+    runner.register('CLICK_WEIGHT_N', click_fit['n'])
+runner.register('CLICK_CRITERION_MET', click_criterion_met)
+this_session_gates_met = stage3_scaffold.session_qualifies(session_trial_count, abort_rate,
+                                                           click_criterion_met)
+runner.register('STAGE3_QUALIFYING', this_session_gates_met)
+new_progress, progress_events, advance_ready, check_speakers = stage3_scaffold.end_session(
+    progress, this_session_gates_met, click_fit['z_click'] if click_fit else None, click_criterion_met)
+state.set('stage3_progress', new_progress)
+runner.register('FADE_STEP_NEXT', new_progress['fade_step'])
+runner.register('STAGE3_ADVANCE_READY', advance_ready)
+if check_speakers:
+    runner.register('STAGE3_FLAG_CHECK_SPEAKERS', True)
 
 if _click_attenuation_remaining > 0 and session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
     state.set('click_attenuation_sessions_remaining', _click_attenuation_remaining - 1)
-
-# A qualifying session shortens the side blocks one step, toward Stage 4's per-trial sides.
-if this_session_gates_met:
-    _new_lo, _new_hi = staircase.shrink_stage3_block_range(VAR_BLOCK_MIN, VAR_BLOCK_MAX)
-    state.set('stage3_block_min', _new_lo)
-    state.set('stage3_block_max', _new_hi)
-
 
 if quiescence_unlocked:
     state.set('quiescence_s', quiescence_obj.current_s)
     state.set('quiescence_consecutive_successes', quiescence_obj.consecutive_successes)
     state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
 
+state.set('hu_debias_history', debiaser.history())
 state.save()
 
-print("Session: {0} side block(s) from {1}, {2} main trials, accuracy(AOS)={3:.1%}, "
-      "abort_rate={4:.1%}, gates_met={5}".format(
-          blocks.index + 1, VAR_FIRST_BLOCK_SIDE, session_trial_count, accuracy_aos, abort_rate,
-          this_session_gates_met), flush=True)
-# Is it listening? A mouse using the clicks switches at once; one going by reward history keeps
-# turning the old way for a few trials after each switch.
-_n_after = len(after_switch_correct)
-print("Accuracy on the first 5 responded trials after a switch: {0} (n={1}); all main trials: "
-      "{2:.1%}".format('{0:.1%}'.format(sum(after_switch_correct) / float(_n_after))
-                       if _n_after else 'n/a', _n_after, accuracy_aos), flush=True)
-print("Block range next session: {0}-{1}".format(
-    state.get('stage3_block_min'), state.get('stage3_block_max')), flush=True)
-print("ADVANCE-READY (3 consecutive qualifying sessions): {0}".format(
-    "yes" if advance_ready else "no"), flush=True)
-if not advance_ready:
-    print("  (history so far: {0})".format(history), flush=True)
+print("Session: {0} main trials ({1} correction trials), accuracy(AOS)={2:.1%}, abort_rate={3:.1%}, "
+      "qualifying={4}".format(session_trial_count, correction_trial_count, accuracy_aos, abort_rate,
+                              this_session_gates_met), flush=True)
+if click_fit:
+    print("Click weight {0:.2f} (z {1:.1f}), previous-choice weight {2:.2f}, win-stay weight {3:.2f} "
+          "over {4} trials -- click criterion {5}".format(
+              click_fit['b_click'], click_fit['z_click'], click_fit['b_prev'], click_fit['b_win'],
+              click_fit['n'], 'MET' if click_criterion_met else 'not met'), flush=True)
+else:
+    print("Click weight: too few main trials to fit -- criterion not met", flush=True)
+for _event in progress_events:
+    print("Fade schedule: " + _event, flush=True)
+print("Next session: fade step {0} (correction trials p={1:.1f}, click tail until {2}){3}".format(
+    new_progress['fade_step'], stage3_scaffold.p_corr(new_progress['fade_step'], new_progress['asym_step']),
+    stage3_scaffold.tail_mode(new_progress['fade_step']).replace('_', ' '),
+    '' if new_progress['asym_step'] is None else ', asymmetric threshold step {0}'.format(
+        new_progress['asym_step'])), flush=True)
+print("ADVANCE-READY ({0} consecutive qualifying sessions at the last step): {1}".format(
+    stage3_scaffold.ADVANCE_SESSIONS_AT_LAST_STEP, "yes" if advance_ready else "no"), flush=True)
+if check_speakers:
+    print("FLAG: click criterion never met in {0} Stage 3 sessions -- check speaker lateralisation "
+          "and level with a microphone at head position.".format(new_progress['sessions_run']),
+          flush=True)
 if accuracy_aos <= 0.5 and len(main_trial_correct) >= VAR_SUBCHANCE_BLOCK_SIZE:
     print("NOTE: accuracy is at or below chance -- per the doc's Tag J, before declaring a "
           "non-learner: (1) verify per-rig speaker SPL calibration measured at the head position, "

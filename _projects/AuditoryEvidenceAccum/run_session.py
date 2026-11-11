@@ -983,10 +983,12 @@ class PlotFeeder(object):
             if in_trial_threshold is not None:
                 kwargs['in_trial_threshold_deg'] = in_trial_threshold
 
-            if trial_type == 'repeat' or info['stage'] == 3:   # Stage 3: the side is the block's
+            if trial_type in ('repeat', 'correction'):   # the side was fixed, not drawn
                 p_right_target = 1.0 if side == 'R' else 0.0
             elif _val_float(trial, 'P_RIGHT_TARGET', self.session_vals) is not None:
                 p_right_target = _val_float(trial, 'P_RIGHT_TARGET', self.session_vals)
+            elif info['stage'] == 3:   # Stage 3 before 2026-11-11: the side was the block's/day's
+                p_right_target = 1.0 if side == 'R' else 0.0
             elif self._replay_prev_outcome == 'incorrect':   # sessions before the Hu debiaser
                 p_right_target = (_OLD_DEBIAS_REPEAT_PROB if self._replay_prev_side == 'R'
                                    else 1.0 - _OLD_DEBIAS_REPEAT_PROB)

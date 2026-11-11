@@ -1832,40 +1832,9 @@ print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see
 
 print()
 print("=" * 100)
-print("Section 22: Stage 3 side blocks")
+print("Section 22: (retired 2026-11-11 -- Stage 3 side blocks replaced by fading scaffolds, see Section 35)")
 print("=" * 100)
-
-import random as _random22
-_ranges = [staircase.STAGE3_BLOCK_START]
-for _ in range(6):
-    _ranges.append(staircase.shrink_stage3_block_range(*_ranges[-1]))
-shrink_ok = _ranges == [(30, 60), (25, 50), (20, 40), (15, 30), (10, 20), (10, 20), (10, 20)]
-print("  block range shrinks 30-60 -> 25-50 -> 20-40 -> 15-30 -> 10-20, then stays: {0} ({1})".format(
-    shrink_ok, _ranges[:5]))
-
-_b = staircase.Stage3Blocks('L', 30, 60, _random22.Random(7))
-_sides, _lengths, _run, _skipped = [], [], 0, 0
-for _ in range(2000):
-    _sides.append(_b.side)
-    if _b.just_switched():
-        _skipped += 1
-    _len_before = _b.length
-    _run += 1
-    if _b.record_response():
-        _lengths.append(_run)
-        assert _run == _len_before
-        _run = 0
-_flips = [a != b for a, b in zip(_sides, _sides[1:])]
-blocks_ok = (_sides[0] == 'L' and all(30 <= n <= 60 for n in _lengths) and len(_lengths) >= 30
-             and sum(_flips) == len(_lengths) and len(set(_lengths)) > 5)
-print("  first block = the day's side, every block 30-60 responded trials and random, side flips at "
-      "every block end: {0} ({1} blocks, lengths {2}-{3})".format(
-          blocks_ok, len(_lengths), min(_lengths), max(_lengths)))
-skip_ok = _skipped == 10 * len(_lengths)
-print("  sub-chance skip covers the first 10 responded trials of every block after the first: "
-      "{0} ({1} skipped)".format(skip_ok, _skipped))
-
-section22_pass = shrink_ok and blocks_ok and skip_ok
+section22_pass = True
 print("Section 22 result: {0}".format("PASS" if section22_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -2234,6 +2203,132 @@ print("Section 34 result: {0}".format("PASS" if section34_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 35: A7: Stage 3 fading scaffolds -- listening agents climb, history agents never qualify")
+print("=" * 100)
+
+import stage3_scaffold as _s3
+import choice_regression as _cr35
+_rng35 = np.random.RandomState(35)
+
+
+def _s3_session(agent, progress, n_trials=180, warmup=20):
+    """ One simulated Stage 3 session at `progress`; returns (new_progress, reward_rate, fit,
+    n_fit_rows, n_noncorrection_main, advance_ready, flag). """
+    d35 = debiasing.HuDebiaser()
+    sides35 = _s3.Stage3Sides(d35, _s3.p_corr(progress['fade_step'], progress['asym_step']), _rng35)
+    prev, prev_err, trials35, rewarded, n_main = None, None, [], 0, 0
+    for i in range(n_trials):
+        side, is_corr = sides35.next_side(prev_err)
+        ttype = 'correction' if is_corr else ('warmup' if i < warmup else 'main')
+        choice = agent(side, prev)
+        ok = choice == side
+        rewarded += ok
+        if not is_corr:
+            d35.record(side, ok)
+        n_main += ttype == 'main'
+        trials35.append({'choice': choice, 'stim': side, 'rewarded': ok, 'fit': ttype == 'main'})
+        prev, prev_err = (choice, ok), (side if not ok else None)
+    fit = _cr35.fit_choice_regression(trials35)
+    met = bool(fit and fit['criterion_met'])
+    qual = _s3.session_qualifies(n_main, 0.05, met)
+    newp, _ev, adv, flag = _s3.end_session(progress, qual, fit['z_click'] if fit else None, met)
+    return newp, rewarded / float(n_trials), fit, len(_cr35.build_design(trials35)[1]), n_main, adv, flag
+
+
+def _listen85(side, prev):
+    return side if _rng35.random_sample() < 0.85 else ('L' if side == 'R' else 'R')
+
+
+def _wsls35(side, prev):
+    if prev is None:
+        return 'R'
+    return prev[0] if prev[1] else ('L' if prev[0] == 'R' else 'R')
+
+
+# A click-following agent climbs 0 -> 5 and becomes advance-ready.
+_p = dict(_s3.DEFAULT_PROGRESS)
+_steps, _adv_at = [_p['fade_step']], None
+for _sess in range(12):
+    _p, _rate, _fit, _rows, _nmain, _adv, _flag = _s3_session(_listen85, _p)
+    _steps.append(_p['fade_step'])
+    if _adv and _adv_at is None:
+        _adv_at = _sess + 1
+climb_ok = _steps[:6] == [0, 1, 2, 3, 4, 5] and _adv_at == 7
+print("  85% click-follower: fade steps by session {0}, advance-ready after session {1}: {2}".format(
+    _steps[:8], _adv_at, climb_ok))
+excl_ok = _rows == _nmain
+print("  the regression is fitted on main non-correction trials only ({0} rows = {1} main trials): "
+      "{2}".format(_rows, _nmain, excl_ok))
+
+# A click-blind win-stay/lose-shift agent: ~64% at step 0, ~50% at step 4, never qualifies.
+_wsls_rates, _wsls_met = {}, []
+for _step in (0, 4):
+    _rates = []
+    for _ in range(15):
+        _pp = dict(_s3.DEFAULT_PROGRESS)
+        _pp['fade_step'] = _step
+        _newp, _rate, _fit, _rows, _nmain, _adv, _flag = _s3_session(_wsls35, _pp, n_trials=400)
+        _rates.append(_rate)
+        _wsls_met.append(bool(_fit and _fit['criterion_met']))
+    _wsls_rates[_step] = float(np.mean(_rates))
+wsls_ok = (abs(_wsls_rates[0] - 0.64) < 0.03 and abs(_wsls_rates[4] - 0.50) < 0.03 and not any(_wsls_met))
+print("  win-stay/lose-shift: rewarded {0:.1%} at step 0 (expect ~64%), {1:.1%} at step 4 (expect 50%), "
+      "criterion met in {2} of {3} sessions: {4}".format(
+          _wsls_rates[0], _wsls_rates[4], sum(_wsls_met), len(_wsls_met), wsls_ok))
+
+# Step back after 2 consecutive sessions with z < 1; a None z (too few trials) changes nothing.
+_q = dict(_s3.DEFAULT_PROGRESS, fade_step=3, criterion_ever_met=True)
+_q, _, _, _ = _s3.end_session(_q, False, 0.5, False)
+_mid = _q['fade_step']
+_q, _, _, _ = _s3.end_session(_q, False, None, False)
+_q, _, _, _ = _s3.end_session(_q, False, 0.2, False)
+stepback_ok = _mid == 3 and _q['fade_step'] == 2 and _q['low_z_streak'] == 0
+print("  two sessions with z < 1 step back one step (3 -> 2), a no-fit session doesn't break the "
+      "streak: {0}".format(stepback_ok))
+
+# Reserve scaffold: on after 4 sessions at step 0 without the criterion, fades out over 4 qualifying
+# sessions before step 1, triggers once; the flag comes at session 8.
+_r = dict(_s3.DEFAULT_PROGRESS)
+for _ in range(4):
+    _r, _, _, _flag4 = _s3.end_session(_r, False, 0.0, False)
+on_ok = _r['asym_step'] == 0 and _s3.p_corr(_r['fade_step'], _r['asym_step']) == 0.8
+_asym_trace = []
+for _ in range(4):
+    _r, _, _, _ = _s3.end_session(_r, True, 4.0, True)
+    _asym_trace.append((_r['asym_step'], _r['fade_step']))
+_r, _, _, _ = _s3.end_session(_r, True, 4.0, True)
+fade_ok = _asym_trace == [(1, 0), (2, 0), (3, 0), (None, 0)] and _r['fade_step'] == 1
+_f = dict(_s3.DEFAULT_PROGRESS, asym_used=True)
+_flags = []
+for _ in range(8):
+    _f, _, _, _fl = _s3.end_session(_f, False, 0.0, False)
+    _flags.append(_fl)
+flag_ok = _flags == [False] * 7 + [True] and not _flag4
+print("  reserve asymmetric threshold: on after 4 sessions at step 0 ({0}), fades (asym, fade) {1} then "
+      "step 1 ({2}); speaker-check flag only at session 8 ({3})".format(on_ok, _asym_trace, fade_ok, flag_ok))
+frac_ok = (_s3.asym_fractions(0) == (0.40, 1.30) and _s3.asym_fractions(None) == (1.0, 1.0)
+           and _s3.FADE_P_CORR == (0.8, 0.6, 0.4, 0.2, 0.0, 0.0) and _s3.tail_mode(5) == 'dot_onset'
+           and _s3.tail_mode(4) == 'crossing')
+_src3 = stage_source(3)
+_cue_complete = _re25.search(r"state_name='CueComplete',.*?output_actions=(\[[^\]]*\])", _src3, _re25.S)
+wiring_ok = (_cue_complete is not None and _cue_complete.group(1) == '[]'
+             and 'Stage3Blocks' not in _src3 and 'BLOCK_INDEX' not in _src3
+             and all("runner.register('%s'" % k in _src3 for k in
+                     ('CLICK_STOP_S', 'N_CLICKS_PLAYED', 'P_CORR', 'FADE_STEP', 'CLICK_TAIL_MODE',
+                      'CLICK_WEIGHT_Z', 'CLICK_CRITERION_MET', 'STAGE3_QUALIFYING'))
+             and "'correction'" in _src3 and "trial_type = 'repeat'" in _src3
+             and not hasattr(staircase, 'Stage3Blocks') and not hasattr(staircase, 'stage3_gates_met'))
+print("  fade table / tail modes / asymmetric fractions: {0}; Stage 3 wiring (no STOP at CueComplete, "
+      "no blocks, click-stop/fade/criterion VALs, correction + repeat trials): {1}".format(frac_ok, wiring_ok))
+section35_pass = (climb_ok and excl_ok and wsls_ok and stepback_ok and on_ok and fade_ok and flag_ok
+                  and frac_ok and wiring_ok)
+
+print("Section 35 result: {0}".format("PASS" if section35_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2251,6 +2346,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section31_pass and
                  section32_pass and
                  section33_pass and
-                 section34_pass)
+                 section34_pass and
+                 section35_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
