@@ -170,6 +170,9 @@ QUIESCENCE_CEILING_S = 0.55         # IBL level (2026-11-11 spec A1), supersedin
                                      # truncated to 0.4-0.7s, mean 0.53s.
 # The hold window and the exponential's scale both scale with q, so q = 0.55 reproduces IBL exactly
 # (0.4/0.55, 0.7/0.55, 0.35/0.55) and q = 0.1 gives ~0.073-0.127s. Mean hold ~0.96*q.
+# Stages 2-4 stop the scale at 0.25s (spec B10): one new demand per stage, so q can't climb while
+# the click -> side rule is being learned. Stage 5 continues it up to QUIESCENCE_CEILING_S.
+STAGE234_QUIESCENCE_CEILING_S = 0.25
 QUIESCENCE_WINDOW_LO_FACTOR = 0.727
 QUIESCENCE_WINDOW_HI_FACTOR = 1.273
 QUIESCENCE_SCALE_FACTOR = 0.636
@@ -326,8 +329,10 @@ class QuiescenceStaircase(object):
     Constructed fresh from persisted StageState each session, same round-trip convention as
     ThresholdStaircase. """
 
-    def __init__(self, current_s, consecutive_successes=0, consecutive_failures=0):
-        self.current_s = current_s
+    def __init__(self, current_s, consecutive_successes=0, consecutive_failures=0,
+                 ceiling_s=QUIESCENCE_CEILING_S):
+        self.ceiling_s = ceiling_s
+        self.current_s = min(current_s, ceiling_s)
         self.consecutive_successes = consecutive_successes
         self.consecutive_failures = consecutive_failures
 
@@ -338,7 +343,7 @@ class QuiescenceStaircase(object):
             self.consecutive_successes += 1
             self.consecutive_failures = 0
             if self.consecutive_successes >= QUIESCENCE_SUCCESSES_TO_STEP_UP:
-                self.current_s = min(QUIESCENCE_CEILING_S, self.current_s + QUIESCENCE_STEP_UP_S)
+                self.current_s = min(self.ceiling_s, self.current_s + QUIESCENCE_STEP_UP_S)
                 self.consecutive_successes = 0
         else:
             self.consecutive_failures += 1

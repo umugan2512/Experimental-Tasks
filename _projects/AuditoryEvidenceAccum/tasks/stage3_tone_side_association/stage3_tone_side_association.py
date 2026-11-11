@@ -381,7 +381,8 @@ if quiescence_unlocked:
     quiescence_obj = staircase.QuiescenceStaircase(
         current_s=state.get('quiescence_s'),
         consecutive_successes=state.get('quiescence_consecutive_successes'),
-        consecutive_failures=state.get('quiescence_consecutive_failures'))
+        consecutive_failures=state.get('quiescence_consecutive_failures'),
+        ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
 
 # The side of the session's FIRST block (blocks then alternate, see staircase.Stage3Blocks). 'AOS'
 # click generation guarantees zero clicks on the other channel, so every trial's clicks belong to

@@ -1870,12 +1870,45 @@ print("Section 23 result: {0}".format("PASS" if section23_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 24: B10: Stages 2-4 cap the quiescence scale at 0.25s, Stage 5 at 0.55s")
+print("=" * 100)
+
+_q24 = staircase.QuiescenceStaircase(current_s=0.2, ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
+for _ in range(400):
+    _q24.record_outcome(True)
+cap234_ok = abs(_q24.current_s - 0.25) < 1e-9
+_q24b = staircase.QuiescenceStaircase(current_s=0.2)
+for _ in range(400):
+    _q24b.record_outcome(True)
+cap5_ok = abs(_q24b.current_s - 0.55) < 1e-9
+_q24c = staircase.QuiescenceStaircase(current_s=0.4, ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
+clamp_ok = abs(_q24c.current_s - 0.25) < 1e-9
+_src24 = {}
+for _stage_dir in ('stage2_threshold_staircase', 'stage3_tone_side_association', 'stage4_clicks_direction',
+                   'stage5_resume_staircases'):
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', _stage_dir, _stage_dir + '.py'),
+              encoding='utf-8') as _f:
+        _src24[_stage_dir] = 'STAGE234_QUIESCENCE_CEILING_S' in _f.read()
+wiring_ok = (_src24['stage2_threshold_staircase'] and _src24['stage3_tone_side_association']
+             and _src24['stage4_clicks_direction'] and not _src24['stage5_resume_staircases'])
+print("  Stage 2-4 staircase stops at 0.25s: {0}; default (Stage 5) stops at 0.55s: {1}; a saved 0.40s "
+      "is clamped to 0.25s in Stages 2-4: {2}; Stages 2-4 pass the cap, Stage 5 doesn't: {3} {4}".format(
+          cap234_ok, cap5_ok, clamp_ok, wiring_ok, _src24))
+section24_pass = cap234_ok and cap5_ok and clamp_ok and wiring_ok
+
+print("Section 24 result: {0}".format("PASS" if section24_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
                  section19_pass and section20_pass and section21_pass and section22_pass and
-                 section23_pass)
+                 section23_pass and
+                 section24_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
