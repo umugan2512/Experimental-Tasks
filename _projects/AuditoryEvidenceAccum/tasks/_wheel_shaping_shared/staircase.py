@@ -218,6 +218,11 @@ STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION = 0.90   # doc: "current -> final (90% 
                                                     # own 1.0 ceiling (which stays unchanged; Stage 5
                                                     # just treats 0.90 as "done" for advancement).
 
+# The response threshold's fallback for Stages 3-5 when a subject's state has no
+# 'threshold_fraction' yet (normally Stage 2 has set it): one value for all three (spec B9), Stage
+# 2's own ceiling. Stage 5 used to fall back to 0.45 instead.
+THRESHOLD_FRACTION_DEFAULT = 1.0
+
 # Stages 3-5 play a FIXED cue (spec A6/B3, 2026-11-11): 0.35s, Ott et al. 2024's stimulus
 # duration. The former STAGE34_STIM_DURATION_* staircase (0.25 -> 2.0s) is gone: it added a
 # second change while direction was being learned, and with one-sided clicks it only added
