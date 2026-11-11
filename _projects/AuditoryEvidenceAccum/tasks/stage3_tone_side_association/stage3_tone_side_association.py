@@ -559,10 +559,11 @@ while True:
         just_switched_this_trial = blocks.just_switched()
 
         if quiescence_unlocked:
-            quiescence_duration_this_trial = float(np.clip(
-                np.random.exponential(quiescence_obj.current_s),
-                staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+            quiescence_scale_this_trial = quiescence_obj.current_s
+            quiescence_duration_this_trial = staircase.draw_quiescence_hold(
+                quiescence_scale_this_trial, np.random)
         else:
+            quiescence_scale_this_trial = None
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
 
         # additions.txt T1: fresh per-trial seed, not a globally reseeded generator.
@@ -602,6 +603,8 @@ while True:
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
+        if quiescence_scale_this_trial is not None:
+            runner.register('QUIESCENCE_SCALE_S', quiescence_scale_this_trial)
         runner.register('STIM_DURATION_S', stim_duration_this_trial)
         runner.register('ITI_S', iti_this_trial)
         runner.register('CLICK_LEVEL_ATTENUATED', _click_attenuation_remaining > 0)

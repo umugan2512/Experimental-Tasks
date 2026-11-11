@@ -450,9 +450,8 @@ while True:
                 p_right_target = 0.5
                 side = np.random.choice(['L', 'R'])
 
-        quiescence_duration_this_trial = float(
-            np.clip(np.random.exponential(cur_quiescence_s),
-                    staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+        quiescence_duration_this_trial = staircase.draw_quiescence_hold(cur_quiescence_s,
+                                                                        np.random)
 
         thresholds_this_trial = [-VAR_STEADY_THRESHOLD_DEG, VAR_STEADY_THRESHOLD_DEG,
                                  -cur_response_threshold_deg, cur_response_threshold_deg,
@@ -488,6 +487,7 @@ while True:
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', round(cur_response_threshold_deg, 3))
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
+        runner.register('QUIESCENCE_SCALE_S', cur_quiescence_s)
         runner.register('ITI_S', VAR_ITI_S)
 
         print("Trial {0} ({1}, staircase={2}): side={3}, n_L={4}, n_R={5}".format(

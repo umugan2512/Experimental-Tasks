@@ -1826,11 +1826,56 @@ print("Section 22 result: {0}".format("PASS" if section22_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 23: A1: quiescence hold = truncated exponential scaled by q (IBL at q = 0.55)")
+print("=" * 100)
+
+import scipy.stats as _st23
+_rng23 = np.random.RandomState(23)
+q_checks = []
+for _q in (0.1, 0.25, 0.55):
+    _h = np.array([staircase.draw_quiescence_hold(_q, _rng23) for _ in range(20000)])
+    _lo, _hi = staircase.QUIESCENCE_WINDOW_LO_FACTOR * _q, staircase.QUIESCENCE_WINDOW_HI_FACTOR * _q
+    _in = bool(_h.min() >= _lo - 1e-12 and _h.max() <= _hi + 1e-12)
+    _mean_ok = abs(_h.mean() / _q - 0.962) < 0.01
+    # no mass piled on a bound: the share within 0.5% of the window width of each bound is ~0.5%
+    _eps = 0.005 * (_hi - _lo)
+    _at_bounds = float(np.mean((_h < _lo + _eps) | (_h > _hi - _eps)))
+    _bounds_ok = _at_bounds < 0.02
+    q_checks.append(_in and _mean_ok and _bounds_ok)
+    print("  q={0:.2f}: window {1:.3f}-{2:.3f}s, observed {3:.3f}-{4:.3f}s, mean {5:.3f}s ({6:.3f}*q), "
+          "{7:.1%} within 0.5% of a bound: {8}".format(_q, _lo, _hi, _h.min(), _h.max(), _h.mean(),
+                                                       _h.mean() / _q, _at_bounds, q_checks[-1]))
+
+
+def _ibl_texp(rng):   # iblrig base_choice_world.py: 0.2 + truncated_exponential(0.35, 0.2, 0.5)
+    while True:
+        x = rng.exponential(0.35)
+        if 0.2 <= x <= 0.5:
+            return 0.2 + x
+
+
+_ibl = np.array([_ibl_texp(_rng23) for _ in range(20000)])
+_ours = np.array([staircase.draw_quiescence_hold(0.55, _rng23) for _ in range(20000)])
+_ks = _st23.ks_2samp(_ibl, _ours)
+ibl_ok = _ks.pvalue > 0.01
+print("  q=0.55 vs iblrig's own sampler: KS D={0:.4f}, p={1:.3f} (means {2:.3f} vs {3:.3f}s): {4}".format(
+    _ks.statistic, _ks.pvalue, _ibl.mean(), _ours.mean(), ibl_ok))
+ceiling_ok = staircase.QUIESCENCE_CEILING_S == 0.55 and staircase.QUIESCENCE_FLOOR_S == 0.1
+print("  staircase floor/ceiling 0.10/0.55s: {0}".format(ceiling_ok))
+section23_pass = all(q_checks) and ibl_ok and ceiling_ok
+
+print("Section 23 result: {0}".format("PASS" if section23_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
-                 section19_pass and section20_pass and section21_pass and section22_pass)
+                 section19_pass and section20_pass and section21_pass and section22_pass and
+                 section23_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

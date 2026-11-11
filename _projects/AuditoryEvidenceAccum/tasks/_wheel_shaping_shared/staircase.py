@@ -163,9 +163,30 @@ QUIESCENCE_SUCCESSES_TO_STEP_UP = 20
 QUIESCENCE_STEP_DOWN_S = 0.025      # doc: "-25ms per 5 resets"
 QUIESCENCE_FAILURES_TO_STEP_DOWN = 5
 QUIESCENCE_FLOOR_S = 0.1            # Stage 1's own frozen value -- the natural starting point
-QUIESCENCE_CEILING_S = 0.25         # per explicit instruction: hold-to-initiate should land in the
-                                     # 100-250ms range, not the doc's original 0.1-0.5s -- lowered
-                                     # from an earlier 0.5s ceiling.
+QUIESCENCE_CEILING_S = 0.55         # IBL level (2026-11-11 spec A1), superseding the earlier
+                                     # explicit 100-250ms instruction. At q = 0.55 the hold is IBL's
+                                     # own: iblrig draws 0.2 + truncated_exponential(scale 0.35,
+                                     # 0.2..0.5), which by memorylessness is Exp(scale 0.35)
+                                     # truncated to 0.4-0.7s, mean 0.53s.
+# The hold window and the exponential's scale both scale with q, so q = 0.55 reproduces IBL exactly
+# (0.4/0.55, 0.7/0.55, 0.35/0.55) and q = 0.1 gives ~0.073-0.127s. Mean hold ~0.96*q.
+QUIESCENCE_WINDOW_LO_FACTOR = 0.727
+QUIESCENCE_WINDOW_HI_FACTOR = 1.273
+QUIESCENCE_SCALE_FACTOR = 0.636
+
+
+def draw_quiescence_hold(q, rng):
+    """ One trial's quiescence hold (s) for staircase scale q: an exponential with scale
+    QUIESCENCE_SCALE_FACTOR*q, truncated to [LO_FACTOR*q, HI_FACTOR*q] by inverse-CDF sampling
+    (one draw, no rejection loop). Truncating an exponential rather than drawing uniformly keeps
+    the go signal's hazard roughly flat inside the window, so it can't be timed. rng: anything with
+    random_sample() (np.random or a RandomState). Replaces the old
+    clip(exponential(q), 0.1, 0.25), which piled ~70% of trials exactly on the two bounds. """
+    lo = QUIESCENCE_WINDOW_LO_FACTOR * q
+    hi = QUIESCENCE_WINDOW_HI_FACTOR * q
+    scale = QUIESCENCE_SCALE_FACTOR * q
+    u = float(rng.random_sample())
+    return lo - scale * math.log(1.0 - u * (1.0 - math.exp(-(hi - lo) / scale)))
 
 STAGE3_ACCURACY_GATE = 0.70         # doc doesn't specify this new stage's own numeric criterion
                                      # yet -- reusing Stage 4's values as a flagged placeholder
@@ -297,11 +318,10 @@ class QuiescenceStaircase(object):
     StageState) -- staircasing then begins the NEXT session and continues uninterrupted through
     Stage 2/3/4/5: +25ms per 20 consecutive successful initiations (no reset during that trial's
     quiescence hold), -25ms per 5 consecutive resets, floor QUIESCENCE_FLOOR_S, ceiling
-    QUIESCENCE_CEILING_S (100-250ms). Same consecutive-counter/streak-reset shape as
+    QUIESCENCE_CEILING_S (0.55s, IBL). Same consecutive-counter/streak-reset shape as
     ThresholdStaircase above.
-    A trial's actual quiescence duration is drawn fresh each trial as
-    np.random.exponential(current_s) clipped to [QUIESCENCE_FLOOR_S, QUIESCENCE_CEILING_S] --
-    current_s here is the distribution's scale parameter, not a fixed per-trial duration.
+    A trial's actual quiescence duration is drawn fresh each trial by draw_quiescence_hold(current_s)
+    -- current_s here is the distribution's scale parameter, not a fixed per-trial duration.
 
     Constructed fresh from persisted StageState each session, same round-trip convention as
     ThresholdStaircase. """

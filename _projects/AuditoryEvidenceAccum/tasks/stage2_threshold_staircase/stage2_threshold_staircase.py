@@ -470,10 +470,11 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             applied_threshold_deg = cur_threshold_deg
 
         if quiescence_unlocked:
-            quiescence_duration_this_trial = float(np.clip(
-                np.random.exponential(quiescence_obj.current_s),
-                staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+            quiescence_scale_this_trial = quiescence_obj.current_s
+            quiescence_duration_this_trial = staircase.draw_quiescence_hold(
+                quiescence_scale_this_trial, np.random)
         else:
+            quiescence_scale_this_trial = None
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
         # J1 lives INSIDE the quiescence requirement (see stage1_wheel_shaping.py): the dot may only
         # appear after quiescence, and the whole trial is one Bpod machine (_shared/trial_render.py).
@@ -630,6 +631,8 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
         runner.register('SM_RUN_TIME', send_t)
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
+        if quiescence_scale_this_trial is not None:
+            runner.register('QUIESCENCE_SCALE_S', quiescence_scale_this_trial)
         runner.register('THRESHOLD_DEG', round(cur_threshold_deg, 3))
         runner.register('DOT_ONSET_JITTER_S', dot_onset_jitter_s)
         register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_return_t,
