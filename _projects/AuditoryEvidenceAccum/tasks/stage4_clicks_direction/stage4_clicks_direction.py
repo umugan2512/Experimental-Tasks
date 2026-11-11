@@ -61,6 +61,7 @@ convention as the rest of the codebase, for consistency; its CSV-flush-per-trial
 action here -- pybpodapi's own Session.write() already flushes on every row (confirmed by reading
 pybpod/base/pybpod-api/pybpodapi/session.py), so no submodule change was needed.
 """
+import itertools
 import os
 import random
 import subprocess
@@ -459,7 +460,9 @@ bench_plots = WheelShapingPlots(
     stage=4, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': VAR_RESPONSE_THRESHOLD_DEG},
     session_status={'click_attenuated': _click_attenuation_remaining > 0,
-                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
+                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG,
+                     'sessions_in_a_row': len(list(itertools.takewhile(
+                         bool, reversed(state.get('stage4_sessions_history')))))},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -548,6 +551,8 @@ while True:
                 _log_warmup_exit()
             side = debiaser.next_side(np.random)
             p_right_target = debiaser.last['p_right']
+        hu_e = ((debiaser.last['e_right'], debiaser.last['e_left']) if trial_type != 'repeat'
+                else (None, None))
 
         if quiescence_unlocked:
             quiescence_scale_this_trial = quiescence_obj.current_s
@@ -903,7 +908,7 @@ while True:
 
             bench_plots.add_trial(side, 0.0, VAR_RESPONSE_THRESHOLD_DEG, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target, iti_s=iti_this_trial,
+                                   p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], iti_s=iti_this_trial,
                                    stim_duration_s=stim_duration_this_trial)
             continue
 
@@ -1015,7 +1020,7 @@ while True:
         bench_plots.add_trial(side, VAR_RESPONSE_THRESHOLD_DEG if response is not None else 0.0,
                                VAR_RESPONSE_THRESHOLD_DEG, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
-                               trial_type=trial_type, p_right_target=p_right_target,
+                               trial_type=trial_type, p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1],
                                response_time_s=response_time_s, click_diff=click_diff,
                                iti_s=iti_this_trial, stim_duration_s=stim_duration_this_trial)
 

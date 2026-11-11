@@ -881,27 +881,36 @@ class PlotFeeder(object):
                 session_status['in_trial_threshold_deg'] = float(cue_abort)
             except (TypeError, ValueError):
                 pass
-        # Stage 3 only -- SESSION_SIDE is a session-level VAL (registered once, before the first
-        # TRIAL marker, so it only ever lands in session_vals, never first_trial_vals -- but
-        # checking both mirrors every other lookup here and costs nothing). Missing this was
-        # exactly why the dashboard's own embedded progress panel showed "today's side: ?" even
-        # though the real task script's own separate live-plot window (which builds this same
-        # dict directly, not through a CSV round-trip) always showed the real side correctly.
-        session_side = first_trial_vals.get('SESSION_SIDE') or session_vals.get('SESSION_SIDE')
-        if session_side is not None:
-            session_status['session_side'] = session_side
-        # Stage 3 since 2026-11-09: side blocks instead of one side per session.
-        block_min, block_max = session_vals.get('BLOCK_MIN'), session_vals.get('BLOCK_MAX')
-        if block_min is not None and block_max is not None:
+        # Session-level VALs (registered once, before the first TRIAL marker, so they land in
+        # session_vals) the progress panel's header and bars show: Stage 2's day-start rule and
+        # debias sigma, Stage 3's fade schedule.
+        def _num(key):
             try:
-                session_status['block_range'] = (int(float(block_min)), int(float(block_max)))
+                return float(session_vals.get(key))
             except (TypeError, ValueError):
-                pass
+                return None
+        if info['stage'] == 2:
+            day = _num('STAGE2_DAY_NUMBER')
+            session_status['stage2_day'] = int(day) if day else None
+            session_status['prev_day_peak_deg'] = _num('PREV_DAY_MAX_THRESHOLD_DEG')
+            session_status['direction_sigma'] = _num('DIRECTION_SIGMA')
+            flags = [(name, _num(key)) for name, key in (
+                ('halved', 'THRESHOLD_BIAS_HALVED'), ('raised', 'THRESHOLD_DAY_START_RAISED'),
+                ('stepped', 'THRESHOLD_DAY_START_STEPPED'))]
+            if any(v is not None for _n, v in flags):
+                session_status['day_start_rule'] = ', '.join(n for n, v in flags if v) or 'unchanged'
+        if info['stage'] == 3:
+            step = _num('FADE_STEP')
+            session_status['fade_step'] = int(step) if step is not None else None
+            session_status['p_corr'] = _num('P_CORR')
+            session_status['tail_mode'] = session_vals.get('CLICK_TAIL_MODE')
+            session_status['asym_step'] = session_vals.get('ASYM_STEP')
         # Stage 4 only -- CLICK_LEVEL_ATTENUATED is a per-trial VAL, logged as the string
         # 'True'/'False' (see session_csv_parser's own str-vs-float VAL convention).
-        click_attenuated = first_trial_vals.get('CLICK_LEVEL_ATTENUATED')
+        click_attenuated = (first_trial_vals.get('CLICK_LEVEL_ATTENUATED')
+                            or session_vals.get('CLICK_LEVEL_ATTENUATED'))   # trial 1's pre-RUN VALs
         if click_attenuated is not None:
-            session_status['click_attenuated'] = (click_attenuated == 'True')
+            session_status['click_attenuated'] = str(click_attenuated) == 'True'
         # Stage 5 only -- STAIRCASE_ACTIVE is per-trial, STAIRCASE_ACTIVE_THIS_SESSION is the
         # session-level fallback (see stage5_resume_staircases.py's own two registrations).
         staircase_active = (first_trial_vals.get('STAIRCASE_ACTIVE')
@@ -969,10 +978,13 @@ class PlotFeeder(object):
             if state is not None and state[0] is not None:
                 kwargs['reward_time_abs'] = anchor + state[0]
 
+        if info['stage'] in (1, 2):
+            kwargs['day_water_ul'] = _val_float(trial, 'DAY_WATER_CONSUMED_UL', self.session_vals)
         if info['stage'] == 1:
             kwargs['gain_mult'] = _val_float(trial, 'GAIN_MULT', self.session_vals)
         elif info['stage'] == 2:
             kwargs['direction_ratio'] = _val_float(trial, 'DIRECTION_RATIO', self.session_vals)
+            kwargs['quiescence_s'] = _val_float(trial, 'QUIESCENCE_SCALE_S')
             iti_state = trial['states'].get('ITI')
             if iti_state is not None and iti_state[2] is not None:
                 kwargs['iti_s'] = iti_state[2]
@@ -982,6 +994,9 @@ class PlotFeeder(object):
             in_trial_threshold = _val_float(trial, 'CUE_ABORT_THRESHOLD_DEG', self.session_vals)
             if in_trial_threshold is not None:
                 kwargs['in_trial_threshold_deg'] = in_trial_threshold
+            kwargs['quiescence_s'] = _val_float(trial, 'QUIESCENCE_SCALE_S')
+            kwargs['e_right'] = _val_float(trial, 'E_RIGHT')   # Hu debiaser, fresh draws only
+            kwargs['e_left'] = _val_float(trial, 'E_LEFT')
 
             if trial_type in ('repeat', 'correction'):   # the side was fixed, not drawn
                 p_right_target = 1.0 if side == 'R' else 0.0
@@ -1001,8 +1016,9 @@ class PlotFeeder(object):
                 state = trial['states'].get(outcome_state_name)
                 if state is not None and state[0] is not None:
                     kwargs['response_time_s'] = state[0]
-                n_l = _val_float(trial, 'N_CLICKS_L', self.session_vals)
-                n_r = _val_float(trial, 'N_CLICKS_R', self.session_vals)
+                cue = _val_float(trial, 'N_CLICKS_CUE_L') is not None   # Stage 3's click tail
+                n_l = _val_float(trial, 'N_CLICKS_CUE_L' if cue else 'N_CLICKS_L', self.session_vals)
+                n_r = _val_float(trial, 'N_CLICKS_CUE_R' if cue else 'N_CLICKS_R', self.session_vals)
                 if n_l is not None and n_r is not None:
                     kwargs['click_diff'] = n_r - n_l
                 self._replay_prev_outcome = 'correct' if outcome_raw == 'rewarded' else 'incorrect'

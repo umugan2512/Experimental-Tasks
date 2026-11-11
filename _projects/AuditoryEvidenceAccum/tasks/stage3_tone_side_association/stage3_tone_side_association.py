@@ -592,6 +592,8 @@ while True:
         # The debiaser's target for a fresh draw; a correction or repeat trial's side is fixed.
         p_right_target = (debiaser.last['p_right'] if trial_type in ('warmup', 'main')
                           else (1.0 if side == 'R' else 0.0))
+        hu_e = ((debiaser.last['e_right'], debiaser.last['e_left']) if trial_type in ('warmup', 'main')
+                else (None, None))
 
         if quiescence_unlocked:
             quiescence_scale_this_trial = quiescence_obj.current_s
@@ -636,6 +638,11 @@ while True:
             '{0:.4f}'.format(t) for t in trial_clicks['right_times']))
         runner.register('N_CLICKS_L', trial_clicks['n_left'])
         runner.register('N_CLICKS_R', trial_clicks['n_right'])
+        # Clicks inside the 0.35s cue window (the tail adds more after it)
+        n_cue_l = int(sum(1 for t in trial_clicks['left_times'] if t < VAR_STIM_DURATION_S))
+        n_cue_r = int(sum(1 for t in trial_clicks['right_times'] if t < VAR_STIM_DURATION_S))
+        runner.register('N_CLICKS_CUE_L', n_cue_l)
+        runner.register('N_CLICKS_CUE_R', n_cue_r)
         runner.register('STIM_SEED', stim_seed)
         if stim_resamples:
             runner.register('STIM_RESAMPLES', stim_resamples)
@@ -959,7 +966,7 @@ while True:
 
             bench_plots.add_trial(side, 0.0, VAR_RESPONSE_THRESHOLD_DEG, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target, iti_s=iti_this_trial,
+                                   p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], iti_s=iti_this_trial,
                                    stim_duration_s=stim_duration_this_trial)
             continue
 
@@ -1076,12 +1083,12 @@ while True:
         # the panel) for a NoResponse trial, matching add_trial()'s own gating.
         response_time_s = (visited[outcome_state][-1][0]
                             if outcome_state in ('Reward', 'ErrorConsumption') else None)
-        click_diff = trial_clicks['realized_delta'] if response_time_s is not None else None
+        click_diff = (n_cue_r - n_cue_l) if response_time_s is not None else None   # cue window
 
         bench_plots.add_trial(side, VAR_RESPONSE_THRESHOLD_DEG if response is not None else 0.0,
                                VAR_RESPONSE_THRESHOLD_DEG, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
-                               trial_type=trial_type, p_right_target=p_right_target,
+                               trial_type=trial_type, p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1],
                                response_time_s=response_time_s, click_diff=click_diff,
                                iti_s=iti_this_trial, stim_duration_s=stim_duration_this_trial)
 

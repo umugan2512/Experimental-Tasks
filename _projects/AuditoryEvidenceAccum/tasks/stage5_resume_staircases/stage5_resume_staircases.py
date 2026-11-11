@@ -476,6 +476,8 @@ while True:
                 _log_warmup_exit()
             side = debiaser.next_side(np.random)
             p_right_target = debiaser.last['p_right']
+        hu_e = ((debiaser.last['e_right'], debiaser.last['e_left']) if trial_type != 'repeat'
+                else (None, None))
 
         quiescence_duration_this_trial = staircase.draw_quiescence_hold(cur_quiescence_s,
                                                                         np.random)
@@ -835,7 +837,7 @@ while True:
 
             bench_plots.add_trial(side, 0.0, cur_response_threshold_deg, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target, quiescence_s=cur_quiescence_s)
+                                   p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], quiescence_s=cur_quiescence_s)
             continue
 
         consecutive_aborts = 0
@@ -944,7 +946,7 @@ while True:
         bench_plots.add_trial(side, cur_response_threshold_deg if response is not None else 0.0,
                                cur_response_threshold_deg, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
-                               trial_type=trial_type, p_right_target=p_right_target,
+                               trial_type=trial_type, p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1],
                                response_time_s=response_time_s, click_diff=click_diff,
                                in_trial_threshold_deg=VAR_CUE_ABORT_THRESHOLD_DEG,
                                quiescence_s=cur_quiescence_s)

@@ -535,7 +535,8 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         bench_plots.add_trial(side or 'R', magnitude_deg, cur_threshold_deg,
                                'Abort' if early else outcome,
                                gain_mult=cur_gain_mult, lick_times_abs=lick_times_abs,
-                               reward_time_abs=reward_time_abs)
+                               reward_time_abs=reward_time_abs,
+                               day_water_ul=water_earlier_today_ul + water.consumed_ul)
 
         # Deliberate session cap, per explicit instruction: stop at VAR_TRIAL_CAP ATTEMPTED
         # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold)

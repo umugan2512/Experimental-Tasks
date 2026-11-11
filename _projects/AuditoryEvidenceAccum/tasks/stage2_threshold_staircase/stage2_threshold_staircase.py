@@ -428,6 +428,11 @@ bench_plots = WheelShapingPlots(
     stage=2, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG,
                           'iti_s': cur_iti_s},
+    session_status={'stage2_day': stage2_day_number, 'prev_day_peak_deg': prev_day_max_threshold_deg,
+                    'direction_sigma': state.get('direction_sigma'),
+                    'day_start_rule': ', '.join(name for name, on in (
+                        ('halved', threshold_bias_halved), ('raised', threshold_day_start_raised),
+                        ('stepped', threshold_day_start_stepped)) if on) or 'unchanged'},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -706,7 +711,9 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         bench_plots.add_trial(side if side is not None else 'R', magnitude_deg, cur_threshold_deg,
                                'Abort' if early else outcome, iti_s=cur_iti_s,
                                direction_ratio=direction_tracker.right_fraction(),
-                               lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs)
+                               lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
+                               quiescence_s=quiescence_scale_this_trial,
+                               day_water_ul=water_earlier_today_ul + water.consumed_ul)
 
         # Deliberate session cap, per explicit instruction: stop at VAR_TRIAL_CAP ATTEMPTED
         # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold)
