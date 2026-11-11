@@ -385,7 +385,8 @@ def stage3_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200
             and trial_count > trial_count_gate)
 
 
-def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200):
+def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200,
+                     click_criterion_met=False):
     """ training_protocol.md Stage 4 (formerly "Stage 3" before a new Stage 3 -- tone-side
     association -- was inserted) advancement: >70% correct at gamma=+-1.0 (AOS), abort rate
     <20%, >200 trials/session. Unlike Stage 2's gate (stage2_simple_gates_met -- deliberately
@@ -395,9 +396,11 @@ def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200
     list pattern as sessions_trial_count_history elsewhere), this only checks one session's own
     gates. accuracy_aos/abort_rate must already exclude warmup/repeat trials (see
     stage4_clicks_direction.py's own trial classification) -- this function trusts its inputs,
-    it doesn't re-derive them from raw trial data. """
+    it doesn't re-derive them from raw trial data.
+    Since 2026-11-11 (spec A7) the session must also meet the click-weight criterion
+    (choice_regression.py): accuracy alone can't show the animal is using the clicks. """
     return (accuracy_aos > STAGE4_ACCURACY_GATE and abort_rate < STAGE4_ABORT_RATE_GATE
-            and trial_count > trial_count_gate)
+            and trial_count > trial_count_gate and bool(click_criterion_met))
 
 
 def stage5_gates_met(response_threshold_fraction, quiescence_s, accuracy_aos, abort_rate,

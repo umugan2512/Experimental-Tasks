@@ -91,7 +91,7 @@ _MERGE_GAP = 3600.0   # seconds -- restarts within this long of a non-'completed
 
 def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_ratio_end,
                                accuracy_aos, abort_rate, response_threshold_end_deg,
-                               threshold_final_deg, quiescence_end_s):
+                               threshold_final_deg, quiescence_end_s, click_criterion_met=False):
     """ Dispatches to whichever staircase.py gate-check function matches this protocol -- each of
     _SIMPLE_GATES_PROTOCOLS uses a genuinely different function/signature (Stage 2's is
     deliberately partial, deferring to a human for its real statistical criterion; Stage 3/4/5's
@@ -107,7 +107,8 @@ def _compute_simple_gates_met(protocol_name, trial_count, iti_end_s, direction_r
     if protocol_name == 'stage3_tone_side_association':
         return staircase.stage3_gates_met(accuracy_aos or 0.0, abort_rate or 0.0, trial_count)
     if protocol_name == 'stage4_clicks_direction':
-        return staircase.stage4_gates_met(accuracy_aos or 0.0, abort_rate or 0.0, trial_count)
+        return staircase.stage4_gates_met(accuracy_aos or 0.0, abort_rate or 0.0, trial_count,
+                                          click_criterion_met=click_criterion_met)
     if protocol_name == 'stage5_resume_staircases':
         if response_threshold_end_deg is None or quiescence_end_s is None:
             return None
@@ -271,9 +272,11 @@ def summarize_session(path, parsed=None):
                 iti_end_s = trial['states']['ITI'][2]
                 break
 
+    click_criterion_met = session_csv_parser.find_val_str_backward(
+        trials, session_vals, 'CLICK_CRITERION_MET') == 'True'
     simple_gates_met = _compute_simple_gates_met(
         protocol_name, len(trials), iti_end_s, direction_ratio_end, accuracy_aos, abort_rate,
-        response_threshold_end_deg, threshold_final_deg, quiescence_end_s)
+        response_threshold_end_deg, threshold_final_deg, quiescence_end_s, click_criterion_met)
 
     started_dt = session_csv_parser.parse_datetime(session_started)
     ended_dt = session_csv_parser.session_end_datetime(info, started_dt, session_duration_s)

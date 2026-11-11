@@ -35,7 +35,8 @@ re-present the same side with p=0.80" -- that rule paid a lose-shift animal 62% 
 An abort still re-offers the same side (TRIAL_TYPE='repeat'). A session ends at the first
 of: the 90-minute cap, 3 continuous minutes with no trial initiated, 20 consecutive aborts, or
 sub-chance accuracy across 3 consecutive 20-trial blocks (SS3.2) -- SESSION_END_REASON records
-which. Advance after three consecutive sessions meeting staircase.stage4_gates_met() (>70% correct
+which. Advance after three consecutive sessions meeting staircase.stage4_gates_met() (the
+click-weight criterion of choice_regression.py since 2026-11-11, plus >70% correct
 at gamma=+-1.0, abort rate <20%, >200 main trials) -- unlike Stage 2's gate, this covers the WHOLE
 doc-specified criterion, no deferred statistical test.
 
@@ -83,6 +84,7 @@ import session_state
 import session_struct_export
 import session_csv_parser
 import debiasing
+import choice_regression
 import click_train_v2 as click_train
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
@@ -486,6 +488,7 @@ fresh_trial_count = 0           # non-repeat trial draws so far this session
 
 # Hu debiaser, seeded with this subject's responded trials from earlier Stage 3-5 sessions.
 debiaser = debiasing.HuDebiaser(history=state.get('hu_debias_history'))
+choice_trials = []              # every responded trial, for the click-weight regression
 pending_repeat = False
 repeat_side = None
 
@@ -931,6 +934,8 @@ while True:
 
         if correct is not None:
             debiaser.record(side, correct)
+            choice_trials.append({'choice': response, 'stim': side, 'rewarded': bool(correct),
+                                  'fit': trial_type == 'main'})
 
         # accuracy_aos (session end) is conditional on a genuine L/R response -- a NoResponse
         # trial contributes to neither the numerator nor denominator here (it's already a
@@ -1017,8 +1022,20 @@ accuracy_aos = (sum(main_trial_correct) / float(len(main_trial_correct))
                 if main_trial_correct else 0.0)
 abort_rate = (total_aborts / float(total_attempts)) if total_attempts else 0.0
 
+# Is the choice driven by the clicks rather than by trial history? (spec A7)
+click_fit = choice_regression.fit_choice_regression(choice_trials)
+click_criterion_met = bool(click_fit and click_fit['criterion_met'])
+if click_fit:
+    runner.register('CLICK_WEIGHT', round(click_fit['b_click'], 4))
+    runner.register('CLICK_WEIGHT_Z', round(click_fit['z_click'], 3))
+    runner.register('PREV_CHOICE_WEIGHT', round(click_fit['b_prev'], 4))
+    runner.register('WIN_STAY_WEIGHT', round(click_fit['b_win'], 4))
+    runner.register('CLICK_WEIGHT_N', click_fit['n'])
+runner.register('CLICK_CRITERION_MET', click_criterion_met)
+
 this_session_gates_met = staircase.stage4_gates_met(
-    accuracy_aos, abort_rate, session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE)
+    accuracy_aos, abort_rate, session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE,
+    click_criterion_met=click_criterion_met)
 history = state.get('stage4_sessions_history')
 history.append(this_session_gates_met)
 state.set('stage4_sessions_history', history[-3:])
@@ -1038,6 +1055,13 @@ state.save()
 
 print("Session: {0} main trials, accuracy(AOS)={1:.1%}, abort_rate={2:.1%}, gates_met={3}".format(
     session_trial_count, accuracy_aos, abort_rate, this_session_gates_met), flush=True)
+if click_fit:
+    print("Click weight {0:.2f} (z {1:.1f}), previous-choice weight {2:.2f}, win-stay weight {3:.2f} "
+          "over {4} trials -- click criterion {5}".format(
+              click_fit['b_click'], click_fit['z_click'], click_fit['b_prev'], click_fit['b_win'],
+              click_fit['n'], 'MET' if click_criterion_met else 'not met'), flush=True)
+else:
+    print("Click weight: too few main trials to fit -- criterion not met", flush=True)
 print("ADVANCE-READY (3 consecutive qualifying sessions): {0}".format(
     "yes" if advance_ready else "no"), flush=True)
 if not advance_ready:

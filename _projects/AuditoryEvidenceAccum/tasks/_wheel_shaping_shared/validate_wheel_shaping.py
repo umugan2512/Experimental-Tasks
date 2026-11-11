@@ -616,7 +616,9 @@ print("=" * 100)
 print("Section 8: Stage 4/5 gates + Tag B staircase selection")
 print("=" * 100)
 
-s3_pass = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+s3_pass = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250,
+                                     click_criterion_met=True)
+s3_fail_click = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
 s3_fail_acc = staircase.stage4_gates_met(accuracy_aos=0.60, abort_rate=0.10, trial_count=250)
 s3_fail_abort = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.25, trial_count=250)
 s3_fail_trials = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=150)
@@ -624,7 +626,8 @@ print("  Stage 4 gates: all met (75% acc, 10% abort, 250 trials) -> True: {0}".f
 print("  Stage 4 gates: accuracy below 70% -> False: {0}".format(s3_fail_acc is False))
 print("  Stage 4 gates: abort rate above 20% -> False: {0}".format(s3_fail_abort is False))
 print("  Stage 4 gates: trial count below 200 -> False: {0}".format(s3_fail_trials is False))
-section8a_pass = s3_pass and s3_fail_acc is False and s3_fail_abort is False and s3_fail_trials is False
+print("  Stage 4 gates: click-weight criterion not met -> False: {0}".format(s3_fail_click is False))
+section8a_pass = s3_pass and s3_fail_click is False and s3_fail_acc is False and s3_fail_abort is False and s3_fail_trials is False
 
 s4_pass = staircase.stage5_gates_met(
     response_threshold_fraction=0.95, quiescence_s=staircase.QUIESCENCE_CEILING_S,
@@ -2168,6 +2171,69 @@ print("Section 33 result: {0}".format("PASS" if section33_pass else "FAIL -- see
 
 print()
 print("=" * 100)
+print("Section 34: Click-weight regression (Stages 3/4): listening agents pass, history agents don't")
+print("=" * 100)
+
+import choice_regression
+_rng34 = np.random.RandomState(34)
+
+
+def _reg_session(agent, n=150):
+    d34 = debiasing.HuDebiaser()
+    prev, trials34 = None, []
+    for _ in range(n):
+        side = d34.next_side(_rng34)
+        choice = agent(side, prev)
+        ok = choice == side
+        d34.record(side, ok)
+        prev = (choice, ok)
+        trials34.append({'choice': choice, 'stim': side, 'rewarded': ok, 'fit': True})
+    return choice_regression.fit_choice_regression(trials34)
+
+
+def _listener(acc):
+    return lambda side, prev: side if _rng34.random_sample() < acc else ('L' if side == 'R' else 'R')
+
+
+def _wsls34(side, prev):
+    if prev is None:
+        return 'R'
+    return prev[0] if prev[1] else ('L' if prev[0] == 'R' else 'R')
+
+
+reg_rates = {}
+for _name, _agent in (('perfect', _listener(1.0)), ('85% listener', _listener(0.85)),
+                      ('win-stay/lose-shift', _wsls34), ('always right', lambda s, p: 'R'),
+                      ('random', lambda s, p: 'R' if _rng34.random_sample() < 0.5 else 'L')):
+    _fits = [_reg_session(_agent) for _ in range(20)]
+    reg_rates[_name] = sum(f['criterion_met'] for f in _fits) / 20.0
+    print("  {0}: criterion met in {1:.0%} of 20 simulated 150-trial sessions (mean z {2:.1f}, "
+          "b_click {3:.2f})".format(_name, reg_rates[_name], np.mean([f['z_click'] for f in _fits]),
+                                    np.mean([f['b_click'] for f in _fits])))
+reg_ok = (reg_rates['perfect'] == 1.0 and reg_rates['85% listener'] == 1.0
+          and reg_rates['win-stay/lose-shift'] == 0.0 and reg_rates['always right'] == 0.0
+          and reg_rates['random'] <= 0.05)
+_few = choice_regression.fit_choice_regression([{'choice': 'R', 'stim': 'R', 'rewarded': True, 'fit': True}] * 5)
+_hist = choice_regression.build_design([
+    {'choice': 'L', 'stim': 'L', 'rewarded': True, 'fit': False},      # warm-up: history only
+    {'choice': None, 'stim': 'R', 'rewarded': False, 'fit': True},     # abort: skipped entirely
+    {'choice': 'R', 'stim': 'L', 'rewarded': False, 'fit': True}])
+design_ok = _few is None and _hist[0].tolist() == [[1.0, -1.0, -1.0, -1.0]] and _hist[1].tolist() == [1.0]
+print("  too few trials -> no fit; a non-fit trial still sets the history terms, an abort is skipped: "
+      "{0}".format(design_ok))
+s4_src = stage_source(4)
+wired_ok = all("runner.register('%s'" % k in s4_src for k in
+               ('CLICK_WEIGHT', 'CLICK_WEIGHT_Z', 'PREV_CHOICE_WEIGHT', 'WIN_STAY_WEIGHT', 'CLICK_CRITERION_MET'))
+print("  Stage 4 registers the weights and passes the criterion to its gate: {0}".format(
+    wired_ok and 'click_criterion_met=click_criterion_met' in s4_src))
+section34_pass = reg_ok and design_ok and wired_ok
+
+print("Section 34 result: {0}".format("PASS" if section34_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
 overall_pass = (section1_pass and section2_pass and section3_pass and section4_pass and
                  section5_pass and section6_pass and section7_pass and section8_pass and
                  section9_pass and section10_pass and section11_pass and section12_pass and
@@ -2184,6 +2250,7 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section30_pass and
                  section31_pass and
                  section32_pass and
-                 section33_pass)
+                 section33_pass and
+                 section34_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)
