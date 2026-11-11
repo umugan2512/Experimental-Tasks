@@ -359,7 +359,6 @@ my_bpod.register_value('PREV_DAY_MAX_THRESHOLD_DEG',
                        prev_day_max_threshold_deg if prev_day_max_threshold_deg is not None else '')
 my_bpod.register_value('THRESHOLD_DAY_START_STEPPED', int(threshold_day_start_stepped))
 my_bpod.register_value('DIRECTION_SIGMA', state.get('direction_sigma'))
-my_bpod.register_value('SPOUT_POSITION_MM', cur_spout_position_mm)   # the schedule's value
 if prev_day:
     if threshold_bias_halved or threshold_day_start_raised:
         _start_note = '{0:.1f} -> {1:.1f}deg ({2}, day-start min {3:.1f}deg)'.format(

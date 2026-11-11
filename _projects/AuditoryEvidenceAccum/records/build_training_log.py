@@ -97,7 +97,6 @@ SESSION_VAL_FIELDS = [
     ('stage2_day', 'STAGE2_DAY_NUMBER', 'num', 'first'),
     ('prev_day_peak_deg', 'PREV_DAY_MAX_THRESHOLD_DEG', 'num', 'first'),
     ('direction_sigma', 'DIRECTION_SIGMA', 'num', 'last'),
-    ('spout_position_mm', 'SPOUT_POSITION_MM', 'num', 'last'),
     ('quiescence_scale_start_s', 'QUIESCENCE_SCALE_S', 'num', 'first'),
     ('quiescence_scale_end_s', 'QUIESCENCE_SCALE_S', 'num', 'last'),
     ('cue_duration_s', 'STIM_DURATION_S', 'num', 'last'),
@@ -125,7 +124,7 @@ STATE_KEY_COLUMNS = {
     'threshold_fraction': 'threshold_end_deg',
     'gain_mult': 'gain_mult_end',
     'iti_s': 'iti_end_s',
-    'spout_position_mm': 'spout_position_mm',
+    'spout_position_mm': None,   # spout schedule: not logged, per explicit instruction
     'direction_sigma': 'direction_sigma',
     'quiescence_s': 'quiescence_scale_end_s',
     'quiescence_unlocked': 'quiescence_scale_end_s',   # blank scale = not unlocked
@@ -744,7 +743,6 @@ COLUMNS = [
     ('prev_day_peak_deg', 'Prev day peak (deg)'),
     ('direction_sigma', 'Direction sigma (Stage 2)'),
     ('withheld_pct', 'Withheld % (Stage 2)'),
-    ('spout_position_mm', 'Spout schedule (mm)'),
     ('quiescence_scale_start_s', 'Quiescence scale start (s)'),
     ('quiescence_scale_end_s', 'Quiescence scale end (s)'),
     ('simple_gates_met', 'Simple gates met'),   # covers Stage 2 (partial) and Stage 3/4/5 (whole
