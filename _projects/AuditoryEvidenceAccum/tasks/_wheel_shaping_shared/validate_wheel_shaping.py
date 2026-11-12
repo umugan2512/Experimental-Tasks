@@ -2476,7 +2476,50 @@ map_ok = (lick_input.lick_input('TRAINING01') == 'BNC2' and lick_input.lick_inpu
 print("  lick_input: TRAINING01 -> BNC2, other boxes -> Port1, same event names as the parser: "
       "{0}".format(map_ok))
 
-section38_pass = parse_ok and map_ok
+
+
+class _FakeBpod38:
+    class hardware:
+        class channels:
+            event_names = None
+
+
+def _named38(computer, names):
+    b = _FakeBpod38()
+    b.hardware = type('H', (), {})()
+    b.hardware.channels = type('C', (), {})()
+    b.hardware.channels.event_names = list(names)
+    first = lick_input.name_lick_events(b, lick_input.lick_input(computer))
+    again = lick_input.name_lick_events(b, lick_input.lick_input(computer))
+    return first, again, b.hardware.channels.event_names
+
+
+_names38 = ['Port1In', 'Port1Out', 'BNC1High', 'BNC1Low', 'BNC2High', 'BNC2Low', 'Tup']
+_r01 = _named38('TRAINING01', _names38)
+_r03 = _named38('TRAINING03', _names38)
+_regs38 = []
+_reg_bpod38 = type('R', (), {'register_value': lambda self, k, v: _regs38.append((k, v))})()
+_old_cn38 = os.environ.get('COMPUTERNAME')
+os.environ['COMPUTERNAME'] = 'TRAINING01'
+try:
+    lick_input.register_lick_input(_reg_bpod38)
+finally:
+    if _old_cn38 is None:
+        os.environ.pop('COMPUTERNAME', None)
+    else:
+        os.environ['COMPUTERNAME'] = _old_cn38
+name_ok = (_r01[0] is True and _r01[1] is False
+           and _r01[2] == ['Port1In_unwired', 'Port1Out_unwired', 'BNC1High', 'BNC1Low',
+                           'Port1In', 'Port1Out', 'Tup']
+           and _r03 == (False, False, _names38)
+           and lick_input.lick_events() == ('Port1In', 'Port1Out')
+           and _regs38 == [('LICK_INPUT', 'Port1'), ('LICK_INPUT_PHYSICAL', 'BNC2')]
+           and session_csv_parser.lick_event_names('Port1') == lick_input.lick_events())
+print("  Same lick names on every box: training01's BNC2 events relabeled Port1In/Port1Out "
+      "(physical Port1 -> *_unwired, idempotent), Port1 boxes untouched, LICK_INPUT=Port1 + "
+      "LICK_INPUT_PHYSICAL=BNC2: {0} ({1} / {2} / {3})".format(name_ok, _r01, _r03, _regs38))
+
+section38_pass = parse_ok and map_ok and name_ok
 print("Section 38 result: {0}".format("PASS" if section38_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================

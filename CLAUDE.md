@@ -351,6 +351,16 @@ Durable facts/gotchas about this module layer and Bpod hardware in general:
     `events['Port1In']` directly. Otherwise training01's licks silently vanish from consumption
     windows, the water cap, the training log and the dashboard.
   - The `Tests/` bench scripts still hardcode `Port1In`.
+  - **Since 2026-11-12, licks are logged as `Port1In`/`Port1Out` on every box**, so one script
+    reads every box's new sessions the same way. `TrialRunner` calls
+    `lick_input.name_lick_events(bpod)`, which relabels the physical lick events in
+    `bpod.hardware.channels.event_names` (positional, like `PC_EVENT_CODES`). On training01 that
+    turns `BNC2High`/`BNC2Low` into `Port1In`/`Port1Out`, and the unwired physical Port1 into
+    `Port1In_unwired`/`Port1Out_unwired`. `lick_events()` with no argument returns the logged names.
+    Sessions register `LICK_INPUT=Port1` (the names in the CSV) and `LICK_INPUT_PHYSICAL` (the real
+    wiring, `BNC2` on training01). Older training01 sessions (`LICK_INPUT=BNC2`, `BNC2High` rows)
+    were left as they are; the parser still reads them through `LICK_INPUT`. `rig_check.py` opens
+    the Bpod without `TrialRunner`, so it still shows physical names.
 - **Board console output** (`print()` inside a running protocol) only appears if the relevant
   Board's **Console** window has been explicitly opened (and stays open) in the GUI —
   `pybpodgui_api/models/board/board_com.py`'s `log2board()` silently drops output otherwise.

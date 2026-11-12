@@ -75,7 +75,7 @@ from trial_render import run_trial_render_loop, register_trial_timing
 import host_clock
 import rotary_setup
 import lick_input
-# this box's lick sensor events (Port1In/Port1Out, or BNC2High/BNC2Low on training01)
+# lick events: Port1In/Port1Out on every box (TrialRunner relabels training01's BNC2 input)
 LICK_IN, LICK_OUT = lick_input.lick_events()
 import dot_display
 from camera_recorder import CameraRecorder
@@ -266,7 +266,7 @@ neg_event, pos_event = event_names[0], event_names[1]
 
 my_bpod.register_value('THRESHOLD_DEG', round(cur_threshold_deg, 3))
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
-my_bpod.register_value('LICK_INPUT', lick_input.lick_input())
+lick_input.register_lick_input(my_bpod)   # LICK_INPUT=Port1 (logged names), LICK_INPUT_PHYSICAL
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.

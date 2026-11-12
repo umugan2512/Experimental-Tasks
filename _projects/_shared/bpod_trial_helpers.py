@@ -426,6 +426,7 @@ class TrialRunner(object):
         bpod.softcode_handler_function = self._on_softcode
         install_session_lock()
         _name_pc_events(bpod)
+        lick_input.name_lick_events(bpod)   # licks log as Port1In/Port1Out on every box
         self._hw_run_t = None            # host time the RUN byte was written (see _hook_run_write)
         self.run_write_ms = None
         self._hook_run_write()
@@ -724,7 +725,7 @@ class TrialRunner(object):
     def register_port_events(self, prefix, events_dict, anchor_t, port_in_key=None,
                               port_out_key=None):
         """ Extracts and registers BOTH edges of a digital input (by default this box's lick input,
-        lick_input.lick_events(): Port1In/Port1Out, or BNC2High/BNC2Low on training01) as
+        lick_input.lick_events(): Port1In/Port1Out on every box, see lick_input.name_lick_events()) as
         absolute-time VALs, comma-joined strings matching the existing CLICK_TIMES_L/CLICK_TIMES_R
         convention -- per explicit instruction, every lick-time extraction in this codebase should
         report both the contact start AND end, not just the start: it's useful data in its own

@@ -78,7 +78,7 @@ from trial_render import run_trial_render_loop, register_trial_timing
 import host_clock
 import rotary_setup
 import lick_input
-# this box's lick sensor events (Port1In/Port1Out, or BNC2High/BNC2Low on training01)
+# lick events: Port1In/Port1Out on every box (TrialRunner relabels training01's BNC2 input)
 LICK_IN, LICK_OUT = lick_input.lick_events()
 import dot_display
 from camera_recorder import CameraRecorder
@@ -346,7 +346,7 @@ neg_event, pos_event = rotary_setup.set_and_enable_thresholds(
 rotary.enable_evt_transmission()   # once per session, never toggled (MATLAB's sendThresholdEvents)
 
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
-my_bpod.register_value('LICK_INPUT', lick_input.lick_input())
+lick_input.register_lick_input(my_bpod)   # LICK_INPUT=Port1 (logged names), LICK_INPUT_PHYSICAL
 # How many earlier-session directions seeded the debiasing window (0 = a fresh window, so no
 # withholding before trial DIRECTION_RATIO_MIN_TRIALS + 1).
 my_bpod.register_value('DIRECTION_HISTORY_SEEDED', direction_tracker.seeded_trials)
