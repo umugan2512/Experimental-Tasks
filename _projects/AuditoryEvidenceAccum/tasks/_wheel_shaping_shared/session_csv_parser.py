@@ -146,7 +146,7 @@ def parse_session_csv(path):
 
 def _new_parse_state():
     return {'info': {}, 'session_vals': {}, 'trials': [], 'current': None, 'open': False,
-            'pending': []}
+            'pending': [], 'lick_events': DEFAULT_LICK_EVENTS}
 
 
 def _consume_row(state, row):
@@ -165,7 +165,8 @@ def _consume_row(state, row):
             current['bpod_start'] = _parse_float(row[2])
             current['bpod_end'] = _parse_float(row[3])
     elif row_type == 'TRIAL':
-        state['current'] = {'states': {}, 'events': {}, 'vals': {}}
+        state['current'] = {'states': {}, 'events': {}, 'vals': {},
+                            'lick_events': state['lick_events']}
         state['trials'].append(state['current'])
         state['open'] = True
         for key, value in state['pending']:
@@ -183,6 +184,10 @@ def _consume_row(state, row):
             current['events'].setdefault(row[5], []).append(t)
     elif row_type == 'VAL' and len(row) > 5:
         key, value = row[4], row[5]
+        if key == 'LICK_INPUT':
+            state['lick_events'] = lick_event_names(value)
+            if current is not None:
+                current['lick_events'] = state['lick_events']
         if key in PRE_TRIAL_KEYS and not state['open']:
             state['pending'].append((key, value))
         elif current is not None:
@@ -195,7 +200,35 @@ def _consume_row(state, row):
             state['session_vals'][key] = value
 
 
-# A Port1In that follows the previous Port1Out by less than this is the lick sensor breaking one
+# Which Bpod input the lick sensor is on: a session registers it as LICK_INPUT (e.g. 'BNC2' on
+# training01, see _projects/_shared/lick_input.py); a session without it is Port1. Each parsed trial
+# carries its session's ('<in event>', '<out event>') as trial['lick_events'] -- read licks through
+# lick_ins()/lick_outs(), never events['Port1In'] directly.
+DEFAULT_LICK_EVENTS = ('Port1In', 'Port1Out')
+
+
+def lick_event_names(channel):
+    """ ('Port1In', 'Port1Out') for 'Port1', ('BNC2High', 'BNC2Low') for 'BNC2' (Wire likewise).
+    Same mapping as _shared/lick_input.lick_events(); kept here so the parser imports nothing. """
+    channel = (channel or '').strip()
+    if channel.startswith('Port'):
+        return channel + 'In', channel + 'Out'
+    if channel.startswith(('BNC', 'Wire')):
+        return channel + 'High', channel + 'Low'
+    return DEFAULT_LICK_EVENTS
+
+
+def lick_ins(trial):
+    """ This trial's raw lick-in times (trial-relative), from its session's lick input. """
+    return trial['events'].get(trial.get('lick_events', DEFAULT_LICK_EVENTS)[0], [])
+
+
+def lick_outs(trial):
+    """ This trial's raw lick-out times (trial-relative), from its session's lick input. """
+    return trial['events'].get(trial.get('lick_events', DEFAULT_LICK_EVENTS)[1], [])
+
+
+# A lick-in that follows the previous lick-out by less than this is the lick sensor breaking one
 # tongue contact in two (QC of 20261027-102843: 17% of inter-lick intervals sat in a separate
 # 25-30 ms mode, Out->In gap median 15 ms, against a 137 ms lick mode). Analysis side only: the raw
 # EVENT and LICK_TIMES_* rows always keep every edge as recorded.
@@ -203,7 +236,7 @@ LICK_CHATTER_GAP_S = 0.040
 
 
 def merge_lick_chatter(lick_ins, lick_outs, min_gap_s=LICK_CHATTER_GAP_S):
-    """ Port1In times with every In that follows the preceding Port1Out by < min_gap_s dropped --
+    """ Lick-in times with every In that follows the preceding Out by < min_gap_s dropped --
     one count per tongue contact. Times may be on any clock, as long as ins and outs share it. """
     ins, outs = sorted(lick_ins or []), sorted(lick_outs or [])
     kept, j, last_out = [], 0, None
@@ -218,8 +251,8 @@ def merge_lick_chatter(lick_ins, lick_outs, min_gap_s=LICK_CHATTER_GAP_S):
 
 
 def trial_licks(trial):
-    """ This trial's Port1In times (trial-relative), sensor chatter merged. """
-    return merge_lick_chatter(trial['events'].get('Port1In', []), trial['events'].get('Port1Out', []))
+    """ This trial's lick-in times (trial-relative), sensor chatter merged. """
+    return merge_lick_chatter(lick_ins(trial), lick_outs(trial))
 
 
 def _add_val(trial, key, value):
@@ -301,9 +334,9 @@ def classify_trial(trial, config):
     protocols whose PROTOCOL_CONFIG sets 'incorrect_states'/'aborted_states' (Stage 1/2 never
     produce them, since those keys are simply absent from their config dicts). side in
     {'L', 'R', None}; reward_duration_s is that trial's own logged Reward-state duration if
-    rewarded, else None. consumed is True/False for a rewarded trial (whether a Port1In lick was
+    rewarded, else None. consumed is True/False for a rewarded trial (whether a lick-in was
     detected at/after that trial's own reward-delivery start time -- no dedicated
-    Consumption-window state exists in Stage 1/2, Port1In is a raw event regardless of which state
+    Consumption-window state exists in Stage 1/2, a lick is a raw event regardless of which state
     is active), None for a non-rewarded trial. """
     states = trial['states']
     events = trial['events']
@@ -351,7 +384,7 @@ def classify_trial(trial, config):
     consumed = None
     if rewarded_name:
         reward_start = states[rewarded_name][0]
-        lick_times = events.get('Port1In', [])
+        lick_times = lick_ins(trial)
         consumed = any(t >= reward_start for t in lick_times) if not _isnan(reward_start) else False
 
     return outcome, side, reward_duration, consumed
@@ -488,7 +521,7 @@ _CROSSING_STATES = ('Reward', 'RewardL', 'RewardR', 'NoRewardL', 'NoRewardR', 'E
 def derived_host_anchor(trial):
     """ For sessions recorded before SM_RUN_TIME existed: recovers the host anchor a task script
     used from rows it registered as `anchor + <Bpod-relative time>` -- THRESHOLD_CROSSING_TIME
-    (anchor + the crossing state's start) or LICK_TIMES_IN (anchor + each Port1In time). None if
+    (anchor + the crossing state's start) or LICK_TIMES_IN (anchor + each lick-in time). None if
     neither is present. """
     crossing = _parse_float(trial['vals'].get('THRESHOLD_CROSSING_TIME'))
     if crossing is not None:
@@ -497,7 +530,7 @@ def derived_host_anchor(trial):
             if state is not None and not _isnan(state[0]):
                 return crossing - state[0]
     licks_in = trial['vals'].get('LICK_TIMES_IN')
-    port_in = trial['events'].get('Port1In', [])
+    port_in = lick_ins(trial)
     if licks_in and port_in:
         first = _parse_float(licks_in.split(',')[0])
         if first is not None:
@@ -789,7 +822,7 @@ def session_water_consumed(info, session_vals, trials):
             if occ and not _isnan(occ[0]):
                 start = occ[0]
                 break
-        water.record_trial(trial['events'].get('Port1In', []), start)
+        water.record_trial(lick_ins(trial), start)
     return water.consumed_ul
 
 

@@ -74,6 +74,9 @@ from bpod_trial_helpers import TrialRunner, was_visited, triggering_event, PC_EV
 from trial_render import run_trial_render_loop, register_trial_timing
 import host_clock
 import rotary_setup
+import lick_input
+# lick events: Port1In/Port1Out on every box (TrialRunner relabels training01's BNC2 input)
+LICK_IN, LICK_OUT = lick_input.lick_events()
 import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
@@ -263,6 +266,7 @@ neg_event, pos_event = event_names[0], event_names[1]
 
 my_bpod.register_value('THRESHOLD_DEG', round(cur_threshold_deg, 3))
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+lick_input.register_lick_input(my_bpod)   # LICK_INPUT=Port1 (logged names), LICK_INPUT_PHYSICAL
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.
@@ -520,13 +524,13 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             trial, quiescence_hold_s, n_breaks, outcome,
             " ({0})".format(side) if side else "", cur_gain_mult), flush=True)
 
-        # Port1In/Port1Out licks are already natively logged as raw EVENT rows in the session CSV
+        # Licks (LICK_IN/LICK_OUT) are already natively logged as raw EVENT rows in the session CSV
         # (see CLAUDE.md) -- register_port_events() also explicitly registers both edges as their
         # own VALs (per explicit instruction: always report port in AND out times, not just in --
         # useful on its own, and makes per-contact duration directly auditable without hand-
         # parsing raw EVENT rows, relevant to a suspected sensor debounce/threshold issue).
         lick_times_abs, _lick_times_out = runner.register_port_events('LICK', choice_events, send_t)
-        water.record_trial(choice_events.get('Port1In', []), visited['Reward'][-1][0] if rewarded else None)
+        water.record_trial(choice_events.get(LICK_IN, []), visited['Reward'][-1][0] if rewarded else None)
         runner.register('SESSION_WATER_CONSUMED_UL', water.consumed_ul)
         runner.register('DAY_WATER_CONSUMED_UL', water_earlier_today_ul + water.consumed_ul)
         reward_time_abs = send_t + visited['Reward'][-1][0] if rewarded else None

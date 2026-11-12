@@ -337,6 +337,30 @@ Durable facts/gotchas about this module layer and Bpod hardware in general:
   around the call. If that `finally` does an unbounded `join()` on a background thread that also
   talks to hardware and is ever mid-stall, Kill will appear to hang indefinitely even though the
   kill command was received and processed. Give such a join a bounded `timeout=`.
+- **The lick input is per box, not always `Port1In`** (2026-11-04). training01's OPB815WZ IR
+  beam break doesn't register on the Bpod lick port, so an Arduino
+  (`Calibration/arduino_lick_relay/`) relays it into **BNC In 2**: `BNC2High` = lick in,
+  `BNC2Low` = lick out. `_shared/lick_input.py` maps `COMPUTERNAME` to the channel
+  (`LICK_INPUT_BY_COMPUTER`; default `Port1`).
+  - Stages 1–5 take `LICK_IN, LICK_OUT = lick_input.lick_events()` and register a session-level
+    `LICK_INPUT` value.
+  - `TrialRunner.register_port_events()` defaults to the same events.
+  - The parser files each trial's `('<in>', '<out>')` as `trial['lick_events']`, from the
+    session's `LICK_INPUT`, or Port1 when the session has none.
+  - Read licks through `session_csv_parser.lick_ins()`/`lick_outs()`/`trial_licks()`, never
+    `events['Port1In']` directly. Otherwise training01's licks silently vanish from consumption
+    windows, the water cap, the training log and the dashboard.
+  - The `Tests/` bench scripts still hardcode `Port1In`.
+  - **Since 2026-11-12, licks are logged as `Port1In`/`Port1Out` on every box**, so one script
+    reads every box's new sessions the same way. `TrialRunner` calls
+    `lick_input.name_lick_events(bpod)`, which relabels the physical lick events in
+    `bpod.hardware.channels.event_names` (positional, like `PC_EVENT_CODES`). On training01 that
+    turns `BNC2High`/`BNC2Low` into `Port1In`/`Port1Out`, and the unwired physical Port1 into
+    `Port1In_unwired`/`Port1Out_unwired`. `lick_events()` with no argument returns the logged names.
+    Sessions register `LICK_INPUT=Port1` (the names in the CSV) and `LICK_INPUT_PHYSICAL` (the real
+    wiring, `BNC2` on training01). Older training01 sessions (`LICK_INPUT=BNC2`, `BNC2High` rows)
+    were left as they are; the parser still reads them through `LICK_INPUT`. `rig_check.py` opens
+    the Bpod without `TrialRunner`, so it still shows physical names.
 - **Board console output** (`print()` inside a running protocol) only appears if the relevant
   Board's **Console** window has been explicitly opened (and stays open) in the GUI —
   `pybpodgui_api/models/board/board_com.py`'s `log2board()` silently drops output otherwise.

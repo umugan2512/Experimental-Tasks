@@ -250,7 +250,7 @@ def summarize_session(path, parsed=None):
                 if occ and not session_csv_parser._isnan(occ[0]):
                     reward_start = occ[0]
                     break
-        water.record_trial(trial['events'].get('Port1In', []), reward_start)
+        water.record_trial(session_csv_parser.lick_ins(trial), reward_start)
         trial_type = trial['vals'].get('TRIAL_TYPE')   # Stage 3/4/5's own custom VAL -- absent (None)
                                                           # for Stage 1/2 and full_protocol_lookback_test
         if outcome == 'rewarded':
