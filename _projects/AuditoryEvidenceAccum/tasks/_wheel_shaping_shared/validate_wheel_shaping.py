@@ -14,7 +14,7 @@ discipline as poisson_clicks_test/validate_trial_scheduler.py. Tests:
   7. QuiescenceStaircase (unlocked as early as Stage 2): step-up/step-down, floor/ceiling, same
      shape as Section 1
   8. stage4_gates_met()/stage5_gates_met()/select_stage5_staircase_to_tighten() (Tag B policy)
-  9. debiasing.next_side_after_error(): statistical repeat-rate check over many draws
+  9. debiasing.HuDebiaser: always-right and win-stay/lose-shift agents earn ~16% / ~50%
   10. session_csv_parser.STREAM_KEYS fix: repeated VAL rows (e.g. WHEEL_POS) are retained as a
       list, not collapsed to the last value -- the additions.txt T3 regression this guards against
   11. derive_intrial_threshold.py: sliding-window excursion percentile against a synthetic trace
@@ -112,8 +112,37 @@ for _ in range(5):
     sc_low.record_outcome(success=False)
 floor_ok = abs(sc_floor.current_fraction - 0.20) < 1e-9 and abs(sc_low.current_fraction - 0.10) < 1e-9
 print("  floor=0.20: 15 failures from 0.30 stop at 0.20; a value below the floor stays: {0}".format(floor_ok))
+# record_neutral() (Stage 2's NoMovement since 2026-11-05): blocks a step-up, never steps down,
+# and leaves a running failure streak alone
+sc_n1 = staircase.ThresholdStaircase(current_fraction=0.20)
+for _ in range(staircase.STAIRCASE_SUCCESSES_TO_STEP_UP - 1):
+    sc_n1.record_outcome(success=True)
+sc_n1.record_neutral()
+sc_n1.record_outcome(success=True)
+sc_n2 = staircase.ThresholdStaircase(current_fraction=0.30)
+for _ in range(staircase.STAIRCASE_FAILURES_TO_STEP_DOWN - 1):
+    sc_n2.record_outcome(success=False)
+sc_n2.record_neutral()
+sc_n2.record_outcome(success=False)
+sc_n3 = staircase.ThresholdStaircase(current_fraction=0.30, floor=0.20)
+for _ in range(10):
+    sc_n3.record_neutral()
+neutral_ok = (sc_n1.current_fraction == 0.20 and sc_n1.consecutive_successes == 1
+              and sc_n2.current_fraction == 0.20 and sc_n3.current_fraction == 0.30
+              and sc_n3.consecutive_failures == 0)
+print("  record_neutral: no step-up across it, failure streak survives it, x10 changes nothing: {0}".format(
+    neutral_ok))
+# steps are rounded, so the fraction (and the logged degrees) carry no float noise
+sc_r = staircase.ThresholdStaircase(current_fraction=0.20)
+for _ in range(staircase.STAIRCASE_SUCCESSES_TO_STEP_UP):
+    sc_r.record_outcome(success=True)
+for _ in range(staircase.STAIRCASE_FAILURES_TO_STEP_DOWN):
+    sc_r.record_outcome(success=False)
+rounded_ok = sc_r.current_fraction == 0.2 and repr(round(sc_r.current_fraction * 35, 3)) == '7.0'
+print("  0.20 -> 0.30 -> 0.20 lands on exactly 0.2 (7.0deg logged): {0} ({1!r})".format(
+    rounded_ok, sc_r.current_fraction))
 section1_pass = (floor_ok and below_step and stepped_up and reset_after_step and below_step_down and
-                  stepped_down and ceiling_check and reset_on_opposite)
+                  stepped_down and ceiling_check and reset_on_opposite and neutral_ok and rounded_ok)
 print("Section 1 result: {0}".format("PASS" if section1_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -172,7 +201,12 @@ print("  Stage 1 threshold after 8th session (expect ceiling 0.20, Stage 2's own
 print("  Stage 1 threshold never exceeds the 0.20 ceiling on further growth: {0}".format(
     threshold_stays_at_ceiling))
 
-section2_pass = (iti_before_ceiling and iti_at_ceiling and iti_stays_at_ceiling and
+# session-level steps are rounded: no 0.9999999999999999 / 2.3999999999999995 in the state file
+steps_rounded = (staircase.grow_iti(0.9) == 1.0 and staircase.decay_gain(2.5) == 2.4
+                 and staircase.grow_stage1_threshold(0.16) == 0.18)
+print("  grow_iti(0.9) == 1.0, decay_gain(2.5) == 2.4, grow_stage1_threshold(0.16) == 0.18 exactly: {0}".format(
+    steps_rounded))
+section2_pass = steps_rounded and (iti_before_ceiling and iti_at_ceiling and iti_stays_at_ceiling and
                   gain_before_floor and gain_at_floor and gain_stays_at_floor and
                   threshold_before_ceiling and threshold_at_ceiling and threshold_stays_at_ceiling)
 print("Section 2 result: {0}".format("PASS" if section2_pass else "FAIL -- see checks above"))
@@ -504,7 +538,33 @@ print("  stage labels: 'Stage N' for numbered protocols, passthrough otherwise: 
 
 section6d_pass = stage_order_correct and stage_labels_correct
 
-section6_pass = section6a_pass and section6b_pass and section6c_pass and section6d_pass
+# merge_session_structs(): every combined trial names its member session; members stay untouched
+import json as _json6
+import session_struct_export
+tmp_merge_dir = tempfile.mkdtemp(prefix='merge_struct_test_')
+try:
+    merge_csvs = []
+    for name, n in (('20261104-162439', 3), ('20261104-165242', 2)):
+        folder = os.path.join(tmp_merge_dir, name)
+        os.makedirs(folder)
+        with open(os.path.join(folder, name + '_struct.json'), 'w') as f:
+            _json6.dump({'info': {}, 'task_params': {},
+                         'trials': [{'bpod_start': float(k)} for k in range(n)]}, f)
+        merge_csvs.append(os.path.join(folder, name + '.csv'))
+    _mat, merge_json = session_struct_export.merge_session_structs(
+        merge_csvs, os.path.join(tmp_merge_dir, 'combined'))
+    with open(merge_json) as f:
+        merged = _json6.load(f)
+finally:
+    shutil.rmtree(tmp_merge_dir, ignore_errors=True)
+merge_labels_ok = ([(t['session_member'], t['session_name']) for t in merged['trials']] ==
+                   [(1, '20261104-162439')] * 3 + [(2, '20261104-165242')] * 2
+                   and all('session_member' not in t for m in merged['members'] for t in m['trials']))
+print("  merged struct: each trial labelled with its member (1-based) + session, members unlabelled: "
+      "{0}".format(merge_labels_ok))
+
+section6_pass = (section6a_pass and section6b_pass and section6c_pass and section6d_pass
+                 and merge_labels_ok)
 print("Section 6 result: {0}".format("PASS" if section6_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -556,7 +616,9 @@ print("=" * 100)
 print("Section 8: Stage 4/5 gates + Tag B staircase selection")
 print("=" * 100)
 
-s3_pass = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
+s3_pass = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250,
+                                     click_criterion_met=True)
+s3_fail_click = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=250)
 s3_fail_acc = staircase.stage4_gates_met(accuracy_aos=0.60, abort_rate=0.10, trial_count=250)
 s3_fail_abort = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.25, trial_count=250)
 s3_fail_trials = staircase.stage4_gates_met(accuracy_aos=0.75, abort_rate=0.10, trial_count=150)
@@ -564,7 +626,8 @@ print("  Stage 4 gates: all met (75% acc, 10% abort, 250 trials) -> True: {0}".f
 print("  Stage 4 gates: accuracy below 70% -> False: {0}".format(s3_fail_acc is False))
 print("  Stage 4 gates: abort rate above 20% -> False: {0}".format(s3_fail_abort is False))
 print("  Stage 4 gates: trial count below 200 -> False: {0}".format(s3_fail_trials is False))
-section8a_pass = s3_pass and s3_fail_acc is False and s3_fail_abort is False and s3_fail_trials is False
+print("  Stage 4 gates: click-weight criterion not met -> False: {0}".format(s3_fail_click is False))
+section8a_pass = s3_pass and s3_fail_click is False and s3_fail_acc is False and s3_fail_abort is False and s3_fail_trials is False
 
 s4_pass = staircase.stage5_gates_met(
     response_threshold_fraction=0.95, quiescence_s=staircase.QUIESCENCE_CEILING_S,
@@ -611,31 +674,65 @@ section8_pass = section8a_pass and section8b_pass and section8c_pass
 print("Section 8 result: {0}".format("PASS" if section8_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 9: debiasing.next_side_after_error() -- statistical repeat-rate check
+# Section 9: debiasing.HuDebiaser (Hu et al. 2009, spec B2) against the reference strategies
 # ==================================================================================================
 
 print()
 print("=" * 100)
-print("Section 9: debiasing.next_side_after_error()")
+print("Section 9: debiasing.HuDebiaser vs side-biased and history-driven agents")
 print("=" * 100)
 
-rng = np.random.RandomState(12345)
-n_draws = 20000
-repeats = sum(1 for _ in range(n_draws)
-              if debiasing.next_side_after_error('L', rng=rng) == 'L')
-realized_rate = repeats / float(n_draws)
-rate_within_tol = abs(realized_rate - debiasing.VAR_DEBIAS_REPEAT_PROB) < 0.02
-print("  Realized repeat rate over {0} draws (target {1:.2f}): {2:.4f} -- within 2%: {3}".format(
-    n_draws, debiasing.VAR_DEBIAS_REPEAT_PROB, realized_rate, rate_within_tol))
 
-flip_only = all(debiasing.next_side_after_error('R', rng=rng, repeat_prob=0.0) == 'L'
-                 for _ in range(50))
-repeat_only = all(debiasing.next_side_after_error('R', rng=rng, repeat_prob=1.0) == 'R'
-                   for _ in range(50))
-print("  repeat_prob=0.0 always flips: {0}".format(flip_only))
-print("  repeat_prob=1.0 always repeats: {0}".format(repeat_only))
+def _hu_run(agent, n=20000, seed=9):
+    rng9 = np.random.RandomState(seed)
+    d9 = debiasing.HuDebiaser()
+    prev, rewarded, post_err, post_err_ok, p_rs = None, 0, 0, 0, []
+    for _ in range(n):
+        side = d9.next_side(rng9)
+        p_rs.append(d9.last['p_right'])
+        choice = agent(side, prev, rng9)
+        ok = choice == side
+        rewarded += ok
+        if prev is not None and not prev[1]:
+            post_err += 1
+            post_err_ok += ok
+        d9.record(side, ok)
+        prev = (choice, ok)
+    return rewarded / float(n), post_err_ok / float(max(post_err, 1)), min(p_rs), max(p_rs)
 
-section9_pass = rate_within_tol and flip_only and repeat_only
+
+def _always_right(side, prev, rng9):
+    return 'R'
+
+
+def _wsls(side, prev, rng9):   # win-stay / lose-shift, never listens
+    if prev is None:
+        return 'R'
+    return prev[0] if prev[1] else ('L' if prev[0] == 'R' else 'R')
+
+
+_ar = _hu_run(_always_right)
+_ws = _hu_run(_wsls)
+always_right_ok = abs(_ar[0] - 0.16) < 0.02
+wsls_ok = abs(_ws[0] - 0.50) < 0.02
+caps_ok = all(0.15 - 1e-9 <= x <= 0.85 + 1e-9 for x in (_ar[2], _ar[3], _ws[2], _ws[3]))
+print("  always-right agent earns {0:.1%} (expect ~16%; 29% under the old repeat-after-error rule): {1}".format(
+    _ar[0], always_right_ok))
+print("  win-stay/lose-shift agent earns {0:.1%} overall, {1:.1%} after errors (expect ~50%; old rule "
+      "62% / 80%): {2}".format(_ws[0], _ws[1], wsls_ok))
+print("  p_R stays within the 0.15-0.85 caps: {0} (always-right {1:.3f}-{2:.3f}, WSLS {3:.3f}-{4:.3f})".format(
+    caps_ok, _ar[2], _ar[3], _ws[2], _ws[3]))
+_d9 = debiasing.HuDebiaser()
+_first = _d9.next_side(np.random.RandomState(1))
+first_ok = _d9.last['prob_right'] == 0.5
+_d9b = debiasing.HuDebiaser(history=[['R', True]] * 250)
+persist_ok = len(_d9b.history()) == debiasing.HU_HISTORY_KEEP and _d9b.history()[-1] == ['R', True]
+print("  an empty history draws 50/50: {0}; history round-trips, capped at {1}: {2}".format(
+    first_ok, debiasing.HU_HISTORY_KEEP, persist_ok))
+no_old_rule = not hasattr(debiasing, 'next_side_after_error') and not hasattr(debiasing, 'VAR_DEBIAS_REPEAT_PROB')
+print("  the repeat-after-error rule is gone: {0}".format(no_old_rule))
+
+section9_pass = always_right_ok and wsls_ok and caps_ok and first_ok and persist_ok and no_old_rule
 print("Section 9 result: {0}".format("PASS" if section9_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
@@ -814,48 +911,57 @@ print("=" * 100)
 print("Section 13: BoundedStaircase + next_alternating_value()")
 print("=" * 100)
 
-sd = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
-for _ in range(staircase.STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP - 1):
+# The former Stage 3/4 cue ramp's numbers (removed 2026-11-11, spec B3) as a generic test case.
+_SD13_STARTING_S, _SD13_FINAL_S, _SD13_STEP_S = 0.35, 2.0, 0.25
+_SD13_SUCCESSES_TO_STEP_UP, _SD13_FAILURES_TO_STEP_DOWN = 20, 5
+
+
+def _bounded13(current_s):
+    return staircase.BoundedStaircase(current_s, _SD13_STEP_S, _SD13_STEP_S, _SD13_SUCCESSES_TO_STEP_UP,
+                                      _SD13_FAILURES_TO_STEP_DOWN, _SD13_STARTING_S, _SD13_FINAL_S)
+
+sd = _bounded13(_SD13_STARTING_S)
+for _ in range(_SD13_SUCCESSES_TO_STEP_UP - 1):
     sd.record_outcome(True)
-print("  19 consecutive correct: duration unchanged (0.25s): {0}".format(
-    sd.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+print("  19 consecutive correct: duration unchanged (0.35s): {0}".format(
+    sd.current_value == _SD13_STARTING_S))
 sd.record_outcome(True)
 print("  20th consecutive correct: duration steps UP by {0}s: {1}".format(
-    staircase.STAGE34_STIM_DURATION_STEP_S,
-    sd.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
-                          + staircase.STAGE34_STIM_DURATION_STEP_S)))
+    _SD13_STEP_S,
+    sd.current_value == (_SD13_STARTING_S
+                          + _SD13_STEP_S)))
 
-sd2 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_FINAL_S)
+sd2 = _bounded13(_SD13_FINAL_S)
 for _ in range(500):
     sd2.record_outcome(True)
 print("  duration never exceeds the final ceiling after many correct: {0}".format(
-    sd2.current_value == staircase.STAGE34_STIM_DURATION_FINAL_S))
+    sd2.current_value == _SD13_FINAL_S))
 
-sd3 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+sd3 = _bounded13(_SD13_STARTING_S)
 for _ in range(500):
     sd3.record_outcome(False)
 print("  duration never drops below the starting floor after many incorrect: {0}".format(
-    sd3.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+    sd3.current_value == _SD13_STARTING_S))
 
-sd4 = staircase.new_stim_duration_staircase(
-    staircase.STAGE34_STIM_DURATION_STARTING_S + staircase.STAGE34_STIM_DURATION_STEP_S)
-for _ in range(staircase.STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN - 1):
+sd4 = _bounded13(
+    _SD13_STARTING_S + _SD13_STEP_S)
+for _ in range(_SD13_FAILURES_TO_STEP_DOWN - 1):
     sd4.record_outcome(False)
 print("  4 consecutive incorrect: duration unchanged: {0}".format(
-    sd4.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
-                           + staircase.STAGE34_STIM_DURATION_STEP_S)))
+    sd4.current_value == (_SD13_STARTING_S
+                           + _SD13_STEP_S)))
 sd4.record_outcome(False)
 print("  5th consecutive incorrect: duration steps back DOWN: {0}".format(
-    sd4.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S))
+    sd4.current_value == _SD13_STARTING_S))
 
 # A single incorrect after a long correct streak resets the success counter (no step), same
 # "streak resets on the opposite outcome" convention as ThresholdStaircase.
-sd5 = staircase.new_stim_duration_staircase(staircase.STAGE34_STIM_DURATION_STARTING_S)
+sd5 = _bounded13(_SD13_STARTING_S)
 for _ in range(19):
     sd5.record_outcome(True)
 sd5.record_outcome(False)
 print("  a single incorrect after 19 correct resets the streak (no step, consecutive_successes="
-      "0): {0}".format(sd5.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+      "0): {0}".format(sd5.current_value == _SD13_STARTING_S
                         and sd5.consecutive_successes == 0))
 
 # next_alternating_value(): same-day unchanged, new-day alternates.
@@ -872,12 +978,12 @@ print("  a multi-day gap still just alternates once, from the last-used side: {0
     gap_day == 'L'))
 
 section13_pass = (
-    sd.current_value == (staircase.STAGE34_STIM_DURATION_STARTING_S
-                          + staircase.STAGE34_STIM_DURATION_STEP_S)
-    and sd2.current_value == staircase.STAGE34_STIM_DURATION_FINAL_S
-    and sd3.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
-    and sd4.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
-    and sd5.current_value == staircase.STAGE34_STIM_DURATION_STARTING_S
+    sd.current_value == (_SD13_STARTING_S
+                          + _SD13_STEP_S)
+    and sd2.current_value == _SD13_FINAL_S
+    and sd3.current_value == _SD13_STARTING_S
+    and sd4.current_value == _SD13_STARTING_S
+    and sd5.current_value == _SD13_STARTING_S
     and sd5.consecutive_successes == 0
     and same_day == 'R' and new_day_from_r == 'L' and new_day_from_l == 'R' and gap_day == 'L')
 print("Section 13 result: {0}".format("PASS" if section13_pass else "FAIL -- see checks above"))
@@ -1477,7 +1583,7 @@ section17_pass = same17 and mid_states_ok and n_tr == 30
 print("Section 17 result: {0}".format("PASS" if section17_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 18: consumed-water accounting (Stage 1/2 water cap + training log)
+# Section 18: consumed-water accounting (Stage 1/2 logging + training log)
 # ==================================================================================================
 
 print()
@@ -1567,7 +1673,7 @@ section19_pass = mono19 and pre_ok and chatter_ok
 print("Section 19 result: {0}".format("PASS" if section19_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
-# Section 20: daily water cap total + session duration on the Bpod clock
+# Section 20: daily water total + session duration on the Bpod clock
 # ==================================================================================================
 
 print()
@@ -1650,29 +1756,659 @@ try:
     _write_session21(proj21, '20261103-090000', 'M1', ['Withheld'] * 50)          # today
     prev21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261103', 'stage2_threshold_staircase')
     skip21 = session_csv_parser.previous_day_withheld(proj21, 'M1', '20261101', 'stage2_threshold_staircase')
+    days21 = session_csv_parser.protocol_days_before(proj21, 'M1', '20261103', 'stage2_threshold_staircase')
+    days21_early = session_csv_parser.protocol_days_before(proj21, 'M1', '20261030', 'stage2_threshold_staircase')
 finally:
     shutil.rmtree(proj21, ignore_errors=True)
 scan_ok = (none21 is None and prev21 == ('20261102', 2, 10, ['20261102-090000', '20261102-100000'])
            and skip21 == ('20261030', 50, 50, ['20261030-090000']))
 print("  newest earlier day, this animal + Stage 2 only, sessions combined, NoMovement not a turn, "
       "today ignored, None without history: {0} ({1})".format(scan_ok, prev21))
-_m = 10.0 / 35
+_m = 12.5 / 35
 _b = staircase.bias_day_start_fraction
-halve_cases = [(_b(1.0, 0.26, 0.20, _m) * 35, 17.5), (_b(15.0 / 35, 0.20, 0.20, _m) * 35, 10.0),
-               (_b(8.0 / 35, 0.9, 0.20, _m) * 35, 8.0), (_b(1.0, 0.19, 0.20, _m) * 35, 35.0),
-               (_b(1.0, None, 0.20, _m) * 35, 35.0)]
+halve_cases = [(_b(1.0, 0.26, 0.20, _m) * 35, 17.5), (_b(15.0 / 35, 0.20, 0.20, _m) * 35, 12.5),
+               (_b(7.0 / 35, 0.21, 0.20, _m) * 35, 12.5), (_b(7.0 / 35, 0.10, 0.20, _m) * 35, 12.5),
+               (_b(1.0, 0.19, 0.20, _m) * 35, 35.0), (_b(20.0 / 35, None, 0.20, _m) * 35, 20.0)]
 halve_ok = all(abs(a - b) < 1e-9 for a, b in halve_cases)
-print("  35->17.5, 15->10 (min), 8 kept, 19% and no history unchanged: {0} ({1})".format(
+print("  35->17.5, 15->12.5 (min), 7->12.5 biased or not, 19% and no history unchanged: {0} ({1})".format(
     halve_ok, [round(a, 2) for a, _ in halve_cases]))
 
-section21_pass = scan_ok and halve_ok
+days_ok = days21 == ['20261030', '20261102'] and days21_early == []
+print("  Stage 2 day count (day-start rule only on days <= 3): this animal + Stage 2 only, one entry "
+      "per day, today excluded: {0} ({1})".format(days_ok, days21))
+
+_l = staircase.later_day_start_fraction
+later_cases = [(_l(19.5 / 35, 30.0 / 35) * 35, 33.5), (_l(30.0 / 35, 20.0 / 35) * 35, 33.5),
+               (_l(33.0 / 35, 34.0 / 35) * 35, 35.0), (_l(20.0 / 35, None) * 35, 23.5)]
+later_ok = all(abs(a - b) < 1e-3 for a, b in later_cases)
+print("  day >= 4 start: max(saved, yesterday's peak) + 3.5deg, cap 35, no peak -> saved: {0} ({1})".format(
+    later_ok, [round(a, 2) for a, _ in later_cases]))
+sigma_cases = [staircase.grow_direction_sigma(8.0), staircase.grow_direction_sigma(19.0),
+               staircase.grow_direction_sigma(20.0)]
+sigma_ok = sigma_cases == [10.0, 20.0, 20.0]
+print("  direction sigma +2/day, ceiling 20: {0} ({1})".format(sigma_ok, sigma_cases))
+
+
+def _recovery_turns(sigma, run=30):
+    t = DirectionRatioTracker(history=['L', 'R'] * 20 + ['L'] * run, sigma=sigma)
+    n = 0
+    while t.over_used_side() == 'L' and n < 80:
+        t.record('R')
+        n += 1
+    return n
+
+
+recover8, recover20 = _recovery_turns(8.0), _recovery_turns(20.0)
+recover_ok = recover20 > recover8
+print("  a wider sigma needs more opposite turns to recover from a 30-turn run: {0} "
+      "(sigma 8: {1}, sigma 20: {2})".format(recover_ok, recover8, recover20))
+
+proj21b = tempfile.mkdtemp(prefix='daymax_')
+try:
+    for _name, _deg in [('20261109-090000', ['23.0', '26.5', '30.000000000000004', '19.5']),
+                        ('20261109-100000', ['19.5', '23.0'])]:
+        _folder = os.path.join(proj21b, 'experiments', 'Stage2', 'setups', 'Stage2', 'sessions', _name)
+        os.makedirs(_folder)
+        _rows = [['INFO', 'pc', '', '', 'PROTOCOL-NAME', 'stage2_threshold_staircase'],
+                 ['INFO', 'pc', '', '', 'SUBJECT-NAME', "['M1', 'x']"]]
+        for _d in _deg:
+            _rows += [['TRIAL', 'pc', '', '', 'New trial', ''],
+                      ['VAL', 'pc', '', '', 'THRESHOLD_DEG', _d],
+                      ['END-TRIAL', 'pc', '', '', 'The trial ended', '']]
+        with open(os.path.join(_folder, _name + '.csv'), 'w', newline='') as f:
+            csv.writer(f, delimiter=';').writerows(_rows)
+    max21 = session_csv_parser.day_max_threshold_deg(proj21b, 'M1', '20261109', 'stage2_threshold_staircase')
+    max21_none = session_csv_parser.day_max_threshold_deg(proj21b, 'M1', '20261108', 'stage2_threshold_staircase')
+finally:
+    shutil.rmtree(proj21b, ignore_errors=True)
+max_ok = max21 == 30.0 and max21_none is None
+print("  yesterday's peak threshold over all that day's sessions, rounded: {0} ({1})".format(
+    max_ok, max21))
+
+section21_pass = scan_ok and halve_ok and days_ok and later_ok and sigma_ok and recover_ok and max_ok
 print("Section 21 result: {0}".format("PASS" if section21_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
 
 print()
 print("=" * 100)
-print("Section 22: per-box lick input (LICK_INPUT=BNC2 on training01)")
+print("Section 22: (retired 2026-11-11 -- Stage 3 side blocks replaced by fading scaffolds, see Section 35)")
+print("=" * 100)
+section22_pass = True
+print("Section 22 result: {0}".format("PASS" if section22_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 23: A1: quiescence hold = truncated exponential scaled by q (IBL at q = 0.55)")
+print("=" * 100)
+
+import scipy.stats as _st23
+_rng23 = np.random.RandomState(23)
+q_checks = []
+for _q in (0.1, 0.25, 0.55):
+    _h = np.array([staircase.draw_quiescence_hold(_q, _rng23) for _ in range(20000)])
+    _lo, _hi = staircase.QUIESCENCE_WINDOW_LO_FACTOR * _q, staircase.QUIESCENCE_WINDOW_HI_FACTOR * _q
+    _in = bool(_h.min() >= _lo - 1e-12 and _h.max() <= _hi + 1e-12)
+    _mean_ok = abs(_h.mean() / _q - 0.962) < 0.01
+    # no mass piled on a bound: the share within 0.5% of the window width of each bound is ~0.5%
+    _eps = 0.005 * (_hi - _lo)
+    _at_bounds = float(np.mean((_h < _lo + _eps) | (_h > _hi - _eps)))
+    _bounds_ok = _at_bounds < 0.02
+    q_checks.append(_in and _mean_ok and _bounds_ok)
+    print("  q={0:.2f}: window {1:.3f}-{2:.3f}s, observed {3:.3f}-{4:.3f}s, mean {5:.3f}s ({6:.3f}*q), "
+          "{7:.1%} within 0.5% of a bound: {8}".format(_q, _lo, _hi, _h.min(), _h.max(), _h.mean(),
+                                                       _h.mean() / _q, _at_bounds, q_checks[-1]))
+
+
+def _ibl_texp(rng):   # iblrig base_choice_world.py: 0.2 + truncated_exponential(0.35, 0.2, 0.5)
+    while True:
+        x = rng.exponential(0.35)
+        if 0.2 <= x <= 0.5:
+            return 0.2 + x
+
+
+_ibl = np.array([_ibl_texp(_rng23) for _ in range(20000)])
+_ours = np.array([staircase.draw_quiescence_hold(0.55, _rng23) for _ in range(20000)])
+_ks = _st23.ks_2samp(_ibl, _ours)
+ibl_ok = _ks.pvalue > 0.01
+print("  q=0.55 vs iblrig's own sampler: KS D={0:.4f}, p={1:.3f} (means {2:.3f} vs {3:.3f}s): {4}".format(
+    _ks.statistic, _ks.pvalue, _ibl.mean(), _ours.mean(), ibl_ok))
+ceiling_ok = staircase.QUIESCENCE_CEILING_S == 0.55 and staircase.QUIESCENCE_FLOOR_S == 0.1
+print("  staircase floor/ceiling 0.10/0.55s: {0}".format(ceiling_ok))
+section23_pass = all(q_checks) and ibl_ok and ceiling_ok
+
+print("Section 23 result: {0}".format("PASS" if section23_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 24: B10: Stages 2-4 cap the quiescence scale at 0.25s, Stage 5 at 0.55s")
+print("=" * 100)
+
+_q24 = staircase.QuiescenceStaircase(current_s=0.2, ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
+for _ in range(400):
+    _q24.record_outcome(True)
+cap234_ok = abs(_q24.current_s - 0.25) < 1e-9
+_q24b = staircase.QuiescenceStaircase(current_s=0.2)
+for _ in range(400):
+    _q24b.record_outcome(True)
+cap5_ok = abs(_q24b.current_s - 0.55) < 1e-9
+_q24c = staircase.QuiescenceStaircase(current_s=0.4, ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
+clamp_ok = abs(_q24c.current_s - 0.25) < 1e-9
+_src24 = {}
+for _stage_dir in ('stage2_threshold_staircase', 'stage3_tone_side_association', 'stage4_clicks_direction',
+                   'stage5_resume_staircases'):
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', _stage_dir, _stage_dir + '.py'),
+              encoding='utf-8') as _f:
+        _src24[_stage_dir] = 'STAGE234_QUIESCENCE_CEILING_S' in _f.read()
+wiring_ok = (_src24['stage2_threshold_staircase'] and _src24['stage3_tone_side_association']
+             and _src24['stage4_clicks_direction'] and not _src24['stage5_resume_staircases'])
+print("  Stage 2-4 staircase stops at 0.25s: {0}; default (Stage 5) stops at 0.55s: {1}; a saved 0.40s "
+      "is clamped to 0.25s in Stages 2-4: {2}; Stages 2-4 pass the cap, Stage 5 doesn't: {3} {4}".format(
+          cap234_ok, cap5_ok, clamp_ok, wiring_ok, _src24))
+section24_pass = cap234_ok and cap5_ok and clamp_ok and wiring_ok
+
+print("Section 24 result: {0}".format("PASS" if section24_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 25: A2: fixed ITIs in Stages 3-5 (correct 1.5s, error 4.0s), no ITI staircase")
+print("=" * 100)
+
+import re as _re25
+_TASKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+STAGE_DIRS = {1: 'stage1_wheel_shaping', 2: 'stage2_threshold_staircase', 3: 'stage3_tone_side_association',
+              4: 'stage4_clicks_direction', 5: 'stage5_resume_staircases'}
+
+
+def stage_source(stage):
+    """ A stage script's source text (used by the source-level checks from here on). """
+    with open(os.path.join(_TASKS_DIR, STAGE_DIRS[stage], STAGE_DIRS[stage] + '.py'), encoding='utf-8') as f:
+        return f.read()
+
+
+def stage_var(stage, name):
+    """ The literal value of a module-level `NAME = <number>` in a stage script, or None. """
+    m = _re25.search(r'^' + name + r'\s*=\s*([0-9.]+)', stage_source(stage), _re25.M)
+    return float(m.group(1)) if m else None
+
+
+iti_checks = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    iti_checks[_st] = (stage_var(_st, 'VAR_ITI_S') == 1.5 and stage_var(_st, 'VAR_INCORRECT_ITI_S') == 4.0
+                       and 'iti_staircase' not in _src and "state.set('iti_s'" not in _src
+                       and "register_value('ITI_RESET_FROM_S'" in _src
+                       and ('state_timer=iti_this_trial' in _src or 'state_timer=VAR_ITI_S' in _src))
+print("  Stages 3-5: VAR_ITI_S 1.5, VAR_INCORRECT_ITI_S 4.0, no ITI staircase, never write 'iti_s', "
+      "register ITI_RESET_FROM_S: {0}".format(iti_checks))
+_ns25 = {'VAR_ITI_S': 1.5}
+for _saved, _want in ((2.25, 2.25), (1.5, None), (1.3, None), (None, None)):
+    _ns25['state'] = type('S', (), {'get': staticmethod(lambda k, v=_saved: v)})
+    exec(_re25.search(r'^ITI_RESET_FROM_S = .*$', stage_source(3), _re25.M).group(0), _ns25)
+    iti_checks['reset %s' % _saved] = _ns25['ITI_RESET_FROM_S'] == _want
+print("  a saved 'iti_s' above 1.5s is reported, at or below it isn't: {0}".format(
+    {k: v for k, v in iti_checks.items() if str(k).startswith('reset')}))
+no_ramp_ok = not hasattr(staircase, 'new_iti_staircase') and not hasattr(staircase, 'STAGE34_ITI_STARTING_S')
+print("  staircase.py has no ITI ramp left: {0}".format(no_ramp_ok))
+section25_pass = all(iti_checks.values()) and no_ramp_ok
+
+print("Section 25 result: {0}".format("PASS" if section25_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 26: A4: an abort costs the error ITI (AbortITI = VAR_INCORRECT_ITI_S)")
+print("=" * 100)
+
+abort_checks = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    _abort_iti = _re25.search(r"state_name='AbortITI',\s*state_timer=(\w+)", _src)
+    abort_checks[_st] = ('VAR_ABORT_TIMEOUT' not in _src
+                         and 'abort_timeout_this_trial = VAR_INCORRECT_ITI_S' in _src
+                         and _abort_iti is not None and _abort_iti.group(1) == 'abort_timeout_this_trial'
+                         and "runner.register('ABORT_ITI_S', abort_timeout_this_trial)" in _src)
+print("  Stages 3-5: AbortITI lasts VAR_INCORRECT_ITI_S, no VAR_ABORT_TIMEOUT_* left, ABORT_ITI_S "
+      "registered: {0}".format(abort_checks))
+section26_pass = all(abort_checks.values())
+
+print("Section 26 result: {0}".format("PASS" if section26_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 27: A5: J2 (crossing -> dot offset) is 0.3-0.6s in every stage, from one constant")
+print("=" * 100)
+
+j2_checks = {}
+for _st in (1, 2, 3, 4, 5):
+    _src = stage_source(_st)
+    j2_checks[_st] = ('VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S' in _src
+                      and 'VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S' in _src
+                      and 'uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)' in _src)
+window_ok = (staircase.DOT_DISAPPEAR_MIN_S, staircase.DOT_DISAPPEAR_MAX_S) == (0.3, 0.6)
+print("  shared window 0.3-0.6s: {0}; every stage draws J2 from it (one window for both outcomes): "
+      "{1}".format(window_ok, j2_checks))
+section27_pass = window_ok and all(j2_checks.values())
+
+print("Section 27 result: {0}".format("PASS" if section27_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 28: A6: initial cue 0.35s, and every trial's cue window has a click on its side")
+print("=" * 100)
+
+import click_train_v2 as _ct28
+cue_ok = (staircase.CUE_DURATION_S == 0.35 and 'VAR_STIM_DURATION_S = staircase.CUE_DURATION_S' in stage_source(5))
+print("  Stage 3/4 cue starts (and floors) at 0.35s, Stage 5's fixed cue is 0.35s: {0}".format(cue_ok))
+_rng28 = np.random.RandomState(28)
+_n, _resampled, _empty = 20000, 0, 0
+for _ in range(_n):
+    _side = 'R' if _rng28.random_sample() < 0.5 else 'L'
+    _c, _seed, _k = _ct28.draw_trial_clicks_with_cue('AOS', _side, 0.35, seed_rng=_rng28)
+    _resampled += _k > 0
+    _times = _c['right_times'] if _side == 'R' else _c['left_times']
+    _empty += not np.any(np.asarray(_times) < 0.35)
+    _again = _ct28.generate_trial_clicks('AOS', _side, rng=np.random.RandomState(_seed), stim_duration_s=0.35)
+    assert list(_again['left_times']) == list(_c['left_times'])   # STIM_SEED reproduces the train
+_raw_empty = sum(_ct28.generate_trial_clicks('AOS', 'R', rng=np.random.RandomState(s), stim_duration_s=0.35)['n_right'] == 0
+                 for s in range(20000)) / 20000.0
+resample_ok = _empty == 0 and _resampled / float(_n) < 0.005
+print("  {0} draws at 0.35s: {1} with an empty cue side after resampling, {2:.2%} needed a redraw "
+      "(raw empty-train rate {3:.2%}): {4}".format(_n, _empty, _resampled / float(_n), _raw_empty, resample_ok))
+_c, _seed, _k = _ct28.draw_trial_clicks_with_cue('AOS', 'L', 0.35, train_duration_s=5.75, seed_rng=_rng28)
+tail_ok = (max(_c['left_times']) > 1.0 and np.any(np.asarray(_c['left_times']) < 0.35) and _c['n_right'] == 0)
+print("  a 5.75s train still needs a click inside the 0.35s cue window, and keeps clicking after it: "
+      "{0}".format(tail_ok))
+mig_checks = []
+for _st in (3, 4):
+    _src = stage_source(_st)
+    mig_checks.append("register_value('STIM_DURATION_RESET_FROM_S'" in _src and 'draw_trial_clicks_with_cue' in _src)
+mig_checks.append('draw_trial_clicks_with_cue' in stage_source(5))
+print("  Stages 3-5 draw through draw_trial_clicks_with_cue, Stages 3/4 log a raised saved cue: {0}".format(mig_checks))
+section28_pass = cue_ok and resample_ok and tail_ok and all(mig_checks)
+
+print("Section 28 result: {0}".format("PASS" if section28_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 29: B3: the cue is fixed at 0.35s in Stages 3-5 (no cue-duration staircase)")
+print("=" * 100)
+
+cue_fixed = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    cue_fixed[_st] = ('VAR_STIM_DURATION_S = staircase.CUE_DURATION_S' in _src
+                      and 'stim_duration_staircase' not in _src and "state.set('stim_duration_s'" not in _src
+                      and ('CLICK_START_OFFSET_S + stim_duration_this_trial' in _src
+                           or 'CLICK_START_OFFSET_S + VAR_STIM_DURATION_S' in _src))
+for _st in (3, 4):
+    cue_fixed['reset logged %d' % _st] = "register_value('STIM_DURATION_RESET_FROM_S'" in stage_source(_st)
+gone_ok = not any(hasattr(staircase, n) for n in ('new_stim_duration_staircase', 'STAGE34_STIM_DURATION_STARTING_S'))
+print("  Stages 3-5 play VAR_STIM_DURATION_S = CUE_DURATION_S, never write 'stim_duration_s', "
+      "Stage 3/4 log a leftover saved value: {0}; staircase.py has no cue ramp: {1}".format(cue_fixed, gone_ok))
+section29_pass = all(cue_fixed.values()) and gone_ok and staircase.CUE_DURATION_S == 0.35
+
+print("Section 29 result: {0}".format("PASS" if section29_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 30: B8: the error flash comes 0.7-1.0s after the error crossing, never at a lick")
+print("=" * 100)
+
+flash_checks = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    _m = _re25.search(r"state_name='ErrorConsumption',\s*state_timer=(\w+),\s*state_change_conditions=\{([^}]*)\}", _src)
+    flash_checks[_st] = (stage_var(_st, 'VAR_ERROR_FLASH_DELAY_MIN_S') == 0.7
+                         and stage_var(_st, 'VAR_ERROR_FLASH_DELAY_MAX_S') == 1.0
+                         and _m is not None and _m.group(1) == 'error_flash_delay_s' and 'Port1In' not in _m.group(2)
+                         and "runner.register('ERROR_FLASH_DELAY_S', error_flash_delay_s)" in _src)
+after_j2 = stage_var(3, 'VAR_ERROR_FLASH_DELAY_MIN_S') >= staircase.DOT_DISAPPEAR_MAX_S + 0.1 - 1e-9
+print("  Stages 3-5: ErrorConsumption lasts error_flash_delay_s ~ U(0.7, 1.0), no Port1In exit, delay "
+      "registered: {0}; the flash starts >= 100ms after the latest dot offset: {1}".format(flash_checks, after_j2))
+section30_pass = all(flash_checks.values()) and after_j2
+
+print("Section 30 result: {0}".format("PASS" if section30_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 31: B9: one threshold_fraction fallback for Stages 3-5")
+print("=" * 100)
+
+tf_checks = {_st: "'threshold_fraction': staircase.THRESHOLD_FRACTION_DEFAULT" in stage_source(_st)
+             for _st in (3, 4, 5)}
+print("  Stages 3-5 fall back to staircase.THRESHOLD_FRACTION_DEFAULT ({0}): {1}".format(
+    staircase.THRESHOLD_FRACTION_DEFAULT, tf_checks))
+section31_pass = all(tf_checks.values()) and staircase.THRESHOLD_FRACTION_DEFAULT == 1.0
+
+print("Section 31 result: {0}".format("PASS" if section31_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 32: B9: an attenuated-click session only counts down when it was a full session")
+print("=" * 100)
+
+att_checks = {_st: ("if _click_attenuation_remaining > 0 and session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:"
+                    in stage_source(_st)) for _st in (3, 4)}
+print("  Stages 3/4 count an attenuated session only with >= VAR_TRIAL_COUNT_ADVANCE responded main "
+      "trials: {0}".format(att_checks))
+section32_pass = all(att_checks.values())
+
+print("Section 32 result: {0}".format("PASS" if section32_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 33: B2: Stages 4/5 draw sides from the Hu debiaser and persist its history")
+print("=" * 100)
+
+hu_checks = {}
+for _st in (4, 5):
+    _src = stage_source(_st)
+    hu_checks[_st] = ('debiaser.next_side(np.random)' in _src and 'next_side_after_error' not in _src
+                      and 'VAR_DEBIAS_REPEAT_PROB' not in _src and "state.set('hu_debias_history'" in _src
+                      and all("runner.register('%s'" % k in _src for k in
+                              ('P_RIGHT_TARGET', 'E_RIGHT', 'E_LEFT', 'F_RIGHT_EMPIRICAL'))
+                      and "trial_type = 'repeat'" in _src)
+print("  Stages 4/5: Hu sides, P_RIGHT_TARGET/E_RIGHT/E_LEFT/F_RIGHT_EMPIRICAL registered, history "
+      "saved, abort re-offer kept: {0}".format(hu_checks))
+section33_pass = all(hu_checks.values())
+
+print("Section 33 result: {0}".format("PASS" if section33_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 34: Click-weight regression (Stages 3/4): listening agents pass, history agents don't")
+print("=" * 100)
+
+import choice_regression
+_rng34 = np.random.RandomState(34)
+
+
+def _reg_session(agent, n=150):
+    d34 = debiasing.HuDebiaser()
+    prev, trials34 = None, []
+    for _ in range(n):
+        side = d34.next_side(_rng34)
+        choice = agent(side, prev)
+        ok = choice == side
+        d34.record(side, ok)
+        prev = (choice, ok)
+        trials34.append({'choice': choice, 'stim': side, 'rewarded': ok, 'fit': True})
+    return choice_regression.fit_choice_regression(trials34)
+
+
+def _listener(acc):
+    return lambda side, prev: side if _rng34.random_sample() < acc else ('L' if side == 'R' else 'R')
+
+
+def _wsls34(side, prev):
+    if prev is None:
+        return 'R'
+    return prev[0] if prev[1] else ('L' if prev[0] == 'R' else 'R')
+
+
+reg_rates = {}
+for _name, _agent in (('perfect', _listener(1.0)), ('85% listener', _listener(0.85)),
+                      ('win-stay/lose-shift', _wsls34), ('always right', lambda s, p: 'R'),
+                      ('random', lambda s, p: 'R' if _rng34.random_sample() < 0.5 else 'L')):
+    _fits = [_reg_session(_agent) for _ in range(20)]
+    reg_rates[_name] = sum(f['criterion_met'] for f in _fits) / 20.0
+    print("  {0}: criterion met in {1:.0%} of 20 simulated 150-trial sessions (mean z {2:.1f}, "
+          "b_click {3:.2f})".format(_name, reg_rates[_name], np.mean([f['z_click'] for f in _fits]),
+                                    np.mean([f['b_click'] for f in _fits])))
+reg_ok = (reg_rates['perfect'] == 1.0 and reg_rates['85% listener'] == 1.0
+          and reg_rates['win-stay/lose-shift'] == 0.0 and reg_rates['always right'] == 0.0
+          and reg_rates['random'] <= 0.05)
+_few = choice_regression.fit_choice_regression([{'choice': 'R', 'stim': 'R', 'rewarded': True, 'fit': True}] * 5)
+_hist = choice_regression.build_design([
+    {'choice': 'L', 'stim': 'L', 'rewarded': True, 'fit': False},      # warm-up: history only
+    {'choice': None, 'stim': 'R', 'rewarded': False, 'fit': True},     # abort: skipped entirely
+    {'choice': 'R', 'stim': 'L', 'rewarded': False, 'fit': True}])
+design_ok = _few is None and _hist[0].tolist() == [[1.0, -1.0, -1.0, -1.0]] and _hist[1].tolist() == [1.0]
+print("  too few trials -> no fit; a non-fit trial still sets the history terms, an abort is skipped: "
+      "{0}".format(design_ok))
+s4_src = stage_source(4)
+wired_ok = all("runner.register('%s'" % k in s4_src for k in
+               ('CLICK_WEIGHT', 'CLICK_WEIGHT_Z', 'PREV_CHOICE_WEIGHT', 'WIN_STAY_WEIGHT', 'CLICK_CRITERION_MET'))
+print("  Stage 4 registers the weights and passes the criterion to its gate: {0}".format(
+    wired_ok and 'click_criterion_met=click_criterion_met' in s4_src))
+section34_pass = reg_ok and design_ok and wired_ok
+
+print("Section 34 result: {0}".format("PASS" if section34_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 35: A7: Stage 3 fading scaffolds -- listening agents climb, history agents never qualify")
+print("=" * 100)
+
+import stage3_scaffold as _s3
+import choice_regression as _cr35
+_rng35 = np.random.RandomState(35)
+
+
+def _s3_session(agent, progress, n_trials=180, warmup=20):
+    """ One simulated Stage 3 session at `progress`; returns (new_progress, reward_rate, fit,
+    n_fit_rows, n_noncorrection_main, advance_ready, flag). """
+    d35 = debiasing.HuDebiaser()
+    sides35 = _s3.Stage3Sides(d35, _s3.p_corr(progress['fade_step'], progress['asym_step']), _rng35)
+    prev, prev_err, trials35, rewarded, n_main = None, None, [], 0, 0
+    for i in range(n_trials):
+        side, is_corr = sides35.next_side(prev_err)
+        ttype = 'correction' if is_corr else ('warmup' if i < warmup else 'main')
+        choice = agent(side, prev)
+        ok = choice == side
+        rewarded += ok
+        if not is_corr:
+            d35.record(side, ok)
+        n_main += ttype == 'main'
+        trials35.append({'choice': choice, 'stim': side, 'rewarded': ok, 'fit': ttype == 'main'})
+        prev, prev_err = (choice, ok), (side if not ok else None)
+    fit = _cr35.fit_choice_regression(trials35)
+    met = bool(fit and fit['criterion_met'])
+    qual = _s3.session_qualifies(n_main, 0.05, met)
+    newp, _ev, adv, flag = _s3.end_session(progress, qual, fit['z_click'] if fit else None, met)
+    return newp, rewarded / float(n_trials), fit, len(_cr35.build_design(trials35)[1]), n_main, adv, flag
+
+
+def _listen85(side, prev):
+    return side if _rng35.random_sample() < 0.85 else ('L' if side == 'R' else 'R')
+
+
+def _wsls35(side, prev):
+    if prev is None:
+        return 'R'
+    return prev[0] if prev[1] else ('L' if prev[0] == 'R' else 'R')
+
+
+# A click-following agent climbs 0 -> 5 and becomes advance-ready.
+_p = dict(_s3.DEFAULT_PROGRESS)
+_steps, _adv_at = [_p['fade_step']], None
+for _sess in range(12):
+    _p, _rate, _fit, _rows, _nmain, _adv, _flag = _s3_session(_listen85, _p)
+    _steps.append(_p['fade_step'])
+    if _adv and _adv_at is None:
+        _adv_at = _sess + 1
+climb_ok = _steps[:6] == [0, 1, 2, 3, 4, 5] and _adv_at == 7
+print("  85% click-follower: fade steps by session {0}, advance-ready after session {1}: {2}".format(
+    _steps[:8], _adv_at, climb_ok))
+excl_ok = _rows == _nmain
+print("  the regression is fitted on main non-correction trials only ({0} rows = {1} main trials): "
+      "{2}".format(_rows, _nmain, excl_ok))
+
+# A click-blind win-stay/lose-shift agent: ~64% at step 0, ~50% at step 4, never qualifies.
+_wsls_rates, _wsls_met = {}, []
+for _step in (0, 4):
+    _rates = []
+    for _ in range(15):
+        _pp = dict(_s3.DEFAULT_PROGRESS)
+        _pp['fade_step'] = _step
+        _newp, _rate, _fit, _rows, _nmain, _adv, _flag = _s3_session(_wsls35, _pp, n_trials=400)
+        _rates.append(_rate)
+        _wsls_met.append(bool(_fit and _fit['criterion_met']))
+    _wsls_rates[_step] = float(np.mean(_rates))
+wsls_ok = (abs(_wsls_rates[0] - 0.64) < 0.03 and abs(_wsls_rates[4] - 0.50) < 0.03 and not any(_wsls_met))
+print("  win-stay/lose-shift: rewarded {0:.1%} at step 0 (expect ~64%), {1:.1%} at step 4 (expect 50%), "
+      "criterion met in {2} of {3} sessions: {4}".format(
+          _wsls_rates[0], _wsls_rates[4], sum(_wsls_met), len(_wsls_met), wsls_ok))
+
+# Step back after 2 consecutive sessions with z < 1; a None z (too few trials) changes nothing.
+_q = dict(_s3.DEFAULT_PROGRESS, fade_step=3, criterion_ever_met=True)
+_q, _, _, _ = _s3.end_session(_q, False, 0.5, False)
+_mid = _q['fade_step']
+_q, _, _, _ = _s3.end_session(_q, False, None, False)
+_q, _, _, _ = _s3.end_session(_q, False, 0.2, False)
+stepback_ok = _mid == 3 and _q['fade_step'] == 2 and _q['low_z_streak'] == 0
+print("  two sessions with z < 1 step back one step (3 -> 2), a no-fit session doesn't break the "
+      "streak: {0}".format(stepback_ok))
+
+# Reserve scaffold: on after 4 sessions at step 0 without the criterion, fades out over 4 qualifying
+# sessions before step 1, triggers once; the flag comes at session 8.
+_r = dict(_s3.DEFAULT_PROGRESS)
+for _ in range(4):
+    _r, _, _, _flag4 = _s3.end_session(_r, False, 0.0, False)
+on_ok = _r['asym_step'] == 0 and _s3.p_corr(_r['fade_step'], _r['asym_step']) == 0.8
+_asym_trace = []
+for _ in range(4):
+    _r, _, _, _ = _s3.end_session(_r, True, 4.0, True)
+    _asym_trace.append((_r['asym_step'], _r['fade_step']))
+_r, _, _, _ = _s3.end_session(_r, True, 4.0, True)
+fade_ok = _asym_trace == [(1, 0), (2, 0), (3, 0), (None, 0)] and _r['fade_step'] == 1
+_f = dict(_s3.DEFAULT_PROGRESS, asym_used=True)
+_flags = []
+for _ in range(8):
+    _f, _, _, _fl = _s3.end_session(_f, False, 0.0, False)
+    _flags.append(_fl)
+flag_ok = _flags == [False] * 7 + [True] and not _flag4
+print("  reserve asymmetric threshold: on after 4 sessions at step 0 ({0}), fades (asym, fade) {1} then "
+      "step 1 ({2}); speaker-check flag only at session 8 ({3})".format(on_ok, _asym_trace, fade_ok, flag_ok))
+frac_ok = (_s3.asym_fractions(0) == (0.40, 1.30) and _s3.asym_fractions(None) == (1.0, 1.0)
+           and _s3.FADE_P_CORR == (0.8, 0.6, 0.4, 0.2, 0.0, 0.0) and _s3.tail_mode(5) == 'dot_onset'
+           and _s3.tail_mode(4) == 'crossing')
+_src3 = stage_source(3)
+_cue_complete = _re25.search(r"state_name='CueComplete',.*?output_actions=(\[[^\]]*\])", _src3, _re25.S)
+wiring_ok = (_cue_complete is not None and _cue_complete.group(1) == '[]'
+             and 'Stage3Blocks' not in _src3 and 'BLOCK_INDEX' not in _src3
+             and all("runner.register('%s'" % k in _src3 for k in
+                     ('CLICK_STOP_S', 'N_CLICKS_PLAYED', 'P_CORR', 'FADE_STEP', 'CLICK_TAIL_MODE',
+                      'CLICK_WEIGHT_Z', 'CLICK_CRITERION_MET', 'STAGE3_QUALIFYING'))
+             and "'correction'" in _src3 and "trial_type = 'repeat'" in _src3
+             and not hasattr(staircase, 'Stage3Blocks') and not hasattr(staircase, 'stage3_gates_met'))
+print("  fade table / tail modes / asymmetric fractions: {0}; Stage 3 wiring (no STOP at CueComplete, "
+      "no blocks, click-stop/fade/criterion VALs, correction + repeat trials): {1}".format(frac_ok, wiring_ok))
+section35_pass = (climb_ok and excl_ok and wsls_ok and stepback_ok and on_ok and fade_ok and flag_ok
+                  and frac_ok and wiring_ok)
+
+print("Section 35 result: {0}".format("PASS" if section35_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 36: B7: the warm-up ends on performance (>= 85%, <= 10 points side bias), 20-60 trials")
+print("=" * 100)
+
+def _warm(outcomes_fn, n=100, **kw):
+    g = staircase.WarmupGate(**kw)
+    i = 0
+    while g.next_is_warmup() and i < n:
+        side = 'R' if i % 2 else 'L'
+        g.record(side, outcomes_fn(i, side))
+        i += 1
+    return g
+
+
+_perfect = _warm(lambda i, s: True)
+_bad = _warm(lambda i, s: i % 3 != 0)                 # 67% correct
+_biased = _warm(lambda i, s: s == 'R' or i % 5 != 0)  # 100% on R, 80% on L: 20 points
+_late = _warm(lambda i, s: i >= 30)                   # gets good after 30 trials
+warm_ok = (_perfect.exit_reason == 'criterion' and _perfect.n_drawn == 20
+           and _bad.exit_reason == 'cap' and _bad.n_drawn == 60
+           and _biased.exit_reason == 'cap'
+           and _late.exit_reason == 'criterion' and _late.n_drawn == 39)   # last 10 = 9/10 correct
+print("  perfect -> criterion at 20 ({0}, {1}); 67% -> cap at 60 ({2}, {3}); side-biased -> cap ({4}); "
+      "good from trial 30 -> criterion at 39 ({5}, {6}): {7}".format(
+          _perfect.exit_reason, _perfect.n_drawn, _bad.exit_reason, _bad.n_drawn, _biased.exit_reason,
+          _late.exit_reason, _late.n_drawn, warm_ok))
+warm_wired = {}
+for _st in (3, 4, 5):
+    _src = stage_source(_st)
+    warm_wired[_st] = ('staircase.WarmupGate(' in _src and 'warmup.next_is_warmup()' in _src
+                       and 'warmup.record(side, correct)' in _src and 'warmup_target' not in _src
+                       and stage_var(_st, 'VAR_WARMUP_TRIAL_MAX') == 60
+                       and "runner.register('WARMUP_EXIT_REASON'" in _src)
+print("  Stages 3-5 use the gate and register WARMUP_EXIT_REASON: {0}".format(warm_wired))
+section36_pass = warm_ok and all(warm_wired.values())
+
+print("Section 36 result: {0}".format("PASS" if section36_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 37: Training log: a column for every session-by-session variable, no test sheets")
+print("=" * 100)
+
+import io
+import openpyxl as _ox37
+_col_keys = {k for k, _l in build_training_log.COLUMNS}
+_persisted = set()
+for _st in (1, 2, 3, 4, 5):
+    _persisted.update(_re25.findall(r"state\.set\('(\w+)'", stage_source(_st)))
+_unmapped = sorted(k for k in _persisted if k not in build_training_log.STATE_KEY_COLUMNS)
+_bad_cols = sorted(c for c in build_training_log.STATE_KEY_COLUMNS.values() if c and c not in _col_keys)
+_field_cols = sorted(k for k, _v, _kind, _w in build_training_log.SESSION_VAL_FIELDS if k not in _col_keys)
+guard_ok = not _unmapped and not _bad_cols and not _field_cols
+print("  every persisted state key maps to a log column or is listed as internal: {0} (unmapped {1}, "
+      "unknown columns {2}, fields without a column {3})".format(guard_ok, _unmapped, _bad_cols, _field_cols))
+_wb37 = _ox37.Workbook()
+_wb37.active.title = 'UM001'
+_wb37.create_sheet('test_stage1')
+_wb37.create_sheet('UMtest')
+_wb37.create_sheet('UM002')
+_removed = build_training_log.drop_test_sheets(_wb37)
+drop_ok = _removed == ['test_stage1', 'UMtest'] and _wb37.sheetnames == ['UM001', 'UM002']
+import xlsx_sheet_merge as _xm37
+_b1, _b2 = io.BytesIO(), io.BytesIO()
+_t = _ox37.Workbook(); _t.active.title = 'UM001'; _t.create_sheet('test_stage1'); _t.save(_b1)
+_o = _ox37.Workbook(); _o.active.title = 'UM002'; _o.save(_b2)
+_merged = _ox37.load_workbook(io.BytesIO(_xm37.merge_workbooks(_b1.getvalue(), _b2.getvalue(), {'UM002'})))
+merge_ok = _merged.sheetnames == ['UM001', 'UM002']
+print("  test sheets are dropped on build ({0}) and on a two-computer merge ({1}): {2}".format(
+    _removed, _merged.sheetnames, drop_ok and merge_ok))
+section37_pass = guard_ok and drop_ok and merge_ok
+
+print("Section 37 result: {0}".format("PASS" if section37_pass else "FAIL -- see checks above"))
+
+# ==================================================================================================
+
+print()
+print("=" * 100)
+print("Section 38: per-box lick input (LICK_INPUT=BNC2 on training01)")
 print("=" * 100)
 
 import lick_input  # noqa: E402 -- _projects/_shared, already on sys.path for Section 16
@@ -1740,8 +2476,8 @@ map_ok = (lick_input.lick_input('TRAINING01') == 'BNC2' and lick_input.lick_inpu
 print("  lick_input: TRAINING01 -> BNC2, other boxes -> Port1, same event names as the parser: "
       "{0}".format(map_ok))
 
-section22_pass = parse_ok and map_ok
-print("Section 22 result: {0}".format("PASS" if section22_pass else "FAIL -- see checks above"))
+section38_pass = parse_ok and map_ok
+print("Section 38 result: {0}".format("PASS" if section38_pass else "FAIL -- see checks above"))
 
 # ==================================================================================================
 
@@ -1752,6 +2488,22 @@ overall_pass = (section1_pass and section2_pass and section3_pass and section4_p
                  section9_pass and section10_pass and section11_pass and section12_pass and
                  section13_pass and section14_pass and section15_pass and section16_pass and
                  section17_pass and section18_pass and
-                 section19_pass and section20_pass and section21_pass and section22_pass)
+                 section19_pass and section20_pass and section21_pass and section22_pass and
+                 section23_pass and
+                 section24_pass and
+                 section25_pass and
+                 section26_pass and
+                 section27_pass and
+                 section28_pass and
+                 section29_pass and
+                 section30_pass and
+                 section31_pass and
+                 section32_pass and
+                 section33_pass and
+                 section34_pass and
+                 section35_pass and
+                 section36_pass and
+                 section37_pass and
+                 section38_pass)
 print("OVERALL: {0}".format("ALL SECTIONS PASS" if overall_pass else "AT LEAST ONE SECTION FAILED"))
 print("=" * 100)

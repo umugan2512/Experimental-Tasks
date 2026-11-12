@@ -17,6 +17,14 @@ STAIRCASE_FAILURES_TO_STEP_DOWN = 5  # this many consecutive failures
 ITI_GROWTH_PER_SESSION_S = 0.1    # doc-specified: "~0.1s per session"
 ITI_CEILING_S = 1.5               # doc-specified: Stage 2's final ITI
 
+# Stage 2 from a subject's 4th Stage 2 day on (per explicit instruction, 2026-11-09): each day
+# starts one staircase step above the previous day's PEAK threshold, and the direction ratio's
+# recency-weighting sigma grows a fixed step per day, so a one-sided run takes more consecutive
+# opposite turns to recover from. Same fixed-step shape as grow_iti().
+DAY_START_STEP_FRACTION = 0.10      # 3.5deg of the 35deg final threshold
+DIRECTION_SIGMA_STEP_PER_DAY = 2.0
+DIRECTION_SIGMA_CEILING = 20.0      # the window is 40 trials; above ~20 it's nearly a flat mean
+
 # Stage 1's threshold grows ACROSS sessions (one fixed step per qualifying session), NOT within a
 # session like ThresholdStaircase above -- Stage 1 isn't tracking moment-to-moment performance the
 # way Stage 2 is, it just needs to reach Stage 2's own starting point by the time Stage 1 ends.
@@ -68,21 +76,28 @@ class ThresholdStaircase(object):
             self.consecutive_successes += 1
             self.consecutive_failures = 0
             if self.consecutive_successes >= STAIRCASE_SUCCESSES_TO_STEP_UP:
-                self.current_fraction = min(1.0, self.current_fraction + STAIRCASE_STEP_UP)
+                self.current_fraction = round(min(1.0, self.current_fraction + STAIRCASE_STEP_UP), 6)
                 self.consecutive_successes = 0
         else:
             self.consecutive_failures += 1
             self.consecutive_successes = 0
             if self.consecutive_failures >= STAIRCASE_FAILURES_TO_STEP_DOWN:
-                self.current_fraction = max(min(self.floor, self.current_fraction),
-                                            self.current_fraction - STAIRCASE_STEP_DOWN)
+                self.current_fraction = round(max(min(self.floor, self.current_fraction),
+                                                  self.current_fraction - STAIRCASE_STEP_DOWN), 6)
                 self.consecutive_failures = 0
+
+    def record_neutral(self):
+        """ A trial that blocks a step-up but never counts toward a step-down: the success streak
+        resets, the failure streak and the threshold stay. Stage 2 uses it for NoMovement
+        (2026-11-05, per explicit instruction): those are disengagement, not a too-hard threshold,
+        and on UM001's 20261104 they were 8 of the 35 failures behind its slide to the floor. """
+        self.consecutive_successes = 0
 
 
 def grow_iti(prev_iti_s):
     """ +ITI_GROWTH_PER_SESSION_S per qualifying session, ceiling at ITI_CEILING_S -- call once per
     session (not per trial), per training_protocol.md Stage 2(b). """
-    return min(ITI_CEILING_S, prev_iti_s + ITI_GROWTH_PER_SESSION_S)
+    return round(min(ITI_CEILING_S, prev_iti_s + ITI_GROWTH_PER_SESSION_S), 6)
 
 
 def grow_stage1_threshold(prev_fraction):
@@ -90,24 +105,41 @@ def grow_stage1_threshold(prev_fraction):
     THRESHOLD_GROWTH_CEILING_FRACTION -- call once per qualifying session (not per trial), same
     call-site shape as grow_iti(). Not ThresholdStaircase: Stage 1 doesn't get a per-trial,
     consecutive-count-driven staircase, just this fixed session-level step. """
-    return min(THRESHOLD_GROWTH_CEILING_FRACTION, prev_fraction + THRESHOLD_GROWTH_PER_SESSION_FRACTION)
+    return round(min(THRESHOLD_GROWTH_CEILING_FRACTION,
+                     prev_fraction + THRESHOLD_GROWTH_PER_SESSION_FRACTION), 6)
 
 
 def decay_gain(prev_gain_mult):
     """ -GAIN_DECAY_STEP_PER_SESSION per qualifying (>200 trial) session, floor at GAIN_FLOOR_MULT
     -- call once per qualifying session (not per trial), same call-site shape as grow_iti(). """
-    return max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION)
+    return round(max(GAIN_FLOOR_MULT, prev_gain_mult - GAIN_DECAY_STEP_PER_SESSION), 6)
 
 
 def bias_day_start_fraction(fraction, withheld_fraction, trigger, min_fraction):
-    """ Stage 2's threshold for the first session of a day after a side-biased day: half of
-    `fraction` when `withheld_fraction` (of the previous day's turns) is >= `trigger`, but not
-    below `min_fraction`, and never raised (a threshold already under the minimum stays). Per
-    explicit instruction (2026-11-03), after UM001's 20261102 sessions withheld 26% of turns while
-    the threshold sat at 35 deg all day. """
-    if withheld_fraction is None or withheld_fraction < trigger:
-        return fraction
-    return min(fraction, max(min_fraction, fraction / 2.0))
+    """ Stage 2's threshold for the first session of a day that follows an earlier Stage 2 day:
+    half of `fraction` when `withheld_fraction` (of the previous day's turns) is >= `trigger`, and
+    never below `min_fraction` -- a threshold already under it is raised to it, biased day or not.
+    Per explicit instruction: the halving after UM001's 20261102 (26% withheld at 35 deg all day,
+    2026-11-03), and the 12.5 deg day-start minimum after its 20261104 slid to the 7 deg staircase
+    floor (2026-11-05). """
+    if withheld_fraction is not None and withheld_fraction >= trigger:
+        fraction = fraction / 2.0
+    return max(min_fraction, fraction)
+
+
+def later_day_start_fraction(saved_fraction, prev_day_max_fraction):
+    """ Stage 2's day-start threshold from a subject's 4th Stage 2 day on: one
+    DAY_START_STEP_FRACTION above the higher of the saved (end-of-yesterday) threshold and
+    yesterday's peak (None = no peak known), ceiling 1.0. Never halved, biased day or not. """
+    base = saved_fraction if prev_day_max_fraction is None else max(saved_fraction,
+                                                                    prev_day_max_fraction)
+    return round(min(1.0, base + DAY_START_STEP_FRACTION), 6)
+
+
+def grow_direction_sigma(prev_sigma):
+    """ +DIRECTION_SIGMA_STEP_PER_DAY per Stage 2 day from day 4 on, ceiling
+    DIRECTION_SIGMA_CEILING -- same call-site shape as grow_iti(). """
+    return round(min(DIRECTION_SIGMA_CEILING, prev_sigma + DIRECTION_SIGMA_STEP_PER_DAY), 6)
 
 
 def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_count_gate=200):
@@ -124,6 +156,16 @@ def stage2_simple_gates_met(trial_count, iti_s, direction_ratio_in_band, trial_c
     return trial_count >= trial_count_gate and iti_s >= ITI_CEILING_S and direction_ratio_in_band
 
 
+# --- Every stage ----------------------------------------------------------------------------------
+
+# J2: threshold crossing -> dot offset, one window for every stage and both outcomes (spec A5,
+# 2026-11-11; was 0.4-0.9s). Any jitter gives most of the separability and 300ms of width is past
+# the knee of the J1 simulation (Methods B 4.2); the 0.3s lower bound keeps the offset transient out
+# of the first few hundred ms after the crossing (valve click, earliest outcome responses).
+DOT_DISAPPEAR_MIN_S = 0.3
+DOT_DISAPPEAR_MAX_S = 0.6
+
+
 # --- Stage 3/4/5 (training_protocol.md Revision 2) -----------------------------------------------
 
 QUIESCENCE_STEP_UP_S = 0.025        # doc: "+25ms per 20 consecutive successful initiations"
@@ -131,15 +173,35 @@ QUIESCENCE_SUCCESSES_TO_STEP_UP = 20
 QUIESCENCE_STEP_DOWN_S = 0.025      # doc: "-25ms per 5 resets"
 QUIESCENCE_FAILURES_TO_STEP_DOWN = 5
 QUIESCENCE_FLOOR_S = 0.1            # Stage 1's own frozen value -- the natural starting point
-QUIESCENCE_CEILING_S = 0.25         # per explicit instruction: hold-to-initiate should land in the
-                                     # 100-250ms range, not the doc's original 0.1-0.5s -- lowered
-                                     # from an earlier 0.5s ceiling.
+QUIESCENCE_CEILING_S = 0.55         # IBL level (2026-11-11 spec A1), superseding the earlier
+                                     # explicit 100-250ms instruction. At q = 0.55 the hold is IBL's
+                                     # own: iblrig draws 0.2 + truncated_exponential(scale 0.35,
+                                     # 0.2..0.5), which by memorylessness is Exp(scale 0.35)
+                                     # truncated to 0.4-0.7s, mean 0.53s.
+# The hold window and the exponential's scale both scale with q, so q = 0.55 reproduces IBL exactly
+# (0.4/0.55, 0.7/0.55, 0.35/0.55) and q = 0.1 gives ~0.073-0.127s. Mean hold ~0.96*q.
+# Stages 2-4 stop the scale at 0.25s (spec B10): one new demand per stage, so q can't climb while
+# the click -> side rule is being learned. Stage 5 continues it up to QUIESCENCE_CEILING_S.
+STAGE234_QUIESCENCE_CEILING_S = 0.25
+QUIESCENCE_WINDOW_LO_FACTOR = 0.727
+QUIESCENCE_WINDOW_HI_FACTOR = 1.273
+QUIESCENCE_SCALE_FACTOR = 0.636
 
-STAGE3_ACCURACY_GATE = 0.70         # doc doesn't specify this new stage's own numeric criterion
-                                     # yet -- reusing Stage 4's values as a flagged placeholder
-                                     # pending real empirical tuning (same convention as
-                                     # VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER elsewhere)
-STAGE3_ABORT_RATE_GATE = 0.20
+
+def draw_quiescence_hold(q, rng):
+    """ One trial's quiescence hold (s) for staircase scale q: an exponential with scale
+    QUIESCENCE_SCALE_FACTOR*q, truncated to [LO_FACTOR*q, HI_FACTOR*q] by inverse-CDF sampling
+    (one draw, no rejection loop). Truncating an exponential rather than drawing uniformly keeps
+    the go signal's hazard roughly flat inside the window, so it can't be timed. rng: anything with
+    random_sample() (np.random or a RandomState). Replaces the old
+    clip(exponential(q), 0.1, 0.25), which piled ~70% of trials exactly on the two bounds. """
+    lo = QUIESCENCE_WINDOW_LO_FACTOR * q
+    hi = QUIESCENCE_WINDOW_HI_FACTOR * q
+    scale = QUIESCENCE_SCALE_FACTOR * q
+    u = float(rng.random_sample())
+    return lo - scale * math.log(1.0 - u * (1.0 - math.exp(-(hi - lo) / scale)))
+
+# Stage 3 qualifies sessions by stage3_scaffold.session_qualifies() since 2026-11-11 (spec A7).
 
 STAGE4_ACCURACY_GATE = 0.70         # doc: ">70% correct at gamma=+-1.0"
 STAGE4_ABORT_RATE_GATE = 0.20       # doc: "abort rate <20%"
@@ -152,44 +214,27 @@ STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION = 0.90   # doc: "current -> final (90% 
                                                     # own 1.0 ceiling (which stays unchanged; Stage 5
                                                     # just treats 0.90 as "done" for advancement).
 
-# Stage 3/4's stimulus-duration and ITI ramps, per explicit instruction ("similar to degree or ISI
-# ramp" -- i.e. the same step-up-on-consecutive-correct/step-down-on-consecutive-incorrect shape
-# ThresholdStaircase already established for the movement threshold). Doc doesn't specify either
-# ramp at all (0.25s stimulus duration and 1.5s ITI were previously FIXED Stage 3/4 constants) --
-# every value below is a flagged/tunable placeholder, same convention as
-# VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER elsewhere. Both start at the doc's own original fixed
-# value and grow toward a longer (easier -- more time/evidence per trial, or more consumption/
-# rest time) final value as performance improves, shrinking back toward that starting value on a
-# consecutive-incorrect streak -- never below it, since that was the doc's own doc-specified
-# floor to begin with. Shared across Stage 3 and Stage 4 (one continuous persisted value each,
-# not reset when a subject advances from Stage 3 to Stage 4), same cross-stage persistence
-# convention as the response-threshold `threshold_fraction`.
-STAGE34_STIM_DURATION_STARTING_S = 0.25   # doc's own original fixed Stage 3/4 value, now reused
-                                           # as this ramp's own starting point AND floor
-STAGE34_STIM_DURATION_FINAL_S = 2.0       # click_train_v2's own module-level default duration --
-                                           # a natural, already-present "full" reference
-STAGE34_STIM_DURATION_STEP_S = 0.25
-STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP = 20   # same consecutive-counts as ThresholdStaircase
-STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN = 5
+# The response threshold's fallback for Stages 3-5 when a subject's state has no
+# 'threshold_fraction' yet (normally Stage 2 has set it): one value for all three (spec B9), Stage
+# 2's own ceiling. Stage 5 used to fall back to 0.45 instead.
+THRESHOLD_FRACTION_DEFAULT = 1.0
 
-STAGE34_ITI_STARTING_S = 1.5               # doc's own original fixed Stage 3/4 correct-trial ITI
-                                            # (also Stage 2's own final ITI_CEILING_S) -- this
-                                            # ramp's own starting point AND floor. The separate
-                                            # error-trial VAR_INCORRECT_ITI_S (4.0s) is NOT ramped
-                                            # -- only the one continuous ITI value Stage 2's own
-                                            # grow_iti() already established gets this treatment.
-STAGE34_ITI_FINAL_S = 3.0
-STAGE34_ITI_STEP_S = 0.25
-STAGE34_ITI_SUCCESSES_TO_STEP_UP = 20
-STAGE34_ITI_FAILURES_TO_STEP_DOWN = 5
+# Stages 3-5 play a FIXED cue (spec A6/B3, 2026-11-11): 0.35s, Ott et al. 2024's stimulus
+# duration. The former STAGE34_STIM_DURATION_* staircase (0.25 -> 2.0s) is gone: it added a
+# second change while direction was being learned, and with one-sided clicks it only added
+# more same-side clicks. Cue extension becomes its own stage (Stage 6, not built).
+CUE_DURATION_S = 0.35
+
+# No ITI staircase after Stage 2 (2026-11-11 spec A2): Stages 3-5 use a fixed VAR_ITI_S = 1.5s and
+# VAR_INCORRECT_ITI_S = 4.0s. The former STAGE34_ITI_* ramp (1.5 -> 3.0s) is gone.
 
 
 class BoundedStaircase(object):
     """ Generic step-up-after-N-consecutive-successes / step-down-after-N-consecutive-failures
     staircase, bounded by [floor_value, ceiling_value] -- the same mechanic as ThresholdStaircase/
-    QuiescenceStaircase above, generalized so Stage 3/4's new stimulus-duration and ITI ramps
-    don't need their own near-duplicate classes (they're the identical shape, just different
-    units/step-sizes/bounds). Each consecutive counter resets to 0 on the OPPOSITE outcome, same
+    QuiescenceStaircase above, generalized for any further bounded ramp (Stage 3/4's former
+    stimulus-duration and ITI ramps used it; both are gone since 2026-11-11, spec A2/B3). Each
+    consecutive counter resets to 0 on the OPPOSITE outcome, same
     "streak resets on the opposite outcome" convention used throughout this file.
 
     Constructed fresh from persisted StageState each session (current_value/consecutive_successes/
@@ -225,26 +270,6 @@ class BoundedStaircase(object):
                 self.consecutive_failures = 0
 
 
-def new_stim_duration_staircase(current_s, consecutive_successes=0, consecutive_failures=0):
-    """ Factory for Stage 3/4's shared stimulus-duration BoundedStaircase -- see
-    STAGE34_STIM_DURATION_* constants above for the actual numbers. """
-    return BoundedStaircase(
-        current_s, STAGE34_STIM_DURATION_STEP_S, STAGE34_STIM_DURATION_STEP_S,
-        STAGE34_STIM_DURATION_SUCCESSES_TO_STEP_UP, STAGE34_STIM_DURATION_FAILURES_TO_STEP_DOWN,
-        STAGE34_STIM_DURATION_STARTING_S, STAGE34_STIM_DURATION_FINAL_S,
-        consecutive_successes, consecutive_failures)
-
-
-def new_iti_staircase(current_s, consecutive_successes=0, consecutive_failures=0):
-    """ Factory for Stage 3/4's shared ITI BoundedStaircase -- see STAGE34_ITI_* constants above
-    for the actual numbers. """
-    return BoundedStaircase(
-        current_s, STAGE34_ITI_STEP_S, STAGE34_ITI_STEP_S,
-        STAGE34_ITI_SUCCESSES_TO_STEP_UP, STAGE34_ITI_FAILURES_TO_STEP_DOWN,
-        STAGE34_ITI_STARTING_S, STAGE34_ITI_FINAL_S,
-        consecutive_successes, consecutive_failures)
-
-
 def next_alternating_value(last_value, last_date_str, today_str, choices):
     """ Deterministic part of Stage 3's own "same value within a calendar day, alternates across
     days" persisted side choice -- callers handle the separate "very first time ever" random-pick
@@ -265,17 +290,18 @@ class QuiescenceStaircase(object):
     StageState) -- staircasing then begins the NEXT session and continues uninterrupted through
     Stage 2/3/4/5: +25ms per 20 consecutive successful initiations (no reset during that trial's
     quiescence hold), -25ms per 5 consecutive resets, floor QUIESCENCE_FLOOR_S, ceiling
-    QUIESCENCE_CEILING_S (100-250ms). Same consecutive-counter/streak-reset shape as
+    QUIESCENCE_CEILING_S (0.55s, IBL). Same consecutive-counter/streak-reset shape as
     ThresholdStaircase above.
-    A trial's actual quiescence duration is drawn fresh each trial as
-    np.random.exponential(current_s) clipped to [QUIESCENCE_FLOOR_S, QUIESCENCE_CEILING_S] --
-    current_s here is the distribution's scale parameter, not a fixed per-trial duration.
+    A trial's actual quiescence duration is drawn fresh each trial by draw_quiescence_hold(current_s)
+    -- current_s here is the distribution's scale parameter, not a fixed per-trial duration.
 
     Constructed fresh from persisted StageState each session, same round-trip convention as
     ThresholdStaircase. """
 
-    def __init__(self, current_s, consecutive_successes=0, consecutive_failures=0):
-        self.current_s = current_s
+    def __init__(self, current_s, consecutive_successes=0, consecutive_failures=0,
+                 ceiling_s=QUIESCENCE_CEILING_S):
+        self.ceiling_s = ceiling_s
+        self.current_s = min(current_s, ceiling_s)
         self.consecutive_successes = consecutive_successes
         self.consecutive_failures = consecutive_failures
 
@@ -286,7 +312,7 @@ class QuiescenceStaircase(object):
             self.consecutive_successes += 1
             self.consecutive_failures = 0
             if self.consecutive_successes >= QUIESCENCE_SUCCESSES_TO_STEP_UP:
-                self.current_s = min(QUIESCENCE_CEILING_S, self.current_s + QUIESCENCE_STEP_UP_S)
+                self.current_s = min(self.ceiling_s, self.current_s + QUIESCENCE_STEP_UP_S)
                 self.consecutive_successes = 0
         else:
             self.consecutive_failures += 1
@@ -296,19 +322,55 @@ class QuiescenceStaircase(object):
                 self.consecutive_failures = 0
 
 
-def stage3_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200):
-    """ training_protocol.md Stage 3 ("tone-side association", new stage) advancement -- the doc
-    doesn't specify this new stage's own numeric criterion yet, so this reuses Stage 4's values
-    (STAGE3_ACCURACY_GATE/STAGE3_ABORT_RATE_GATE, currently identical to STAGE4_*) as a flagged
-    placeholder pending real empirical tuning. Same shape/caller contract as stage4_gates_met()
-    below: caller tracks the "three consecutive sessions" requirement itself, accuracy_aos/
-    abort_rate must already exclude warmup trials (see stage3_tone_side_association.py's own
-    trial classification). """
-    return (accuracy_aos > STAGE3_ACCURACY_GATE and abort_rate < STAGE3_ABORT_RATE_GATE
-            and trial_count > trial_count_gate)
+class WarmupGate(object):
+    """ Stage 3-5's session-opening warm-up, gated on performance (spec B7, after Pinto et al.
+    2018: >= 85% correct and <= 10% side bias) instead of a random 20-40 trials. At least n_min
+    warm-up draws, then it ends as soon as the last `accuracy_window` responded warm-up trials are
+    >= accuracy correct AND the % correct on left and right trials (over the last `bias_window`
+    responded warm-up trials, both sides present) differ by <= max_bias; it ends anyway at n_max.
+    next_is_warmup() once per fresh (non-repeat) draw; record() after each responded warm-up trial.
+    exit_reason: None while running, then 'criterion' or 'cap'. """
+
+    def __init__(self, n_min=20, n_max=60, accuracy=0.85, max_bias=0.10, accuracy_window=10,
+                 bias_window=20):
+        self.n_min, self.n_max = n_min, n_max
+        self.accuracy, self.max_bias = accuracy, max_bias
+        self.accuracy_window, self.bias_window = accuracy_window, bias_window
+        self.n_drawn = 0
+        self.outcomes = []          # (side, correct), responded warm-up trials
+        self.exit_reason = None
+
+    def record(self, side, correct):
+        self.outcomes.append((side, bool(correct)))
+
+    def criterion_met(self):
+        recent = self.outcomes[-self.accuracy_window:]
+        if len(recent) < self.accuracy_window:
+            return False
+        if sum(c for _, c in recent) / float(len(recent)) < self.accuracy:
+            return False
+        window = self.outcomes[-self.bias_window:]
+        by_side = {s: [c for side, c in window if side == s] for s in ('L', 'R')}
+        if not by_side['L'] or not by_side['R']:
+            return False
+        acc = {s: sum(v) / float(len(v)) for s, v in by_side.items()}
+        return abs(acc['L'] - acc['R']) <= self.max_bias
+
+    def next_is_warmup(self):
+        if self.exit_reason is not None:
+            return False
+        if self.n_drawn >= self.n_max:
+            self.exit_reason = 'cap'
+        elif self.n_drawn >= self.n_min and self.criterion_met():
+            self.exit_reason = 'criterion'
+        if self.exit_reason is not None:
+            return False
+        self.n_drawn += 1
+        return True
 
 
-def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200):
+def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200,
+                     click_criterion_met=False):
     """ training_protocol.md Stage 4 (formerly "Stage 3" before a new Stage 3 -- tone-side
     association -- was inserted) advancement: >70% correct at gamma=+-1.0 (AOS), abort rate
     <20%, >200 trials/session. Unlike Stage 2's gate (stage2_simple_gates_met -- deliberately
@@ -318,9 +380,11 @@ def stage4_gates_met(accuracy_aos, abort_rate, trial_count, trial_count_gate=200
     list pattern as sessions_trial_count_history elsewhere), this only checks one session's own
     gates. accuracy_aos/abort_rate must already exclude warmup/repeat trials (see
     stage4_clicks_direction.py's own trial classification) -- this function trusts its inputs,
-    it doesn't re-derive them from raw trial data. """
+    it doesn't re-derive them from raw trial data.
+    Since 2026-11-11 (spec A7) the session must also meet the click-weight criterion
+    (choice_regression.py): accuracy alone can't show the animal is using the clicks. """
     return (accuracy_aos > STAGE4_ACCURACY_GATE and abort_rate < STAGE4_ABORT_RATE_GATE
-            and trial_count > trial_count_gate)
+            and trial_count > trial_count_gate and bool(click_criterion_met))
 
 
 def stage5_gates_met(response_threshold_fraction, quiescence_s, accuracy_aos, abort_rate,

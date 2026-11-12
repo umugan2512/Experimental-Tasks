@@ -40,6 +40,11 @@ BUDGET = {
     'stream_read_gap_max_ms': 50.0,       # rotary reader-thread loop
 }
 
+# Per-trial threshold VALs whose change means the stage re-set the rotary thresholds inside
+# stream.paused() before that trial -- a new module-clock epoch (Stage 2, Stage 5)
+_STREAM_PAUSE_KEYS = ('THRESHOLD_DEG', 'RESPONSE_THRESHOLD_DEG')
+_EPOCH_SETTLE_S = 1.0     # skip each epoch's first second (its offset re-anchor transient)
+
 _RESPONSE_STATES = ('WheelPeriod', 'WheelDotPeriod')
 _OUTCOME_STATES = ('Reward', 'RewardL', 'RewardR', 'NoRewardL', 'NoRewardR', 'ErrorConsumption')
 
@@ -212,28 +217,62 @@ def audit(folder):
 
     offsets = []
     last_t = None
+    epoch_starts = []     # host t where a stream pause began a new module-clock epoch
+    trial_end_t = None    # host t of the previous trial's END-TRIAL
+    applied = {}          # threshold VAL -> value last seen
     for r in rows:
-        if r[0] == 'VAL' and len(r) > 5:
+        if r[0] == 'END-TRIAL':
+            trial_end_t = last_t
+        elif r[0] == 'VAL' and len(r) > 5:
             if r[4] == 'WHEEL_POS':
                 last_t = _f(r[5].split(',')[0])
             elif r[4] == 'WHEEL_CLOCK_OFFSET' and last_t is not None and last_t > 5.0:
                 offsets.append((last_t, _f(r[5])))
-    if len(offsets) > 10:
-        # Detrended: the module and PC crystals differ by a steady few tens of ppm, so the offset
-        # ramps linearly over a session (82 -> 95 ms over 10 min in 20261027-102843, 21.5 ppm).
-        # That ramp is harmless -- samples are placed by module time relative to each trial's own
+            elif r[4] in _STREAM_PAUSE_KEYS:
+                # a changed threshold was set inside stream.paused(), between the previous
+                # trial's end and this trial's RUN
+                if r[4] in applied and r[5] != applied[r[4]] and trial_end_t is not None:
+                    epoch_starts.append(trial_end_t)
+                applied[r[4]] = r[5]
+    # Split at stream epochs: every pause restarts the module clock, and RotaryStream re-anchors
+    # the new epoch on its first message, whose latency is above the minimum. The new epoch's
+    # module times come out a few ms late and the offset drops by the same amount at once, so
+    # host-mapped times (module + offset) stay right. One line through the whole session reads
+    # that step plus the drift ramp between steps as jitter: 20261104-165242 failed at 5.2 ms from
+    # three 4-5 ms steps, at exactly its three threshold-step trials.
+    segments = [[]]
+    bounds = sorted(epoch_starts)
+    for t, o in offsets:
+        while bounds and t >= bounds[0]:
+            bounds.pop(0)
+            segments.append([])
+        segments[-1].append((t, o))
+    resid = []
+    slope_longest = None
+    longest = 0
+    for seg in segments:
+        seg = [(t, o) for t, o in seg if t >= seg[0][0] + _EPOCH_SETTLE_S] if seg else []
+        if len(seg) < 10:
+            continue
+        # Detrended: the module and PC crystals differ by a steady few tens of ppm, so the
+        # offset ramps linearly (82 -> 95 ms over 10 min in 20261027-102843, 21.5 ppm). That
+        # ramp is harmless -- samples are placed by module time relative to each trial's own
         # marker -- and undetrended it failed every session longer than ~4 min. Jitter around
         # the line is what would misplace samples.
-        n = len(offsets)
-        mx = sum(t for t, _ in offsets) / n
-        my = sum(o for _, o in offsets) / n
-        sxx = sum((t - mx) ** 2 for t, _ in offsets)
-        slope = sum((t - mx) * (o - my) for t, o in offsets) / sxx if sxx > 0 else 0.0
-        resid = [o - (my + slope * (t - mx)) for t, o in offsets]
+        n = len(seg)
+        mx = sum(t for t, _ in seg) / n
+        my = sum(o for _, o in seg) / n
+        sxx = sum((t - mx) ** 2 for t, _ in seg)
+        slope = sum((t - mx) * (o - my) for t, o in seg) / sxx if sxx > 0 else 0.0
+        resid.extend(o - (my + slope * (t - mx)) for t, o in seg)
+        if seg[-1][0] - seg[0][0] > longest:
+            longest, slope_longest = seg[-1][0] - seg[0][0], slope
+    if len(resid) > 10:
         jitter = (_pct(resid, .95) - _pct(resid, .05)) * 1e3
         add('wheel module->PC clock map stable (detrended p95-p5 < {0:.0f}ms)'.format(
             BUDGET['offset_jitter_max_ms']), jitter < BUDGET['offset_jitter_max_ms'],
-            '{0:.2f}ms around a {1:+.1f}ppm drift'.format(jitter, slope * 1e6))
+            '{0:.2f}ms around a {1:+.1f}ppm drift, {2} stream epoch(s)'.format(
+                jitter, slope_longest * 1e6, len(segments)))
     else:
         add('wheel clock map stability', None, 'too few WHEEL_CLOCK_OFFSET rows')
 
@@ -367,6 +406,25 @@ def audit(folder):
                     'INFO', 'max {0:.0f}ms, median {1:.0f}ms; > {2:.0f}ms on {3} trial(s){4}'.format(
                         max(xs), statistics.median(xs), BUDGET['stream_read_gap_max_ms'], len(over),
                         ' ({0})'.format(', '.join(str(i) for i in over[:10])) if over else '')))
+    # J2 (crossing -> dot offset): the offset the render loop actually painted vs the drawn delay,
+    # per outcome (since 2026-11-11 DOT_CLEAR_TIME, and DOT_DISAPPEAR_JITTER_S in every stage).
+    j2 = {}
+    for t in trials:
+        req, frz, clr = (_val(t, 'DOT_DISAPPEAR_JITTER_S'), _val(t, 'DOT_FREEZE_TIME'),
+                         _val(t, 'DOT_CLEAR_TIME'))
+        if None not in (req, frz, clr):
+            last = {k: (t['vals'].get(k) or [None])[-1] for k in ('CORRECT', 'OUTCOME')}
+            outcome = ('rewarded' if last['CORRECT'] in ('True', '1') or last['OUTCOME'] == 'Rewarded'
+                       else 'unrewarded')
+            j2.setdefault(outcome, []).append((clr - frz, req))
+    if j2:
+        pairs = [p for ps in j2.values() for p in ps]
+        late = [m - r for m, r in pairs]
+        add('dot offset painted within 50ms of its drawn J2 delay', all(-0.005 <= d < 0.05 for d in late),
+            'measured - drawn: max {0:.1f}ms, median {1:.1f}ms; measured J2 {2}'.format(
+                max(late) * 1e3, statistics.median(late) * 1e3, ', '.join(
+                    '{0} {1:.2f}-{2:.2f}s (n={3})'.format(k, min(m for m, _ in v), max(m for m, _ in v), len(v))
+                    for k, v in sorted(j2.items()))))
     gc_ms = [x for x in (_val(t, 'GC_MAX_MS') for t in trials) if x is not None]
     if gc_ms:   # since 2026-11-03: full collections held off for the session (_hold_full_gc)
         out.append(('longest garbage collection per trial (holds every thread)', 'INFO',

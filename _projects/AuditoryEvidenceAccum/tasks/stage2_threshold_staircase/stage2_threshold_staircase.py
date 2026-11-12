@@ -8,8 +8,8 @@ introduces errors/clicks, so nothing else is still changing when clicks are intr
 concurrent processes: (a) threshold staircase, +10% per 20 consecutive successes / -10% per 5
 consecutive failures, ceiling at the final threshold, floor at Stage 2's 20% start (a withheld turn
 counts as a failure since 2026-11-02, so an animal stuck on one side gets an easier threshold; and
-since 2026-11-03 the first session of a day starts at half the threshold, min 10deg, when >= 20% of
-the previous day's turns were withheld); (b) ITI +0.1s/qualifying-session to a 1.5s
+since 2026-11-03 the first session of a day starts at half the threshold when >= 20% of the previous
+day's turns were withheld; since 2026-11-05 every day after the first starts at >= 12.5deg); (b) ITI +0.1s/qualifying-session to a 1.5s
 ceiling; (c) spout retraction ~2-3mm/qualifying-session (physical, manual -- this script can only
 remind/log the schedule, there's no spout actuator to command); (d) side-bias management -- track
 the direction ratio over the last ~40 trials, withhold reward on the over-used side if it leaves
@@ -71,7 +71,7 @@ import staircase
 import session_state
 import session_struct_export
 import session_csv_parser
-from direction_tracker import DirectionRatioTracker
+from direction_tracker import DirectionRatioTracker, DIRECTION_RATIO_SIGMA
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
 from trial_render import run_trial_render_loop, register_trial_timing
@@ -138,8 +138,8 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 # --- stage parameters (training_protocol.md Part 4, Stage 2) -----------------------------------------
 
 VAR_MAX_TRIALS = 400                # hard-ceiling SAFETY backstop only, above both real caps
-                                     # below (VAR_TRIAL_COUNT_ADVANCE trials / VAR_SESSION_WATER_
-                                     # CAP_UL) -- should essentially never be the thing that
+                                     # below (VAR_TRIAL_CAP trials / 30 minutes) -- should
+                                     # essentially never be the thing that
                                      # actually ends a session.
 # If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
 # registered) and this one is starting soon enough to count as its own continuation (same
@@ -169,18 +169,21 @@ VAR_TRIAL_COUNT_ADVANCE = 100       # The QUALIFYING threshold only (lowered fro
                                      # VAR_TRIAL_CAP below) -- those two numbers used to share
                                      # one variable/value, but per explicit instruction they're
                                      # now independent.
-VAR_TRIAL_CAP = 250                 # The session's own hard trial-count cap (one of three --
-                                     # see below), checked against every ATTEMPTED trial, not
-                                     # the qualifying count above.
-VAR_DAILY_WATER_CAP_UL = 1500.0     # CONSUMED per animal per calendar DAY, across all of its
-                                     # sessions (session_csv_parser.water_consumed_today()).
-                                     # Per explicit instruction: three caps on the session --
-                                     # VAR_TRIAL_CAP trials, 1.5mL consumed, or 30 minutes
-                                     # elapsed -- whichever comes first.
+VAR_TRIAL_CAP = 300                 # The session's own hard trial-count cap (one of two, with
+                                     # 30 minutes elapsed -- whichever comes first), checked
+                                     # against every ATTEMPTED trial, not the qualifying count
+                                     # above. (The 1.5mL daily water cap was removed 2026-11-06,
+                                     # per explicit instruction; consumed water is still logged.)
 VAR_THRESHOLD_FLOOR_FRACTION = 0.20 # step-downs stop here (Stage 2's own starting point)
 VAR_BIAS_DAY_WITHHELD_TRIGGER = 0.20  # the first session of a day starts at half the threshold if
                                       # >= this fraction of the previous day's turns were withheld
-VAR_BIAS_DAY_MIN_THRESHOLD_DEG = 10.0 # ...but not below this (staircase.bias_day_start_fraction())
+VAR_DAY_START_MIN_THRESHOLD_DEG = 12.5  # ...and every day after the first Stage 2 day starts at
+                                        # >= this, raised if the staircase ended below it
+                                        # (staircase.bias_day_start_fraction()). The within-session
+                                        # floor is still VAR_THRESHOLD_FLOOR_FRACTION.
+VAR_DAY_START_RULE_DAYS = 3         # halving and the minimum above apply only on a subject's first
+                                     # 3 Stage 2 days (per explicit instruction); after that a day
+                                     # starts where the previous one ended
 VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
@@ -195,8 +198,8 @@ VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1    # J1/J2 unchanged from Stage 1 -- never change during training
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2
-VAR_DOT_DISAPPEAR_MIN_S = 0.4
-VAR_DOT_DISAPPEAR_MAX_S = 0.9
+VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S   # J2, shared by all stages (spec A5)
+VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S
 
 VAR_DOT_EDGE_FRACTION = 0.9
 VAR_RENDER_HZ = 30
@@ -252,26 +255,51 @@ state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
                                       # first -- seeds the debiasing window so withholding doesn't
                                       # restart from an empty window every session
     'bias_day_checked': None,        # 'YYYYMMDD' of the last day the start-of-day halving ran
+    'direction_sigma': DIRECTION_RATIO_SIGMA,   # grows per day from Stage 2 day 4 (see below)
 })
 
 # A side-biased day (many withheld turns) means the threshold was too hard for the animal to keep
 # both sides going: the first Stage 2 session of the next day starts at half of it. The check runs
 # once per day ('bias_day_checked'), and a halving is saved right away, so a restart after a
 # Stop, Kill or crash continues from the halved value instead of halving again or undoing it.
-# Registered as session-level VALs once the Bpod session exists.
+# The same check holds the day's start at >= VAR_DAY_START_MIN_THRESHOLD_DEG (not on the first
+# Stage 2 day, which keeps Stage 1's hand-off). Both only on the subject's first
+# VAR_DAY_START_RULE_DAYS Stage 2 days. From day VAR_DAY_START_RULE_DAYS + 1 on (per explicit
+# instruction, 2026-11-09) a day is never halved: it starts one step above the previous day's PEAK
+# threshold (staircase.later_day_start_fraction()), and the direction ratio's sigma grows one step
+# (staircase.grow_direction_sigma()). Registered as session-level VALs once the Bpod session exists.
 _today_str = os.path.basename(os.path.abspath(os.getcwd()))[:8]
 prev_day = None
+stage2_day_number = None
+prev_day_max_threshold_deg = None
 threshold_before_halving_fraction = state.get('threshold_fraction')
 threshold_bias_halved = False
+threshold_day_start_raised = False
+threshold_day_start_stepped = False
+direction_sigma_before = state.get('direction_sigma')
 if state.get('bias_day_checked') != _today_str:
     prev_day = session_csv_parser.previous_day_withheld(
         VAR_PROJECT_DIR, VAR_SUBJECT_ID, _today_str, 'stage2_threshold_staircase')
-    _halved = staircase.bias_day_start_fraction(
-        threshold_before_halving_fraction, prev_day[1] / float(prev_day[2]) if prev_day else None,
-        VAR_BIAS_DAY_WITHHELD_TRIGGER, VAR_BIAS_DAY_MIN_THRESHOLD_DEG / VAR_THRESHOLD_FINAL_DEG)
-    if _halved < threshold_before_halving_fraction:
-        threshold_bias_halved = True
-        state.set('threshold_fraction', _halved)
+    stage2_day_number = len(session_csv_parser.protocol_days_before(
+        VAR_PROJECT_DIR, VAR_SUBJECT_ID, _today_str, 'stage2_threshold_staircase')) + 1
+    _start = threshold_before_halving_fraction
+    if prev_day and stage2_day_number <= VAR_DAY_START_RULE_DAYS:
+        _start = staircase.bias_day_start_fraction(
+            threshold_before_halving_fraction, prev_day[1] / float(prev_day[2]),
+            VAR_BIAS_DAY_WITHHELD_TRIGGER, VAR_DAY_START_MIN_THRESHOLD_DEG / VAR_THRESHOLD_FINAL_DEG)
+        threshold_bias_halved = _start < threshold_before_halving_fraction
+        threshold_day_start_raised = _start > threshold_before_halving_fraction
+    elif prev_day:
+        prev_day_max_threshold_deg = session_csv_parser.day_max_threshold_deg(
+            VAR_PROJECT_DIR, VAR_SUBJECT_ID, prev_day[0], 'stage2_threshold_staircase')
+        _start = staircase.later_day_start_fraction(
+            threshold_before_halving_fraction,
+            None if prev_day_max_threshold_deg is None
+            else prev_day_max_threshold_deg / VAR_THRESHOLD_FINAL_DEG)
+        threshold_day_start_stepped = _start != threshold_before_halving_fraction
+        state.set('direction_sigma', staircase.grow_direction_sigma(direction_sigma_before))
+    if _start != threshold_before_halving_fraction:
+        state.set('threshold_fraction', _start)
         state.set('consecutive_successes', 0)
         state.set('consecutive_failures', 0)
     state.set('bias_day_checked', _today_str)
@@ -292,12 +320,14 @@ if quiescence_unlocked:
     quiescence_obj = staircase.QuiescenceStaircase(
         current_s=state.get('quiescence_s'),
         consecutive_successes=state.get('quiescence_consecutive_successes'),
-        consecutive_failures=state.get('quiescence_consecutive_failures'))
+        consecutive_failures=state.get('quiescence_consecutive_failures'),
+        ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
 session_saw_threshold_step_up = False   # set True the first time this session's threshold
                                          # staircase steps up at least once (see record_outcome call
                                          # below) -- drives the one-way unlock above.
 
-direction_tracker = DirectionRatioTracker(history=state.get('recent_directions'))
+direction_tracker = DirectionRatioTracker(history=state.get('recent_directions'),
+                                          sigma=state.get('direction_sigma'))
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -324,16 +354,34 @@ my_bpod.register_value('DIRECTION_HISTORY_SEEDED', direction_tracker.seeded_tria
 my_bpod.register_value('PREV_DAY_DATE', prev_day[0] if prev_day else '')
 my_bpod.register_value('PREV_DAY_WITHHELD_FRACTION',
                        '{0:.4f}'.format(prev_day[1] / float(prev_day[2])) if prev_day else '')
+my_bpod.register_value('STAGE2_DAY_NUMBER', stage2_day_number if stage2_day_number else '')
 my_bpod.register_value('THRESHOLD_BIAS_HALVED', int(threshold_bias_halved))
+my_bpod.register_value('THRESHOLD_DAY_START_RAISED', int(threshold_day_start_raised))
 my_bpod.register_value('THRESHOLD_START_BEFORE_HALVING_DEG',
-                       threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG)
+                       round(threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, 3))
+my_bpod.register_value('PREV_DAY_MAX_THRESHOLD_DEG',
+                       prev_day_max_threshold_deg if prev_day_max_threshold_deg is not None else '')
+my_bpod.register_value('THRESHOLD_DAY_START_STEPPED', int(threshold_day_start_stepped))
+my_bpod.register_value('DIRECTION_SIGMA', state.get('direction_sigma'))
 if prev_day:
+    if threshold_bias_halved or threshold_day_start_raised:
+        _start_note = '{0:.1f} -> {1:.1f}deg ({2}, day-start min {3:.1f}deg)'.format(
+            threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, cur_threshold_deg_at_start,
+            'halved' if threshold_bias_halved else 'raised to the minimum',
+            VAR_DAY_START_MIN_THRESHOLD_DEG)
+    elif stage2_day_number > VAR_DAY_START_RULE_DAYS:
+        _start_note = ('{0:.1f} -> {1:.1f}deg (Stage 2 day {2}: one step above yesterday\'s peak '
+                       '{3}), direction sigma {4:g} -> {5:g}').format(
+            threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG, cur_threshold_deg_at_start,
+            stage2_day_number,
+            '{0:.1f}deg'.format(prev_day_max_threshold_deg)
+            if prev_day_max_threshold_deg is not None else 'unknown',
+            direction_sigma_before, state.get('direction_sigma'))
+    else:
+        _start_note = 'unchanged'
     print("Previous Stage 2 day ({0}): {1}/{2} turns withheld ({3:.0%}) -- threshold {4}".format(
-        prev_day[0], prev_day[1], prev_day[2], prev_day[1] / float(prev_day[2]),
-        '{0:.1f} -> {1:.1f}deg (halved, min {2:.0f}deg)'.format(
-            threshold_before_halving_fraction * VAR_THRESHOLD_FINAL_DEG,
-            cur_threshold_deg_at_start, VAR_BIAS_DAY_MIN_THRESHOLD_DEG)
-        if threshold_bias_halved else 'unchanged'), flush=True)
+        prev_day[0], prev_day[1], prev_day[2], prev_day[1] / float(prev_day[2]), _start_note),
+        flush=True)
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.
@@ -383,6 +431,11 @@ bench_plots = WheelShapingPlots(
     stage=2, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG,
                           'iti_s': cur_iti_s},
+    session_status={'stage2_day': stage2_day_number, 'prev_day_peak_deg': prev_day_max_threshold_deg,
+                    'direction_sigma': state.get('direction_sigma'),
+                    'day_start_rule': ', '.join(name for name, on in (
+                        ('halved', threshold_bias_halved), ('raised', threshold_day_start_raised),
+                        ('stepped', threshold_day_start_stepped)) if on) or 'unchanged'},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -391,7 +444,7 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-# The water cap is per DAY: what this animal already consumed in today's earlier sessions counts.
+# Logged only (no cap since 2026-11-06): what this animal already consumed in today's earlier sessions.
 water_earlier_today_ul, _water_earlier_sessions = session_csv_parser.water_consumed_today(
     VAR_PROJECT_DIR, VAR_SUBJECT_ID, os.path.basename(os.path.abspath(os.getcwd()))[:8],
     exclude_session=os.path.basename(os.path.abspath(os.getcwd())))
@@ -400,31 +453,23 @@ print("Water consumed earlier today: {0:.0f}uL in {1} session(s){2}".format(
     water_earlier_today_ul, len(_water_earlier_sessions),
     ' ({0})'.format(', '.join(_water_earlier_sessions)) if _water_earlier_sessions else ''),
     flush=True)
-print("Starting up to {0} trials, capped at {1} attempted trials, {2:.1f}mL consumed today, or "
-      "{3:.0f}min elapsed -- whichever first ({4} genuine-movement trials targeted for "
-      "advancement; current threshold {5:.1f}deg = {6:.0%} of final, ITI {7:.2f}s)".format(
-          VAR_MAX_TRIALS, VAR_TRIAL_CAP, VAR_DAILY_WATER_CAP_UL / 1000.0,
+print("Starting up to {0} trials, capped at {1} attempted trials or "
+      "{2:.0f}min elapsed -- whichever first ({3} genuine-movement trials targeted for "
+      "advancement; current threshold {4:.1f}deg = {5:.0%} of final, ITI {6:.2f}s)".format(
+          VAR_MAX_TRIALS, VAR_TRIAL_CAP,
           VAR_SESSION_DURATION_CAP_S / 60.0, VAR_TRIAL_COUNT_ADVANCE,
           staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG, staircase_obj.current_fraction,
           cur_iti_s), flush=True)
 
 session_trial_count = 0
 session_reward_ul_total = 0.0
-water = ConsumedWaterTracker(VAR_REWARD_UL)   # the water cap counts CONSUMED water
+water = ConsumedWaterTracker(VAR_REWARD_UL)   # CONSUMED water, logged per trial
 session_start_time = host_clock.now()
 session_end_reason = None
-skipped_for_daily_cap = False   # ended before trial 1: no session happened
 
 applied_threshold_deg = cur_threshold_deg_at_start   # what the rotary is currently armed with
 
 for trial in range(1, VAR_MAX_TRIALS + 1):
-    if trial == 1 and water_earlier_today_ul >= VAR_DAILY_WATER_CAP_UL:
-        session_end_reason = 'water_cap'
-        skipped_for_daily_cap = True
-        print("Daily water cap already reached ({0:.0f}uL of {1:.0f}uL consumed today) -- ending "
-              "before the first trial.".format(water_earlier_today_ul, VAR_DAILY_WATER_CAP_UL),
-              flush=True)
-        break
     try:
         cur_threshold_deg = staircase_obj.current_fraction * VAR_THRESHOLD_FINAL_DEG
         if cur_threshold_deg != applied_threshold_deg:
@@ -435,10 +480,11 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             applied_threshold_deg = cur_threshold_deg
 
         if quiescence_unlocked:
-            quiescence_duration_this_trial = float(np.clip(
-                np.random.exponential(quiescence_obj.current_s),
-                staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+            quiescence_scale_this_trial = quiescence_obj.current_s
+            quiescence_duration_this_trial = staircase.draw_quiescence_hold(
+                quiescence_scale_this_trial, np.random)
         else:
+            quiescence_scale_this_trial = None
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
         # J1 lives INSIDE the quiescence requirement (see stage1_wheel_shaping.py): the dot may only
         # appear after quiescence, and the whole trial is one Bpod machine (_shared/trial_render.py).
@@ -595,8 +641,11 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         choice_events = my_bpod.session.current_trial.get_all_timestamps_by_event()
         runner.register('SM_RUN_TIME', send_t)
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
-        runner.register('THRESHOLD_DEG', cur_threshold_deg)
+        if quiescence_scale_this_trial is not None:
+            runner.register('QUIESCENCE_SCALE_S', quiescence_scale_this_trial)
+        runner.register('THRESHOLD_DEG', round(cur_threshold_deg, 3))
         runner.register('DOT_ONSET_JITTER_S', dot_onset_jitter_s)
+        runner.register('DOT_DISAPPEAR_JITTER_S', disappear_delay_s)
         register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_return_t,
                               visited, send_t)
 
@@ -621,14 +670,19 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         # is no movement-threshold staircase outcome either way -- but it IS a failed hold.
         # The staircase itself counts only a REWARDED turn as a success (2026-11-02): a withheld
         # turn is a failure, so 5 in a row step the threshold down. UM001 20261102-161142 sat at
-        # the 35deg ceiling for all 250 trials while 65 of its turns were withheld.
+        # the 35deg ceiling for all 250 trials while 65 of its turns were withheld. NoMovement is
+        # neutral since 2026-11-05 (record_neutral(): blocks a step-up, never steps down) --
+        # disengaged skips drove part of UM001 20261104's slide to the floor.
         if moved:
             session_trial_count += 1
         if rewarded:
             session_reward_ul_total += VAR_REWARD_UL
         if not early:
             fraction_before_step = staircase_obj.current_fraction
-            staircase_obj.record_outcome(success=rewarded)
+            if outcome == 'NoMovement':
+                staircase_obj.record_neutral()
+            else:
+                staircase_obj.record_outcome(success=rewarded)
             if staircase_obj.current_fraction > fraction_before_step:
                 session_saw_threshold_step_up = True
         if quiescence_unlocked:
@@ -660,18 +714,18 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         bench_plots.add_trial(side if side is not None else 'R', magnitude_deg, cur_threshold_deg,
                                'Abort' if early else outcome, iti_s=cur_iti_s,
                                direction_ratio=direction_tracker.right_fraction(),
-                               lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs)
+                               lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
+                               quiescence_s=quiescence_scale_this_trial,
+                               day_water_ul=water_earlier_today_ul + water.consumed_ul)
 
         # Deliberate session cap, per explicit instruction: stop at VAR_TRIAL_CAP ATTEMPTED
-        # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold),
-        # 1.5mL CONSUMED today (licked after delivery, all of the day's sessions), or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400)
+        # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold)
+        # or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400)
         # above is only a further-out safety backstop, not the real target. Checked at trial end
         # (not trial start) so the trial that actually crosses a cap still completes and gets
         # logged.
         if trial >= VAR_TRIAL_CAP:
             session_end_reason = 'trial_count_cap'
-        elif water_earlier_today_ul + water.consumed_ul >= VAR_DAILY_WATER_CAP_UL:
-            session_end_reason = 'water_cap'
         elif (host_clock.now() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
             session_end_reason = 'duration_cap_30min'
         if session_end_reason is not None:
@@ -729,8 +783,7 @@ if quiescence_unlocked_at_session_start:   # i.e. quiescence_obj was actually bu
     state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
 
 history = state.get('sessions_trial_count_history')
-if not skipped_for_daily_cap:   # a session that never ran is not a non-qualifying session
-    history.append(cleared_this_session)
+history.append(cleared_this_session)
 state.set('sessions_trial_count_history', history[-2:])
 
 state.save()

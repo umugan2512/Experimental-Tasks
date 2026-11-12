@@ -6,7 +6,7 @@ association -- was inserted, pushing this and the old Stage 4 each up by one) --
 direction".
 
 Aim: the click-side association -- the first moment clicks and direction both appear together.
-0.25s Poisson clicks at gamma=+-1.0 (all clicks on the CLICK side, i.e. click_train_v2's 'AOS'
+0.35s Poisson clicks at gamma=+-1.0 (all clicks on the CLICK side, i.e. click_train_v2's 'AOS'
 grid entry) -> a short fixed 100-200ms cue-to-go delay (Tag A) -> LED + dot (centred, appears after
 a further J1 jitter) -> turn AWAY FROM the click side for reward (ITI 1.5s), toward it for no
 reward (ITI 4.0s) -- confirmed on real hardware that this rig's rotary encoder requires the
@@ -17,7 +17,7 @@ NOT restaircase here -- both resume at Stage 5. An in-trial wheel-excursion thre
 for the FIRST time, monitored through CuePeriod+DelayPeriod (mirrors
 Tests/tasks/full_protocol_lookback_test/full_protocol_lookback_test.py's existing wheel-abort
 pattern exactly, including its two-state-machine/thread-inversion structure) -- crossing it aborts
-the trial, which is then automatically RE-OFFERED (same side, TRIAL_TYPE='repeat', after a 1-2s
+the trial, which is then automatically RE-OFFERED (same side, TRIAL_TYPE='repeat', after a 4.0s
 timeout) rather than simply dropped, per SS3.3.
 
 Click level starts ~6dB below final for this subject's first VAR_CLICK_ATTENUATION_SESSIONS
@@ -29,13 +29,14 @@ procedure (derive_intrial_threshold.py) only runs at the END of Stage 5 -- repla
 'in_trial_threshold_deg' once that has run at least once for this subject.
 
 Every session opens with a warm-up block (20-40 trials, drawn fresh each session, TRIAL_TYPE=
-'warmup') excluded from the accuracy/abort-rate stats that feed advancement. After an error, the
-SAME side is re-presented with high probability (debiasing.next_side_after_error(), a small
-literal implementation of the doc's own rule -- deliberately NOT trial_scheduler.py's more
-elaborate lookback machinery, which implements a different policy). A session ends at the first
+'warmup') excluded from the accuracy/abort-rate stats that feed advancement. Sides come from Hu
+et al. (2009)'s debiaser (debiasing.HuDebiaser, spec B2, 2026-11-11), which replaced "after an error
+re-present the same side with p=0.80" -- that rule paid a lose-shift animal 62% without listening.
+An abort still re-offers the same side (TRIAL_TYPE='repeat'). A session ends at the first
 of: the 90-minute cap, 3 continuous minutes with no trial initiated, 20 consecutive aborts, or
 sub-chance accuracy across 3 consecutive 20-trial blocks (SS3.2) -- SESSION_END_REASON records
-which. Advance after three consecutive sessions meeting staircase.stage4_gates_met() (>70% correct
+which. Advance after three consecutive sessions meeting staircase.stage4_gates_met() (the
+click-weight criterion of choice_regression.py since 2026-11-11, plus >70% correct
 at gamma=+-1.0, abort rate <20%, >200 main trials) -- unlike Stage 2's gate, this covers the WHOLE
 doc-specified criterion, no deferred statistical test.
 
@@ -60,6 +61,7 @@ convention as the rest of the codebase, for consistency; its CSV-flush-per-trial
 action here -- pybpodapi's own Session.write() already flushes on every row (confirmed by reading
 pybpod/base/pybpod-api/pybpodapi/session.py), so no submodule change was needed.
 """
+import itertools
 import os
 import random
 import subprocess
@@ -83,6 +85,7 @@ import session_state
 import session_struct_export
 import session_csv_parser
 import debiasing
+import choice_regression
 import click_train_v2 as click_train
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
@@ -218,17 +221,9 @@ VAR_TRIAL_COUNT_ADVANCE = 100        # lowered from the doc's original 200, per 
                                       # instruction. (MAIN trials only -- warmup/
                                       # repeat excluded, see session_trial_count below)
 
-# Stimulus duration is no longer a fixed VAR_ constant -- it's now a within-session
-# staircase.BoundedStaircase (see stim_duration_staircase below, constructed once persisted state
-# is loaded, SHARED with Stage 3 -- one continuous value, not reset across the stage boundary),
-# starting from the doc's own original 0.25s and growing/shrinking per trial. Its per-trial
-# CURRENT value overrides click_train_v2's own 2.0s module default via its additive
-# stim_duration_s parameter (generation/ISI math itself untouched), same mechanism the old fixed
-# constant used.
+VAR_STIM_DURATION_S = staircase.CUE_DURATION_S   # fixed 0.35s cue through Stages 3-5 (spec A6/B3)
 VAR_DELAY_DURATION_MIN_S = 0.1       # Tag A: cue-to-go gap, 100-200ms FIXED range at Stage 4
 VAR_DELAY_DURATION_MAX_S = 0.2       # (staircased 0-750ms only from Stage 7 onward, not built here)
-VAR_ABORT_TIMEOUT_MIN_S = 1.0        # SS3.3: abort re-offer timeout before the same trial repeats
-VAR_ABORT_TIMEOUT_MAX_S = 2.0
 
 VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10deg -- PLACEHOLDER
                                       # only. Reused from full_protocol_lookback_test.py's own
@@ -237,12 +232,13 @@ VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER = 2.5 * VAR_STEADY_THRESHOLD_DEG   # 10d
                                       # END of Stage 5. Replace the persisted 'in_trial_threshold_deg'
                                       # once that has run at least once for this subject.
 
-# Correct-trial ITI is also no longer a fixed VAR_ constant -- see iti_staircase below, the SAME
-# persisted 'iti_s' value Stage 1/2 already grow toward their own 1.5s ceiling and Stage 3 shares,
-# now continued as a within-session staircase instead of a once-per-session step.
-VAR_INCORRECT_ITI_S = 4.0            # error-trial ITI -- longer, per the doc's epoch table. NOT
-                                      # staircased -- only the one continuous ITI dimension
-                                      # Stage 1/2 already established gets this treatment.
+VAR_ITI_S = 1.5                      # fixed correct-trial ITI from Stage 3 on (spec A2):
+                                      # Stage 2's final 'iti_s'. No staircase after Stage 2.
+# An abort (wheel moved during cue, delay or J1) costs the same time as an error (spec A4):
+# AbortITI lasts VAR_INCORRECT_ITI_S. With a cheaper abort, breaking fixation would be the cheaper
+# exit from a trial the animal expects to get wrong -- concentrated at low |gamma| once the cue has
+# wrong-side clicks, which biases the psychometric and accumulator fits.
+VAR_INCORRECT_ITI_S = 4.0            # fixed error-trial ITI, per the doc's epoch table
 VAR_CONSUMPTION_WINDOW_S = 3.0       # not doc-specified for this stage -- same flagged/tunable
                                       # placeholder convention as every other unspecified duration
                                       # in this codebase; matches full_protocol_lookback_test.py's
@@ -259,15 +255,17 @@ VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1     # J1 -- unchanged from every earlier stage
 VAR_DOT_ONSET_JITTER_MAX_S = 0.2     # (now a native, abort-guarded DotOnsetDelay state at the
                                      # end of cue_sma -- see the trial loop)
-VAR_DOT_DISAPPEAR_MIN_S = 0.4        # J2 -- unchanged
-VAR_DOT_DISAPPEAR_MAX_S = 0.9
+VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S   # J2, shared by all stages (spec A5)
+VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S
 
 VAR_DOT_EDGE_FRACTION = 0.9
 VAR_RENDER_HZ = 30
 
 VAR_CLICK_ATTENUATION_DB = 6.0       # doc: "start ~6dB below final"
-VAR_CLICK_ATTENUATION_SESSIONS = 2   # doc: "for 2-3 sessions" -- picked 2, tunable; decremented
-                                      # once per session RUN (not per qualifying session)
+VAR_CLICK_ATTENUATION_SESSIONS = 2   # doc: "for 2-3 sessions" -- picked 2, tunable. Counted
+                                      # down only by a full session (>= VAR_TRIAL_COUNT_ADVANCE
+                                      # responded main trials), so a crashed or stopped-early
+                                      # session doesn't use one up (spec B9)
 
 VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same "pick a
                                       # reasonable default" convention as other unset parameters
@@ -278,8 +276,10 @@ VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunab
                                       # multiplier ON TOP of this calibrated base amplitude during
                                       # the warmup-attenuation sessions, not a substitute for it.
 
-VAR_WARMUP_TRIAL_MIN = 20            # doc SS3.1 (Tag D): 20-40 trials at the easiest level,
-VAR_WARMUP_TRIAL_MAX = 40            # drawn fresh each session, excluded from advancement stats
+VAR_WARMUP_TRIAL_MIN = 20            # warm-up (spec B7, Pinto et al. 2018): at least 20 trials,
+VAR_WARMUP_TRIAL_MAX = 60            # then until the last 10 are >= 85% correct with <= 10 points
+VAR_WARMUP_EXIT_ACCURACY = 0.85      # of L/R accuracy difference, at most 60. Excluded from the
+VAR_WARMUP_EXIT_MAX_BIAS = 0.10      # advancement stats; WARMUP_EXIT_REASON says how it ended.
 
 VAR_SESSION_CAP_S = 45 * 60          # 45-minute cap, per explicit instruction (was the doc SS3.2/
                                       # Tag E 90-minute value)
@@ -318,6 +318,12 @@ SOFTCODE_PUNISH = 3                  # sent by AbortPunish/ErrorPunish's entry: 
 
 VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (abort / incorrect
                                       # choice) -- the dot alone is the go cue, see WheelDotPeriod.
+# ErrorConsumption -> ErrorPunish: the error flash comes 0.7-1.0s after the error crossing, drawn per
+# trial independently of J2 and never ended by a lick (spec B8). It used to come at the first lick
+# or 0.5s, so it was locked to lick onset, overlapped most of the J2 window, and could hide the dot
+# offset on error trials only. 0.7s is 100ms after the latest possible dot offset (0.6s).
+VAR_ERROR_FLASH_DELAY_MIN_S = 0.7
+VAR_ERROR_FLASH_DELAY_MAX_S = 1.0
 VAR_ERROR_FLASH_S = 0.35             # punishment flash duration (LED + full-white screen), on
                                       # WheelAbort and the incorrect-choice path only.
 
@@ -333,23 +339,17 @@ VAR_CAMERA_SNIPPET_S = 1.0
 # --- persisted cross-session state (same file as Stage 1/2) ------------------------------------------
 
 state = session_state.StageState(VAR_PROJECT_DIR, VAR_SUBJECT_ID, defaults={
-    'threshold_fraction': 1.0,        # Stage 2's own ceiling, in case this subject somehow never
-                                       # ran Stage 2 -- normally already set to Stage 2's real
-                                       # ending value by the time Stage 4 first runs.
+    'threshold_fraction': staircase.THRESHOLD_FRACTION_DEFAULT,   # fallback only -- normally
+                                       # already set to Stage 2's real ending value.
     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG_PLACEHOLDER,
     'click_attenuation_sessions_remaining': VAR_CLICK_ATTENUATION_SESSIONS,
     'sessions_trial_count_history': [],   # shared list name with Stage 1/2 -- harmless, unused by
                                            # this stage's own advancement gate (stage4_sessions_history)
+    'hu_debias_history': [],              # [[side, correct], ...] responded trials, Stage 3-5
     'stage4_sessions_history': [],        # bools: did each past Stage-4 session meet
                                            # staircase.stage4_gates_met()? (3-consecutive check)
-    'iti_s': staircase.STAGE34_ITI_STARTING_S,   # same key Stage 1/2/3 already persist (Stage 2's
-                                           # own ceiling), in case this subject somehow never ran
-                                           # Stage 2 -- normally already at/near this value.
-    'iti_consecutive_successes': 0,
-    'iti_consecutive_failures': 0,
-    'stim_duration_s': staircase.STAGE34_STIM_DURATION_STARTING_S,
-    'stim_duration_consecutive_successes': 0,
-    'stim_duration_consecutive_failures': 0,
+    'stim_duration_s': VAR_STIM_DURATION_S,   # read only, to report a value left by the old cue
+                                               # staircase; never written since 2026-11-11
     'quiescence_unlocked': False,    # set by Stage 2 only -- fallback for a subject that somehow
                                       # skipped it (see VAR_QUIESCENCE_S above).
     'quiescence_s': staircase.QUIESCENCE_FLOOR_S,
@@ -361,19 +361,19 @@ VAR_RESPONSE_THRESHOLD_DEG = state.get('threshold_fraction') * VAR_THRESHOLD_FIN
 VAR_CUE_ABORT_THRESHOLD_DEG = state.get('in_trial_threshold_deg')
 _click_attenuation_remaining = state.get('click_attenuation_sessions_remaining')
 
-stim_duration_staircase = staircase.new_stim_duration_staircase(
-    state.get('stim_duration_s'), state.get('stim_duration_consecutive_successes'),
-    state.get('stim_duration_consecutive_failures'))
-iti_staircase = staircase.new_iti_staircase(
-    state.get('iti_s'), state.get('iti_consecutive_successes'),
-    state.get('iti_consecutive_failures'))
+STIM_DURATION_RESET_FROM_S = (state.get('stim_duration_s')
+                              if abs((state.get('stim_duration_s') or 0) - VAR_STIM_DURATION_S) > 1e-9
+                              else None)   # left by the old cue staircase
+# Read-only: Stage 1/2 own 'iti_s'. A value above VAR_ITI_S came from the old Stage 3/4 ramp.
+ITI_RESET_FROM_S = (state.get('iti_s') if (state.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
 
 quiescence_unlocked = state.get('quiescence_unlocked')
 if quiescence_unlocked:
     quiescence_obj = staircase.QuiescenceStaircase(
         current_s=state.get('quiescence_s'),
         consecutive_successes=state.get('quiescence_consecutive_successes'),
-        consecutive_failures=state.get('quiescence_consecutive_failures'))
+        consecutive_failures=state.get('quiescence_consecutive_failures'),
+        ceiling_s=staircase.STAGE234_QUIESCENCE_CEILING_S)
 
 # --- connect to Bpod, resolve modules ----------------------------------------------------------------
 
@@ -412,6 +412,12 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+if STIM_DURATION_RESET_FROM_S is not None:
+    my_bpod.register_value('STIM_DURATION_RESET_FROM_S', STIM_DURATION_RESET_FROM_S)
+if ITI_RESET_FROM_S is not None:
+    my_bpod.register_value('ITI_RESET_FROM_S', ITI_RESET_FROM_S)
+    print("ITI fixed at {0:.2f}s from Stage 3 on (saved value was {1:.2f}s)".format(
+        VAR_ITI_S, ITI_RESET_FROM_S), flush=True)
 my_bpod.register_value('LEFT_FREQ_HZ', click_train.VAR_LEFT_FREQ_HZ)
 my_bpod.register_value('RIGHT_FREQ_HZ', click_train.VAR_RIGHT_FREQ_HZ)
 
@@ -458,7 +464,9 @@ bench_plots = WheelShapingPlots(
     stage=4, threshold_final_deg=VAR_THRESHOLD_FINAL_DEG,
     prev_session_values={'threshold_deg': VAR_RESPONSE_THRESHOLD_DEG},
     session_status={'click_attenuated': _click_attenuation_remaining > 0,
-                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG},
+                     'in_trial_threshold_deg': VAR_CUE_ABORT_THRESHOLD_DEG,
+                     'sessions_in_a_row': len(list(itertools.takewhile(
+                         bool, reversed(state.get('stage4_sessions_history')))))},
     reward_ul=VAR_REWARD_UL,
     # See stage1_wheel_shaping.py's own identical comment -- suppresses this script's own popup
     # window only when launched from run_session.py, which shows the same data in its own window.
@@ -484,13 +492,27 @@ total_attempts = 0              # every trial attempt (warmup+main+repeat), feed
 total_aborts = 0
 consecutive_aborts = 0
 main_trial_correct = []         # bools, MAIN trials only -- feeds accuracy_aos + sub-chance check
-warmup_target = random.randint(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX)
+warmup = staircase.WarmupGate(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX, VAR_WARMUP_EXIT_ACCURACY,
+                              VAR_WARMUP_EXIT_MAX_BIAS)
 fresh_trial_count = 0           # non-repeat trial draws so far this session
 
-prev_outcome = None             # 'correct'/'incorrect'/None -- drives debiasing
-prev_side = None
+# Hu debiaser, seeded with this subject's responded trials from earlier Stage 3-5 sessions.
+debiaser = debiasing.HuDebiaser(history=state.get('hu_debias_history'))
+choice_trials = []              # every responded trial, for the click-weight regression
 pending_repeat = False
 repeat_side = None
+
+
+warmup_exit_logged = False
+
+
+def _log_warmup_exit():
+    """ Registered once, on the first main trial: how and when the warm-up ended. """
+    global warmup_exit_logged
+    warmup_exit_logged = True
+    runner.register('WARMUP_EXIT_REASON', warmup.exit_reason)
+    runner.register('WARMUP_TRIALS', warmup.n_drawn)
+    print("Warm-up ended ({0}) after {1} trials".format(warmup.exit_reason, warmup.n_drawn), flush=True)
 
 session_end_reason = None
 trial = 0
@@ -528,31 +550,27 @@ while True:
             pending_repeat = False
         else:
             fresh_trial_count += 1
-            trial_type = 'warmup' if fresh_trial_count <= warmup_target else 'main'
-            if prev_outcome == 'incorrect':
-                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if prev_side == 'R'
-                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
-                side = debiasing.next_side_after_error(prev_side)
-            else:
-                p_right_target = 0.5
-                side = np.random.choice(['L', 'R'])
+            trial_type = 'warmup' if warmup.next_is_warmup() else 'main'
+            if trial_type == 'main' and warmup.n_drawn and not warmup_exit_logged:
+                _log_warmup_exit()
+            side = debiaser.next_side(np.random)
+            p_right_target = debiaser.last['p_right']
+        hu_e = ((debiaser.last['e_right'], debiaser.last['e_left']) if trial_type != 'repeat'
+                else (None, None))
 
         if quiescence_unlocked:
-            quiescence_duration_this_trial = float(np.clip(
-                np.random.exponential(quiescence_obj.current_s),
-                staircase.QUIESCENCE_FLOOR_S, staircase.QUIESCENCE_CEILING_S))
+            quiescence_scale_this_trial = quiescence_obj.current_s
+            quiescence_duration_this_trial = staircase.draw_quiescence_hold(
+                quiescence_scale_this_trial, np.random)
         else:
+            quiescence_scale_this_trial = None
             quiescence_duration_this_trial = VAR_QUIESCENCE_S
 
         # additions.txt T1: fresh per-trial seed, not a globally reseeded generator.
-        # Both staircases' CURRENT values are captured once here, at trial start -- record_outcome()
-        # (below, once this trial's outcome is known) only changes what the NEXT trial sees.
-        stim_duration_this_trial = stim_duration_staircase.current_value
-        iti_this_trial = iti_staircase.current_value
-        stim_seed = int(np.random.randint(0, 2 ** 31 - 1))
-        trial_clicks = click_train.generate_trial_clicks(
-            'AOS', side, rng=np.random.RandomState(stim_seed),
-            stim_duration_s=stim_duration_this_trial)
+        stim_duration_this_trial = VAR_STIM_DURATION_S
+        iti_this_trial = VAR_ITI_S
+        trial_clicks, stim_seed, stim_resamples = click_train.draw_trial_clicks_with_cue(
+            'AOS', side, stim_duration_this_trial)
         # Warmup attenuation is a multiplier ON TOP of the calibrated base amplitude (dB below the
         # calibrated target), not a substitute for it.
         attenuation_mult = (10 ** (-VAR_CLICK_ATTENUATION_DB / 20.0)
@@ -567,6 +585,12 @@ while True:
 
         runner.register('TRIAL_TYPE', trial_type)
         runner.register('TRIAL_SIDE', side)
+        if trial_type != 'repeat':
+            runner.register('P_RIGHT_TARGET', round(debiaser.last['p_right'], 4))
+            runner.register('P_RIGHT_DRAW', round(debiaser.last['prob_right'], 4))
+            runner.register('E_RIGHT', round(debiaser.last['e_right'], 4))
+            runner.register('E_LEFT', round(debiaser.last['e_left'], 4))
+            runner.register('F_RIGHT_EMPIRICAL', round(debiaser.last['f_right'], 4))
         runner.register('CLICK_TIMES_L', ','.join(
             '{0:.4f}'.format(t) for t in trial_clicks['left_times']))
         runner.register('CLICK_TIMES_R', ','.join(
@@ -574,9 +598,13 @@ while True:
         runner.register('N_CLICKS_L', trial_clicks['n_left'])
         runner.register('N_CLICKS_R', trial_clicks['n_right'])
         runner.register('STIM_SEED', stim_seed)
+        if stim_resamples:
+            runner.register('STIM_RESAMPLES', stim_resamples)
         runner.register('CUE_ABORT_THRESHOLD_DEG', VAR_CUE_ABORT_THRESHOLD_DEG)
         runner.register('RESPONSE_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
         runner.register('QUIESCENCE_DUR_S', quiescence_duration_this_trial)
+        if quiescence_scale_this_trial is not None:
+            runner.register('QUIESCENCE_SCALE_S', quiescence_scale_this_trial)
         runner.register('STIM_DURATION_S', stim_duration_this_trial)
         runner.register('ITI_S', iti_this_trial)
         runner.register('CLICK_LEVEL_ATTENUATED', _click_attenuation_remaining > 0)
@@ -586,7 +614,7 @@ while True:
 
         delay_duration_this_trial = random.uniform(VAR_DELAY_DURATION_MIN_S,
                                                      VAR_DELAY_DURATION_MAX_S)
-        abort_timeout_this_trial = random.uniform(VAR_ABORT_TIMEOUT_MIN_S, VAR_ABORT_TIMEOUT_MAX_S)
+        abort_timeout_this_trial = VAR_INCORRECT_ITI_S
         # J1 is a native, abort-guarded state at the END of cue_sma (DotOnsetDelay), so the wheel
         # must stay within the cue-abort tolerance right up to the moment the dot appears -- the
         # dot itself appears the instant `sma`'s first state (WheelDotPeriod) is entered, signalled
@@ -595,6 +623,7 @@ while True:
         # and RUN happened to finish.)
         dot_onset_jitter_s = random.uniform(VAR_DOT_ONSET_JITTER_MIN_S, VAR_DOT_ONSET_JITTER_MAX_S)
         disappear_delay_s = random.uniform(VAR_DOT_DISAPPEAR_MIN_S, VAR_DOT_DISAPPEAR_MAX_S)
+        error_flash_delay_s = random.uniform(VAR_ERROR_FLASH_DELAY_MIN_S, VAR_ERROR_FLASH_DELAY_MAX_S)
 
         cue_sma = StateMachine(my_bpod)
 
@@ -725,8 +754,8 @@ while True:
 
         sma.add_state(
             state_name='ErrorConsumption',
-            state_timer=0.5,
-            state_change_conditions={LICK_IN: 'ErrorPunish', Bpod.Events.Tup: 'ErrorPunish'},
+            state_timer=error_flash_delay_s,
+            state_change_conditions={Bpod.Events.Tup: 'ErrorPunish'},
             output_actions=[('SoftCode', SOFTCODE_CROSSED)])
 
         sma.add_state(
@@ -867,6 +896,7 @@ while True:
             abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
             runner.register('ABORT', abort_time_abs)
             runner.register('ABORT_EPOCH', abort_epoch)
+            runner.register('ABORT_ITI_S', abort_timeout_this_trial)
             # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
             # ErrorConsumption)? False here (and for NoResponse) -- analysis applies its own
             # filters downstream, this is not a second, redundant filter.
@@ -882,7 +912,7 @@ while True:
 
             bench_plots.add_trial(side, 0.0, VAR_RESPONSE_THRESHOLD_DEG, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target, iti_s=iti_this_trial,
+                                   p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], iti_s=iti_this_trial,
                                    stim_duration_s=stim_duration_this_trial)
             continue
 
@@ -928,18 +958,20 @@ while True:
             response = None
         correct = rewarded if outcome_state in ('Reward', 'ErrorConsumption') else None
 
-        prev_outcome = 'correct' if correct else ('incorrect' if correct is False else None)
-        prev_side = side
+        if correct is not None:
+            debiaser.record(side, correct)
+            choice_trials.append({'choice': response, 'stim': side, 'rewarded': bool(correct),
+                                  'fit': trial_type == 'main'})
 
         # accuracy_aos (session end) is conditional on a genuine L/R response -- a NoResponse
         # trial contributes to neither the numerator nor denominator here (it's already a
         # separately-tracked engagement signal via VAR_NO_INIT_TIMEOUT_S/consecutive_aborts, not
         # folded into "accuracy," matching the same "correct is not None" gate INCLUDED uses).
+        if trial_type == 'warmup' and correct is not None:
+            warmup.record(side, correct)
         if trial_type == 'main' and correct is not None:
             session_trial_count += 1
             main_trial_correct.append(bool(correct))
-            stim_duration_staircase.record_outcome(bool(correct))
-            iti_staircase.record_outcome(bool(correct))
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -963,6 +995,8 @@ while True:
             dot_disappear_t = threshold_crossing_t + disappear_delay_s
             runner.register('THRESHOLD_CROSSING_TIME', threshold_crossing_t)
             runner.register('DOT_DISAPPEAR_JITTER_S', disappear_delay_s)
+            if outcome_state == 'ErrorConsumption':
+                runner.register('ERROR_FLASH_DELAY_S', error_flash_delay_s)
             runner.register('DOT_DISAPPEAR_TIME', dot_disappear_t)
             runner.register('CORRECT', rewarded)
         elif outcome_state == 'NoResponse':
@@ -990,7 +1024,7 @@ while True:
         bench_plots.add_trial(side, VAR_RESPONSE_THRESHOLD_DEG if response is not None else 0.0,
                                VAR_RESPONSE_THRESHOLD_DEG, outcome,
                                lick_times_abs=lick_times_abs, reward_time_abs=reward_time_abs,
-                               trial_type=trial_type, p_right_target=p_right_target,
+                               trial_type=trial_type, p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1],
                                response_time_s=response_time_s, click_diff=click_diff,
                                iti_s=iti_this_trial, stim_duration_s=stim_duration_this_trial)
 
@@ -1016,32 +1050,46 @@ accuracy_aos = (sum(main_trial_correct) / float(len(main_trial_correct))
                 if main_trial_correct else 0.0)
 abort_rate = (total_aborts / float(total_attempts)) if total_attempts else 0.0
 
+# Is the choice driven by the clicks rather than by trial history? (spec A7)
+click_fit = choice_regression.fit_choice_regression(choice_trials)
+click_criterion_met = bool(click_fit and click_fit['criterion_met'])
+if click_fit:
+    runner.register('CLICK_WEIGHT', round(click_fit['b_click'], 4))
+    runner.register('CLICK_WEIGHT_Z', round(click_fit['z_click'], 3))
+    runner.register('PREV_CHOICE_WEIGHT', round(click_fit['b_prev'], 4))
+    runner.register('WIN_STAY_WEIGHT', round(click_fit['b_win'], 4))
+    runner.register('CLICK_WEIGHT_N', click_fit['n'])
+runner.register('CLICK_CRITERION_MET', click_criterion_met)
+
 this_session_gates_met = staircase.stage4_gates_met(
-    accuracy_aos, abort_rate, session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE)
+    accuracy_aos, abort_rate, session_trial_count, trial_count_gate=VAR_TRIAL_COUNT_ADVANCE,
+    click_criterion_met=click_criterion_met)
 history = state.get('stage4_sessions_history')
 history.append(this_session_gates_met)
 state.set('stage4_sessions_history', history[-3:])
 advance_ready = len(history) >= 3 and all(history[-3:])
 
-if _click_attenuation_remaining > 0:
+if _click_attenuation_remaining > 0 and session_trial_count >= VAR_TRIAL_COUNT_ADVANCE:
     state.set('click_attenuation_sessions_remaining', _click_attenuation_remaining - 1)
 
-state.set('stim_duration_s', stim_duration_staircase.current_value)
-state.set('stim_duration_consecutive_successes', stim_duration_staircase.consecutive_successes)
-state.set('stim_duration_consecutive_failures', stim_duration_staircase.consecutive_failures)
-state.set('iti_s', iti_staircase.current_value)
-state.set('iti_consecutive_successes', iti_staircase.consecutive_successes)
-state.set('iti_consecutive_failures', iti_staircase.consecutive_failures)
 
 if quiescence_unlocked:
     state.set('quiescence_s', quiescence_obj.current_s)
     state.set('quiescence_consecutive_successes', quiescence_obj.consecutive_successes)
     state.set('quiescence_consecutive_failures', quiescence_obj.consecutive_failures)
 
+state.set('hu_debias_history', debiaser.history())
 state.save()
 
 print("Session: {0} main trials, accuracy(AOS)={1:.1%}, abort_rate={2:.1%}, gates_met={3}".format(
     session_trial_count, accuracy_aos, abort_rate, this_session_gates_met), flush=True)
+if click_fit:
+    print("Click weight {0:.2f} (z {1:.1f}), previous-choice weight {2:.2f}, win-stay weight {3:.2f} "
+          "over {4} trials -- click criterion {5}".format(
+              click_fit['b_click'], click_fit['z_click'], click_fit['b_prev'], click_fit['b_win'],
+              click_fit['n'], 'MET' if click_criterion_met else 'not met'), flush=True)
+else:
+    print("Click weight: too few main trials to fit -- criterion not met", flush=True)
 print("ADVANCE-READY (3 consecutive qualifying sessions): {0}".format(
     "yes" if advance_ready else "no"), flush=True)
 if not advance_ready:

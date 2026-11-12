@@ -1,0 +1,25 @@
+AUDIT 20261112-101049
+[PASS] reward only after the dot is painted  --  210 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[PASS] dot visible on every painted trial  --  ok
+[PASS] Bpod machine running >= 99% of the session, excluding handovers  --  100.0% (raw 99.3%); between-machine gaps median 59ms, max 160ms
+[PASS] WHEEL_POS has no gap > 100ms  --  0 gaps; longest 0.05s at t=1812.5s; 61 rows/s
+[PASS] WHEEL_POS rows in time order  --  0 out of order
+[PASS] no wheel samples lost (module-clock gap < 100ms, never backward)  --  longest 53.5ms, 0 backward step(s), 110397 samples
+[PASS] wheel module timestamps advance (no run of one time while moving)  --  0 sample(s) with a frozen timestamp
+[PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms)  --  1.96ms around a +21.3ppm drift, 7 stream epoch(s)
+[PASS] no CSV-wide silence > 0.5s  --  longest 0.10s after 10:28:17.836946
+[PASS] host->Bpod clock fit residual SD < 2ms (outliers <= 5%)  --  0.32ms (max 1.03ms) over 207 trials, drift -13.4ppm; outliers: trial 83 +1.1ms, trial 92 +5.9ms, trial 100 +2.9ms
+[PASS] camera frame gap < 150ms  --  max 59ms, 29.8fps realized
+[PASS] dot painted within 40ms of DotOn (p95)  --  p95 1.7ms (median 1.4ms, n=210)
+[PASS] dot frozen within 30ms of the outcome (p95)  --  p95 1.5ms (median 0.6ms, n=61)
+[PASS] no render-loop frame > 100ms  --  max 45.6ms (median 4.6ms, n=210)
+[PASS] between-machine gap < 150ms  --  max 139.9ms (median 33.5ms, n=209)
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[INFO] rotary reader pauses (host side, no data loss if the check above passes)  --  max 40ms, median 8ms; > 50ms on 0 trial(s)
+[PASS] dot offset painted within 50ms of its drawn J2 delay  --  measured - drawn: max 42.5ms, median 16.3ms; measured J2 rewarded 0.33-0.63s (n=56), unrewarded 0.31-0.61s (n=48)
+[INFO] longest garbage collection per trial (holds every thread)  --  max 0.8ms, median 0.2ms
+[PASS] rotary '#' marker logged on every trial that reached the response state  --  0/210 missing
+[PASS] no crash in the task (SESSION_ERROR / stderr traceback)  --  none
+[INFO] Bpod->PC SoftCode numbers  --  1=DotOnRequest,2=OutcomeFreeze
+[PASS] no warnings/errors logged  --  none

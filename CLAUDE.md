@@ -723,6 +723,32 @@ and means today's `stage4_`/`stage5_` files. Stage 1 and 2 still have no auditor
 correct-side concept, or error condition (those start at Stage 3), but the dot **is** coupled to the
 wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curriculum).
 
+- **2026-11-11 training changes (the user's `training_changes_spec.md`, after Ott et al. 2024
+  and Pinto et al. 2018)** -- details per parameter in `parameter_progression.md`:
+  - Quiescence: IBL's truncated exponential (`staircase.draw_quiescence_hold()`), ceiling 0.55s,
+    but Stages 2-4 stop at 0.25s (`STAGE234_QUIESCENCE_CEILING_S`). Verified against iblrig's
+    `base_choice_world.py`: IBL's hold is Exp(0.35) truncated to 0.4-0.7s, so the scale is
+    0.636·q, not q as the spec first said.
+  - Stages 3-5: fixed ITIs (1.5s / 4.0s), abort ITI = error ITI (4.0s), fixed 0.35s cue (no cue
+    staircase), every cue with >= 1 click on its side, J2 0.3-0.6s in every stage, the error flash
+    0.7-1.0s after the crossing with no lick exit, a performance-gated warm-up
+    (`staircase.WarmupGate`), and the Hu et al. (2009) debiaser (`debiasing.HuDebiaser`) instead of
+    repeat-after-error.
+  - **Stage 3 has no side blocks any more** (they lasted 2026-11-09 to 11-11): win-stay/lose-shift
+    scored 93-98% within blocks without listening. It now uses random Hu sides plus fading
+    correction trials and a click tail (`stage3_scaffold.py`), gated on a click-weight logistic
+    regression (`choice_regression.py`, also Stage 4's gate). See "Stage 3: fading scaffolds" in
+    `parameter_progression.md`.
+  - Training log: a column for every session-by-session variable (`SESSION_VAL_FIELDS`), every
+    persisted state key mapped in `STATE_KEY_COLUMNS` (the suite fails on an unmapped one), and no
+    sheets with "test" in the name (`drop_test_sheets()`, also on the two-computer merge).
+  - Live plots: each stage's progress panel shows the numbers its gate uses, with targets.
+  - Stages 3-5 are soak-tested only (fake Bpod, full audit PASS); no animal has run them. Before
+    the first Stage 3 animal, measure the click tail's HiFi load on the rig (~4.4MB per trial).
+  - **The soak harness (scratchpad `soak.py`) lives in the session's temp folder and was once
+    wiped.** It was rebuilt by replaying its Write/Edit and scripted edits from the session
+    transcript (`~/.claude/projects/.../*.jsonl`). Consider moving it into the repo.
+
 - **`parameter_progression.md`** (in `_wheel_shaping_shared/` — and unlike the gitignored
   `docs_local/` design docs, it IS committed) is the written record of how every staircased/stepped
   parameter moves within and across sessions, per stage. Check it before changing any
@@ -734,17 +760,15 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   i.e. on aborts and incorrect choices only, never on a correct trial and never as a trial-start
   cue. Stage 1/2 have no error condition at all, so they never flash.
 - **A session's hard trial cap and its advancement-qualifying trial count are two different
-  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (250, per session) ends the session, checked against
+  numbers** (Stage 1/2): `VAR_TRIAL_CAP` (per session: 250 in Stage 1, 300 in Stage 2 since 2026-11-05) ends the session, checked against
   every *attempted* trial, as does 30 min.
-  - **Water is capped per animal per calendar DAY, not per session** (`VAR_DAILY_WATER_CAP_UL`,
-    1.5 mL **consumed**). This was explicit instruction on 2026-10-28, after two back-to-back
-    sessions gave UM001 2.1 mL in 9 min.
-  - At startup the task sums that animal's earlier sessions of the day
-    (`session_csv_parser.water_consumed_today()`, registered as
-    `WATER_CONSUMED_EARLIER_TODAY_UL`) and caps on that plus this session's water
-    (`DAY_WATER_CONSUMED_UL` per trial).
-  - Already over the cap at startup: `SESSION_END_REASON=water_cap` before trial 1, and no entry
-    in the advancement history. The dashboard warns and asks before launching such a session.
+  - **No water cap since 2026-11-06** (per explicit instruction). From 2026-10-28 to 11-06,
+    water was capped at 1.5 mL **consumed** per animal per calendar day (`VAR_DAILY_WATER_CAP_UL`,
+    `SESSION_END_REASON=water_cap`).
+  - Water is still logged: the task sums that animal's earlier sessions of the day
+    (`session_csv_parser.water_consumed_today()`, `WATER_CONSUMED_EARLIER_TODAY_UL`), plus this
+    session's water (`DAY_WATER_CONSUMED_UL` per trial). The dashboard's launch label shows the
+    day's total.
   - Consumed = licked after delivery, a later trial's lick included
     (`_wheel_shaping_shared/water_tracker.py`, `SESSION_WATER_CONSUMED_UL`). The training log's
     `Water Consumed (uL)`/`Water Delivered (uL)` columns use the same rule.
@@ -840,13 +864,38 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   turn counted as a success. Now `right_fraction()` is half-Gaussian weighted (sigma 8, about 10
   effective trials), the gate is 10 known directions, and `DIRECTION_RATIO_FLAT` logs the old
   value. Replayed on that session's turns, the R×31 run would have earned 6 rewards instead of 23.
-  5 failures in a row (withheld or no-movement) step the threshold down, to a floor of 0.20.
+  5 withheld turns in a row step the threshold down, to a floor of 0.20. Since 2026-11-05 a
+  NoMovement trial is neutral (`ThresholdStaircase.record_neutral()`, per explicit instruction
+  after the 11-04 QC): it resets the success streak, so it blocks a step-up, but it never counts
+  toward a step-down and doesn't break a running failure streak. Logged thresholds are rounded
+  (3 decimals; staircase steps to 6), so no more `7.000000000000002`.
   Withheld turns still count toward the 100-trial advancement gate.
   **Since 2026-11-03 a side-biased day also halves the next day's starting threshold** (per
   explicit instruction): if ≥ 20% of the previous Stage 2 day's turns were withheld, the first
-  session of the day starts at half, min 10°. It's checked once per day via the state key
+  session of the day starts at half. It's checked once per day via the state key
   `bias_day_checked` and saved at once, so a restart after Stop/Kill/crash neither halves again
   nor reverts. UM001's 20261102 (65 of 249 withheld) takes it from 35° to 17.5°.
+  **Since 2026-11-05 every Stage 2 day after the first starts at ≥ 12.5°**
+  (`VAR_DAY_START_MIN_THRESHOLD_DEG`, per explicit instruction), raised if the saved threshold
+  is lower, biased day or not; `THRESHOLD_DAY_START_RAISED` VAL. That minimum also replaces
+  halving's old 10°. The within-session floor is still 0.20 (7°). UM001's 20261104 ended at 7°.
+  **Since 2026-11-06 halving and the 12.5° minimum apply only on a subject's first 3 Stage 2
+  days** (`VAR_DAY_START_RULE_DAYS`, per explicit instruction). The day number is the count of
+  earlier days with a Stage 2 session for that subject, plus 1
+  (`session_csv_parser.protocol_days_before()`, VAL `STAGE2_DAY_NUMBER`). From day 4 on, a day
+  starts where the previous one ended. UM001 was on day 7 by then.
+  **Since 2026-11-09, from day 4 on a day steps UP instead** (per explicit instruction): it is
+  never halved. The first session starts at max(saved threshold, the previous day's peak
+  `THRESHOLD_DEG`) + 3.5° (`staircase.later_day_start_fraction()`,
+  `session_csv_parser.day_max_threshold_deg()`), with both streaks reset. The direction ratio's
+  sigma also grows +2 per day up to 20 (`direction_sigma` state key, `grow_direction_sigma()`).
+  VALs: `PREV_DAY_MAX_THRESHOLD_DEG`, `THRESHOLD_DAY_START_STEPPED`, `DIRECTION_SIGMA`.
+  - A wider sigma has two effects. Withholding starts later in a one-sided run: 6 same-side
+    turns from a balanced history at sigma 8, 12 at sigma 20. Recovering from a long run takes
+    more opposite turns: after 30 left turns, 3 at sigma 8 and 7 at sigma 20.
+  - The once-per-day check only reaches disk at session end (`state.save()`). It is
+    idempotent: a same-day restart after a crash recomputes the same start from the same saved
+    values and the previous day's sessions.
 - **`wheel_position_plot.py`'s live "Wheel Position" plot only ever recognized `LEFT_THRESHOLD_DEG`/
   `RIGHT_THRESHOLD_DEG` VAL names for its threshold reference lines** — neither stage script has
   ever registered those; both register a single symmetric `THRESHOLD_DEG` instead (matching
@@ -1002,7 +1051,12 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   - **Follow-ups from the independent QC of `20261027-102843` (2026-10-28):**
     - The audit's wheel clock-map check is detrended. The module and PC crystals differ by
       ~20 ppm, so the raw offset ramps over a session (82→95 ms), and undetrended it failed every
-      session longer than ~4 min. Residual spread: 0.41 ms. The reader-stall check excludes
+      session longer than ~4 min. Residual spread: 0.41 ms. Since 2026-11-04 it detrends each
+      stream epoch on its own. Each epoch starts with a threshold step (`THRESHOLD_DEG` /
+      `RESPONSE_THRESHOLD_DEG` changed). Every stream pause re-anchors the module clock on
+      that epoch's first message, and the offset then steps down 1–5 ms. Host-mapped times
+      stay correct, but one line through the whole session reads that as jitter
+      (`20261104-165242`: 5.2 ms FAIL; 0.5 ms per epoch). The reader-stall check excludes
       trial 1 (stream start-up) and names any trial over budget.
     - Keepalive `WHEEL_POS` rows' module time (an estimate, host − offset) is clamped between the
       previous row's and the next real sample's, so the third field never steps backward.
@@ -1355,8 +1409,10 @@ non-obvious design choices:
   then commits ONLY data (`training_log.xlsx` + `experiments/` session files) onto `main` via a
   temporary index (no checkout of `main`) and writes the main->branch merge commit by hand —
   a plain `git merge` refuses because the new data files already exist on disk untracked.
-  `commit_data_locally()` (the same commit, no push) runs after every `run_session.py` Save;
-  `Sync Training Log.bat` also pushes. Uses `git add --ignore-removal`, so deleting old local
+  Every `run_session.py` weight/notes Save commits and pushes (`sync(rebuild=False)`, since
+  2026-11-05; it used to be `commit_data_locally()`, commit only). If the push fails the commit
+  stays local and the dashboard's save label says so. `Sync Training Log.bat` also rebuilds
+  the workbook first. Uses `git add --ignore-removal`, so deleting old local
   sessions never deletes them from `main`.
 - **One mouse, one computer — nothing another computer wrote is overwritten.** Since session data
   is shared, every box has every box's sessions on disk, so `build_training_log.build_workbook()`
@@ -1492,7 +1548,10 @@ non-obvious design choices:
   raw sessions' own already-exported structs (preferring each member's own `.json`, which has
   `task_params` — not recoverable by re-parsing the raw CSV alone, since `VAR_*` values are never
   written into the CSV itself) into one `<first_session>_combined_struct.mat`/`.json`, called from
-  `build_training_log.py`'s grouping step for any merged group.
+  `build_training_log.py`'s grouping step for any merged group. Since 2026-11-05 every combined
+  trial carries `session_member` (1-based index into `members`) and `session_name`: each
+  member's `bpod_start` restarts near 0, so sorting the combined trials by time alone would
+  interleave the members.
 - **One native Bpod INFO row's own "key" is a full descriptive sentence** ("This is a PYBPOD file.
   Find more info at ..."), not a short identifier like every other INFO key — confirmed present in
   every real session CSV's preamble, not a parsing bug. Broke `scipy.io.savemat` (`ValueError:
