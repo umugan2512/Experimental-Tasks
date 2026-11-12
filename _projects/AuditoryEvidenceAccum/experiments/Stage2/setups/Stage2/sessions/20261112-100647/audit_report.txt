@@ -1,0 +1,25 @@
+AUDIT 20261112-100647
+[PASS] reward only after the dot is painted  --  31 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[PASS] dot visible on every painted trial  --  ok
+[PASS] Bpod machine running >= 99% of the session, excluding handovers  --  100.0% (raw 99.2%); between-machine gaps median 62ms, max 86ms
+[PASS] WHEEL_POS has no gap > 100ms  --  0 gaps; longest 0.05s at t=226.0s; 94 rows/s
+[PASS] WHEEL_POS rows in time order  --  0 out of order
+[PASS] no wheel samples lost (module-clock gap < 100ms, never backward)  --  longest 50.2ms, 0 backward step(s), 21363 samples
+[PASS] wheel module timestamps advance (no run of one time while moving)  --  0 sample(s) with a frozen timestamp
+[PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms)  --  0.16ms around a +20.7ppm drift, 1 stream epoch(s)
+[PASS] no CSV-wide silence > 0.5s  --  longest 0.07s after 10:08:45.421840
+[PASS] host->Bpod clock fit residual SD < 2ms (outliers <= 5%)  --  0.26ms (max 0.60ms) over 30 trials, drift -12.2ppm
+[PASS] camera frame gap < 150ms  --  max 57ms, 29.8fps realized
+[PASS] dot painted within 40ms of DotOn (p95)  --  p95 1.6ms (median 1.2ms, n=30)
+[PASS] dot frozen within 30ms of the outcome (p95)  --  p95 1.2ms (median 0.7ms, n=15)
+[PASS] no render-loop frame > 100ms  --  max 39.6ms (median 17.0ms, n=30)
+[PASS] between-machine gap < 150ms  --  max 58.4ms (median 33.4ms, n=29)
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[INFO] rotary reader pauses (host side, no data loss if the check above passes)  --  max 11ms, median 8ms; > 50ms on 0 trial(s)
+[PASS] dot offset painted within 50ms of its drawn J2 delay  --  measured - drawn: max 45.1ms, median 18.1ms; measured J2 rewarded 0.31-0.62s (n=23), unrewarded 0.42-0.50s (n=4)
+[INFO] longest garbage collection per trial (holds every thread)  --  max 0.8ms, median 0.2ms
+[PASS] rotary '#' marker logged on every trial that reached the response state  --  0/30 missing
+[PASS] no crash in the task (SESSION_ERROR / stderr traceback)  --  none
+[INFO] Bpod->PC SoftCode numbers  --  1=DotOnRequest,2=OutcomeFreeze
+[PASS] no warnings/errors logged  --  none
