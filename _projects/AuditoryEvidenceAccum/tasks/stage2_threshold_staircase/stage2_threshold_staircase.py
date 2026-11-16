@@ -77,6 +77,9 @@ from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET
 from trial_render import run_trial_render_loop, register_trial_timing
 import host_clock
 import rotary_setup
+import lick_input
+# lick events: Port1In/Port1Out on every box (TrialRunner relabels training01's BNC2 input)
+LICK_IN, LICK_OUT = lick_input.lick_events()
 import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
@@ -343,6 +346,7 @@ neg_event, pos_event = rotary_setup.set_and_enable_thresholds(
 rotary.enable_evt_transmission()   # once per session, never toggled (MATLAB's sendThresholdEvents)
 
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+lick_input.register_lick_input(my_bpod)   # LICK_INPUT=Port1 (logged names), LICK_INPUT_PHYSICAL
 # How many earlier-session directions seeded the debiasing window (0 = a fresh window, so no
 # withholding before trial DIRECTION_RATIO_MIN_TRIALS + 1).
 my_bpod.register_value('DIRECTION_HISTORY_SEEDED', direction_tracker.seeded_trials)
@@ -697,11 +701,11 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         print("Trial {0}: threshold={1:.1f}deg, {2}, direction_ratio={3:.2f}".format(
             trial, cur_threshold_deg, outcome, direction_tracker.right_fraction()), flush=True)
 
-        # Port1In/Port1Out licks are already natively logged as raw EVENT rows in the session CSV
+        # Licks (LICK_IN/LICK_OUT) are already natively logged as raw EVENT rows in the session CSV
         # (see CLAUDE.md) -- register_port_events() also explicitly registers both edges as their
         # own VALs (per explicit instruction: always report port in AND out times, not just in).
         lick_times_abs, _lick_times_out = runner.register_port_events('LICK', choice_events, send_t)
-        water.record_trial(choice_events.get('Port1In', []), visited[outcome_state][-1][0] if rewarded else None)
+        water.record_trial(choice_events.get(LICK_IN, []), visited[outcome_state][-1][0] if rewarded else None)
         runner.register('SESSION_WATER_CONSUMED_UL', water.consumed_ul)
         runner.register('DAY_WATER_CONSUMED_UL', water_earlier_today_ul + water.consumed_ul)
         reward_time_abs = send_t + visited[outcome_state][-1][0] if rewarded else None
