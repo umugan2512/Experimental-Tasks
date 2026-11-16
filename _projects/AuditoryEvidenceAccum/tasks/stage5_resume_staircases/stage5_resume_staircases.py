@@ -73,10 +73,11 @@ import debiasing
 import click_train_v2 as click_train
 from wheel_shaping_plots import WheelShapingPlots
 from bpod_trial_helpers import TrialRunner, was_visited, PC_EVENT_QUIESCENCE_MET, PC_EVENT_DOT_SHOWN
-from trial_render import run_trial_render_loop, register_trial_timing
+from trial_render import run_trial_render_loop, register_trial_timing, outcome_reached
 import host_clock
 import rotary_setup
 import hifi_setup
+import next_trial_audio
 import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
@@ -188,6 +189,9 @@ VAR_STIM_DURATION_S = staircase.CUE_DURATION_S   # 0.35s, as Stage 3/4 (spec A6)
 VAR_DELAY_DURATION_MIN_S = 0.1       # unchanged from Stage 4 -- extended only from Stage 7 onward
 VAR_DELAY_DURATION_MAX_S = 0.2
 
+VAR_HIFI_SAMPLING_RATE = 44100      # the HiFi's lowest rate: 4x less upload than its 192 kHz
+                                    # default (5.75s stereo click tail: 1.0MB, ~0.1s); the
+                                    # clicks (4/10 kHz) are far below its 22 kHz limit
 VAR_TARGET_SPL_DB = 70.0             # not specified by the doc -- flagged/tunable, same default
                                       # as Stage 4. Waveform amplitude is derived from this via
                                       # Calibration/sound_calibration.py's fitted curve (see
@@ -265,7 +269,7 @@ VAR_GO_CUE_LED_CHANNEL = 'PWM1'      # repurposed as a punishment signal only (a
 # offset on error trials only. 0.7s is 100ms after the latest possible dot offset (0.6s).
 VAR_ERROR_FLASH_DELAY_MIN_S = 0.7
 VAR_ERROR_FLASH_DELAY_MAX_S = 1.0
-VAR_ERROR_FLASH_S = 0.35             # punishment flash duration (LED + full-white screen), on
+VAR_ERROR_FLASH_S = 0.5              # 0.35s until 2026-11-16 (lengthened per instruction); punishment flash duration (LED + full-white screen), on
                                       # WheelAbort and the incorrect-choice path only.
 
 VAR_CAMERA_INDEX = None
@@ -300,7 +304,7 @@ threshold_obj = staircase.ThresholdStaircase(
     consecutive_successes=state.get('consecutive_successes'),
     consecutive_failures=state.get('consecutive_failures'))
 # Read-only: Stage 1/2 own 'iti_s'. A value above VAR_ITI_S came from the old Stage 3/4 ramp.
-ITI_RESET_FROM_S = (state.get('iti_s') if (state.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
+ITI_RESET_FROM_S = (state.data.get('iti_s') if (state.data.get('iti_s') or 0) > VAR_ITI_S + 1e-9 else None)
 quiescence_obj = staircase.QuiescenceStaircase(
     current_s=state.get('quiescence_s'),
     consecutive_successes=state.get('quiescence_consecutive_successes'),
@@ -337,7 +341,7 @@ rotary.enable_evt_transmission()   # once per session, never toggled (MATLAB's s
 left_event, right_event = event_names[2], event_names[3]
 wheel_abort_event_neg, wheel_abort_event_pos = event_names[4], event_names[5]
 
-hifi = hifi_setup.connect_hifi(my_bpod)
+hifi = hifi_setup.connect_hifi(my_bpod, sampling_rate=VAR_HIFI_SAMPLING_RATE)
 hifi_stop_msg_id, hifi_channel = hifi_setup.build_stop_trigger(my_bpod)
 
 VAR_LEFT_AMPLITUDE_SCALE, VAR_RIGHT_AMPLITUDE_SCALE = hifi_setup.compute_calibrated_amplitudes(
@@ -353,6 +357,8 @@ my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.ge
 my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
+my_bpod.register_value('HIFI_SAMPLING_RATE', hifi.sampling_rate)
+my_bpod.register_value('ERROR_FLASH_S', VAR_ERROR_FLASH_S)
 if ITI_RESET_FROM_S is not None:
     my_bpod.register_value('ITI_RESET_FROM_S', ITI_RESET_FROM_S)
     print("ITI fixed at {0:.2f}s from Stage 3 on (saved value was {1:.2f}s)".format(
@@ -415,6 +421,7 @@ fresh_trial_count = 0
 
 # Hu debiaser, seeded with this subject's responded trials from earlier Stage 3-5 sessions.
 debiaser = debiasing.HuDebiaser(history=state.get('hu_debias_history'))
+my_bpod.register_value('HU_HISTORY_SEEDED', debiaser.seeded_trials)   # carried over from Stage 3/4
 pending_repeat = False
 repeat_side = None
 
@@ -432,6 +439,22 @@ def _log_warmup_exit():
 
 session_end_reason = None
 trial = 0
+
+def _make_trial_audio(side):
+    """ This stage's click train for `side`: ((trial_clicks, stim_seed, stim_resamples), stereo
+    waveform). Depends only on the side (fixed durations, per-session level), so the next trial's
+    can be built for both sides before its side is drawn. """
+    clicks = click_train.draw_trial_clicks_with_cue(
+        'AOS', side, VAR_STIM_DURATION_S)
+    left_wave, right_wave = click_train.build_waveform(
+        clicks[0], hifi.sampling_rate,
+        amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
+        amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE,
+        stim_duration_s=VAR_STIM_DURATION_S)
+    return clicks, np.array([left_wave, right_wave])
+
+
+next_audio = next_trial_audio.NextTrialAudio(hifi)
 
 while True:
     now = host_clock.now()
@@ -492,15 +515,19 @@ while True:
                                                    stream=runner.stream)
             applied_thresholds = thresholds_this_trial
 
-        trial_clicks, stim_seed, stim_resamples = click_train.draw_trial_clicks_with_cue(
-            'AOS', side, VAR_STIM_DURATION_S)
-        left_wave, right_wave = click_train.build_waveform(
-            trial_clicks, hifi.sampling_rate,
-            amplitude_scale_left=VAR_LEFT_AMPLITUDE_SCALE,
-            amplitude_scale_right=VAR_RIGHT_AMPLITUDE_SCALE,
-            stim_duration_s=VAR_STIM_DURATION_S)
-        hifi.load(0, np.array([left_wave, right_wave]))
-        hifi.push()
+        # Built and uploaded during the previous trial's ITI (hifi_setup.NextTrialAudio, like MATLAB
+        # Bpod's HiFiSound2AFC_TrialManager); the first trial, or one after a trial whose outcome
+        # the PC never saw, builds it here and uploads it during its own WaitQuiescence (slot 0).
+        prepared = next_audio.take(side)
+        if prepared is not None:
+            (trial_clicks, stim_seed, stim_resamples), cue_slot, prep_ms, prep_wait_ms = prepared
+            trial_wave = None
+            runner.register('AUDIO_PREP_MS', round(prep_ms, 1))
+            runner.register('AUDIO_PREP_WAIT_MS', round(prep_wait_ms, 1))
+        else:
+            (trial_clicks, stim_seed, stim_resamples), trial_wave = _make_trial_audio(side)
+            cue_slot = 0
+        runner.register('AUDIO_SOURCE', 'iti' if trial_wave is None else 'quiescence')
 
         runner.register('TRIAL_TYPE', trial_type)
         runner.register('STAIRCASE_ACTIVE', active_staircase)
@@ -725,7 +752,9 @@ while True:
         def _start_cue_audio():
             # Called by the render loop the moment quiescence is met and the cue machine has been
             # told to enter CuePeriod -- the audio starts within milliseconds of CuePeriod.
-            hifi.play(0)
+            if 'error' in audio_upload:   # never play the previous trial's waveform
+                return
+            hifi.play(cue_slot)
             cue_audio['t'] = host_clock.now() - log_python_t0
 
         def _run_cue_then_choice():
@@ -767,12 +796,40 @@ while True:
         runner.start_quiescence(quiescence_duration_this_trial, VAR_STEADY_THRESHOLD_DEG)
         decision_thread.start()
 
+        # The click train uploads while the cue machine sits in WaitQuiescence (licks, wheel and
+        # Stop/Kill all logged), not in a gap between machines; quiescence can't be declared met,
+        # so the audio can't start, until the upload is done. The HiFi has its own USB port.
+        audio_uploaded = threading.Event()
+        audio_upload = {}
+
+        def _upload_trial_audio():
+            t_up = host_clock.now()
+            try:
+                hifi.load(0, trial_wave)
+                hifi.push()
+            except Exception:
+                audio_upload['error'] = traceback.format_exc()
+            finally:
+                audio_upload['ms'] = (host_clock.now() - t_up) * 1e3
+                audio_uploaded.set()
+
+        if trial_wave is None:
+            audio_uploaded.set()   # uploaded during the previous trial's ITI
+        else:
+            threading.Thread(target=_upload_trial_audio, daemon=True).start()
+        next_audio.prepare_after_outcome(
+            _make_trial_audio,
+            lambda: outcome_reached(runner, choice_started, SOFTCODE_DOT_ON, SOFTCODE_CROSSED,
+                                    SOFTCODE_PUNISH, VAR_RESPONSE_TIMEOUT_S),
+            decision_done)
+
         render = run_trial_render_loop(
             runner, dot, camera, decision_done, cur_response_threshold_deg, disappear_delay_s,
             render_interval, SOFTCODE_DOT_ON, (SOFTCODE_CROSSED,),
             quiescence=(quiescence_duration_this_trial, VAR_STEADY_THRESHOLD_DEG),
             punish_softcode=SOFTCODE_PUNISH, punish_flash_s=VAR_ERROR_FLASH_S,
-            on_quiescence_met=_start_cue_audio, dot_phase_event=choice_started)
+            on_quiescence_met=_start_cue_audio, dot_phase_event=choice_started,
+            quiescence_gate=audio_uploaded)
         n_breaks = runner.quiescence_breaks
         last_initiation_time = host_clock.now()
         if active_staircase == 'quiescence':
@@ -791,6 +848,12 @@ while True:
             print("Bpod Kill received -- ending session.", flush=True)
             _cleanup_and_export()
             sys.exit(0)
+
+        audio_uploaded.wait(5.0)   # set long before this unless the machine ended early
+        if 'ms' in audio_upload:
+            runner.register('AUDIO_UPLOAD_MS', round(audio_upload['ms'], 1))
+        if audio_upload.get('error') and not decision_result.get('error'):
+            decision_result['error'] = 'HiFi upload failed:\n' + audio_upload['error']
 
         if decision_result.get('error'):
             # Reported as what it is -- it used to fall through to the "Stop/Kill" message below.

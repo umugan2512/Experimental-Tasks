@@ -10,15 +10,17 @@ from pybpod_hifi_module.module_api import HiFiModule
 from pybpod_hifi_module.module import HiFi, HiFiCommandType
 
 
-def connect_hifi(bpod, usb_port=None):
+def connect_hifi(bpod, usb_port=None, sampling_rate=None):
     """ Connects the HiFi module's own direct-USB API object (for load()/push()/play()/stop()).
     PLAY is meant to stay on this direct-USB connection rather than a Bpod-relayed trigger -- see
     the calling task script's docstring for why (the same-module-twice-per-trial hang hazard once
-    a Bpod-relayed STOP_ALL is also in play). """
+    a Bpod-relayed STOP_ALL is also in play). `sampling_rate` None keeps the driver default
+    (192 kHz); upload size scales with it. """
+    kwargs = {} if sampling_rate is None else {'sampling_rate': sampling_rate}
     if usb_port:
-        hifi = HiFiModule(usb_port)
+        hifi = HiFiModule(usb_port, **kwargs)
     else:
-        hifi = HiFiModule.discover(exclude_ports=[bpod.serial_port])
+        hifi = HiFiModule.discover(exclude_ports=[bpod.serial_port], **kwargs)
     print("Connected to HiFi module on {0} ({1}Hz sampling)".format(
         hifi.arcom.serial_object.port, hifi.sampling_rate), flush=True)
     return hifi

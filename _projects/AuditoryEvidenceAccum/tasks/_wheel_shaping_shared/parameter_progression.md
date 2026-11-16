@@ -186,18 +186,19 @@ Whichever comes first ends the session. The 1.5 mL daily water cap was removed o
 
 ## Punishment and error/abort ITIs (not staircased, any stage)
 
-The 350ms LED + full-white-screen flash on errors and aborts is **deliberate**: bright light is
+The LED + full-white-screen flash on errors and aborts (`VAR_ERROR_FLASH_S` = 0.5s since
+2026-11-16, per instruction; 0.35s before; VAL `ERROR_FLASH_S`) is **deliberate**: bright light is
 aversive and doesn't interfere with the auditory cues; there is no auditory error cue. On choice
 trials it follows errors only, so it is confounded with the error outcome and must be its own
 event regressor in any neural model.
 
 - **Wrong-direction wheel turn** (Stages 3/4/5 only — Stages 1/2 have no correct-side concept at
-  all): `ErrorConsumption` → `ErrorPunish` (350ms flash) → `IncorrectITI` (fixed
+  all): `ErrorConsumption` → `ErrorPunish` (0.5s flash) → `IncorrectITI` (fixed
   `VAR_INCORRECT_ITI_S = 4.0s`). Since 2026-11-11 (spec B8) `ErrorConsumption` lasts a per-trial
   U(0.7, 1.0)s (`ERROR_FLASH_DELAY_S`) and a lick no longer ends it: the flash used to come at the
   first lick or 0.5s, locked to lick onset and overlapping J2. 0.7s is 100ms after the latest dot
   offset.
-- **Mid-cue wheel-movement abort** (Stages 3/4/5 only): `WheelAbort` → `AbortPunish` (350ms
+- **Mid-cue wheel-movement abort** (Stages 3/4/5 only): `WheelAbort` → `AbortPunish` (0.5s
   flash) → `AbortITI` = `VAR_INCORRECT_ITI_S` (4.0s, since 2026-11-11, spec A4; was 1–2s, which
   made aborting the cheaper exit from a hard trial). `ABORT_ITI_S` per abort. The same side is
   re-offered with fresh clicks (`TRIAL_TYPE='repeat'`).

@@ -45,7 +45,8 @@ Extended for Stage 3/4 (training_protocol.md Revision 2) with panels those stage
 that Stage 1/2 have no use for -- a rolling-accuracy line with warmup/repeat trials visually
 distinguished from the advancement-relevant 'main' subset (the primary "is it working" signal), a
 session-engagement indicator (against the same consecutive-abort/no-initiation thresholds the task
-script itself uses to end a session -- the live "should I keep this session running" signal), a
+script itself uses to end a session -- the live "should I keep this session running" signal; since
+2026-11-16 these are rows of the progress checklist, not a panel of their own), a
 side-bias/debiasing panel (this trial's own P(right) target from the task script's
 debiasing.next_side_after_error() rule, plus a rolling empirical R-fraction of the actual draws --
 adapted, not ported, from live_plots_lookback.py's own three-line "sidebias" panel, since Stage 3/4's
@@ -65,6 +66,7 @@ import time
 import matplotlib.pyplot as plt
 
 import choice_regression   # Stage 3/4's click-weight criterion, refit live
+import stage3_scaffold     # Stage 3's qualifying thresholds and fade steps, for the checklist
 import staircase   # for Stage 4's own target constants (STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION/
                     # QUIESCENCE_CEILING_S/QUIESCENCE_FLOOR_S), so the progress panel's fractions
                     # match the task script's own advancement gate exactly rather than a second,
@@ -237,6 +239,8 @@ class WheelShapingPlots(object):
         self._cur_day_water_ul = None
         self._cur_quiescence_s = None
         self._warmup_ended_at = None
+        self._warmup_gate = staircase.WarmupGate()   # mirror of the task's (same defaults), fed
+                                                      # its warm-up trials, for the checklist
         self._choice_trials = []
         self._click_fit = None
         self._click_z_series = []        # (trial, z) at each refit
@@ -286,13 +290,13 @@ class WheelShapingPlots(object):
         # height, which is what made the previous layout feel unaligned/oversized for its content.
         if stage in (3, 4, 5):
             mosaic = [['raster', 'raster'],
-                      ['progress', 'engagement'],
+                      ['progress', 'progress'],
                       ['percent_outcome', 'psychometric'],
                       ['accuracy', 'sidebias'],
                       ['reaction_time', 'reward_licks'],
                       ['staircase_trajectory', 'staircase_trajectory'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 1.1, 1.0, 1.1, 1.1, 0.9, 0.9]
+            height_ratios = [2.2, 1.5, 1.0, 1.1, 1.1, 0.9, 0.9]
         elif stage == 2:
             # Each label's cells must form one contiguous rectangle (subplot_mosaic's own
             # requirement).
@@ -360,7 +364,6 @@ class WheelShapingPlots(object):
             self._setup_direction_ratio_axes()
         if stage in (3, 4, 5):
             self._setup_accuracy_axes()
-            self._setup_engagement_axes()
             self._setup_sidebias_axes()
             self._setup_percent_outcome_axes()
             self._setup_psychometric_axes()
@@ -465,6 +468,10 @@ class WheelShapingPlots(object):
             ttype0 = trial_type or 'main'
             if ttype0 == 'main' and self._warmup_ended_at is None:
                 self._warmup_ended_at = row
+            if ttype0 == 'warmup':   # as the task: one draw per warm-up trial, record if responded
+                self._warmup_gate.n_drawn += 1
+                if outcome in ('Reward', 'NoReward'):
+                    self._warmup_gate.record(side, outcome == 'Reward')
             if outcome in ('Reward', 'NoReward'):
                 choice = side if outcome == 'Reward' else ('L' if side == 'R' else 'R')
                 self._choice_trials.append({'choice': choice, 'stim': side,
@@ -560,16 +567,25 @@ class WheelShapingPlots(object):
     _PROGRESS_LABELS = {
         1: ['rewarded/100', 'threshold/20% cap', 'gain -> 2.0x', 'L/R balance', 'water today'],
         2: ['trials/100', 'threshold/35deg', 'ITI/1.5s', 'withheld (<20%)', 'quiescence/0.25s'],
-        3: ['main trials/100', 'fade step/5', 'accuracy (main)', 'aborts (<30%)', 'click z/3'],
-        4: ['main trials/100', 'accuracy/70%', 'aborts (<20%)', 'click z/3', 'click level'],
-        5: ['main trials/100', 'response/target', 'quiescence/target', 'aborts (<25%)'],
     }
+    _CHECKLIST_ROWS = 10   # Stage 3-5 checklist: rows per column (two columns)
+    _CHECKLIST_COLORS = {'ok': 'tab:green', 'no': 'tab:red', 'head': 'black', 'info': 'dimgray'}
 
     def _setup_progress_axes(self):
-        """ One bar per number the stage's own advancement or health check uses, each scaled so
-        1.0 (the dashed line) is its target; green once met, orange when a must-stay-below value
-        is over its limit. """
+        """ Stage 1/2: one bar per number the stage's own advancement or health check uses, each
+        scaled so 1.0 (the dashed line) is its target; green once met, orange when a
+        must-stay-below value is over its limit. Stage 3-5: a checklist instead (2026-11-16, the
+        bars were unreadable): each row is a check the task itself makes, its value now, its target
+        and whether it's met -- the warm-up, then what the session needs to qualify. """
         ax = self._axes['progress']
+        if self._stage in (3, 4, 5):
+            ax.axis('off')
+            n = self._CHECKLIST_ROWS
+            self._checklist_texts = [[ax.text(x, 1.0 - (i + 0.5) / n, '', transform=ax.transAxes,
+                                              va='center', ha='left', fontsize=8.5, family='monospace')
+                                      for i in range(n)] for x in (0.0, 0.53)]
+            self._progress_title = ax.set_title('Session progress', fontsize=8)
+            return
         labels = self._PROGRESS_LABELS[self._stage]
         self._progress_bars = ax.barh(labels, [0] * len(labels), color='tab:blue')
         self._progress_texts = [ax.text(0.02, i, '', va='center', fontsize=7,
@@ -612,33 +628,16 @@ class WheelShapingPlots(object):
                 parts.append('qualifying in a row {0}/3'.format(st['sessions_in_a_row']))
             if st.get('click_attenuated'):
                 parts.append('clicks -6dB')
-            parts.append('warm-up ended at trial {0}'.format(self._warmup_ended_at)
-                         if self._warmup_ended_at else 'warm-up')
         return 'Session progress' + (' -- ' + ', '.join(parts) if parts else '')
 
     def _progress_specs(self):
         """ [(fraction of target, text, state)] per bar; state 'ok' (green when >= 1), 'bad'
-        (orange: over a must-stay-below limit) or 'info' (blue). """
+        (orange: over a must-stay-below limit) or 'info' (blue). Stage 1/2 only. """
         thr = self._cur_threshold_deg or 0
         n = self._session_trial_count
-        st = self._session_status
-        aborts = self._outcome4_counts.get('abort', 0)
-        abort_rate = aborts / float(n) if n else 0.0
-        acc = self._main_correct / float(self._main_responded) if self._main_responded else None
-        z = self._click_fit['z_click'] if self._click_fit else None
 
         def _limit(value, limit, text):
             return (min(value / limit, 1.3), text, 'bad' if value >= limit else 'info')
-
-        def _z_bar():
-            if z is None:
-                return (0.0, 'click z: needs {0} main trials'.format(
-                    choice_regression.CHOICE_REGRESSION_MIN_TRIALS), 'info')
-            met = self._click_fit['criterion_met']
-            return (min(max(z, 0.0) / choice_regression.CLICK_WEIGHT_Z_CRITERION, 1.3),
-                    'click z {0:.1f} (weight {1:.2f}, history {2:.2f}/{3:.2f}){4}'.format(
-                        z, self._click_fit['b_click'], self._click_fit['b_prev'],
-                        self._click_fit['b_win'], ' MET' if met else ''), 'ok' if met else 'info')
 
         if self._stage == 1:
             cap = staircase.THRESHOLD_GROWTH_CEILING_FRACTION * self._threshold_final_deg
@@ -674,44 +673,131 @@ class WheelShapingPlots(object):
                 ((min(q / staircase.STAGE234_QUIESCENCE_CEILING_S, 1.3), 'scale {0:.3f}s'.format(q), 'ok')
                  if q is not None else (0.0, 'fixed 0.1s (unlocks once the threshold steps up)', 'info')),
             ]
+        return []
+
+    def _checklist_rows(self):
+        """ Stage 3-5 progress checklist: (left rows, right rows), each [(text, state)], state
+        'ok'/'no' (a check met or not),
+        'head' (section line) or 'info'. Same checks and targets as the task's own gates
+        (stage3_scaffold.session_qualifies, staircase.stage4_gates_met/stage5_gates_met) and its
+        WarmupGate, so the numbers here are the ones that decide. """
+        st = self._session_status
+        n = self._session_trial_count
+        abort_rate = self._outcome4_counts.get('abort', 0) / float(n) if n else 0.0
+        acc = self._main_correct / float(self._main_responded) if self._main_responded else None
+        fit = self._click_fit
+        rows = []
+
+        def check(label, now, target, met):
+            mark = '' if met is None else ('ok' if met else 'no')
+            rows.append(('  {0:<22}{1:>9}   {2:<12}{3}'.format(label, now, target, mark),
+                         'info' if met is None else ('ok' if met else 'no')))
+
+        def pct(x):
+            return '-' if x is None else '{0:.0%}'.format(x)
+
+        # warm-up: same numbers as the task's WarmupGate
+        gate = self._warmup_gate
+        recent = gate.outcomes[-gate.accuracy_window:]
+        recent_acc = (sum(c for _, c in recent) / float(len(recent))) if recent else None
+        by_side = {s: [c for side, c in gate.outcomes[-gate.bias_window:] if side == s] for s in ('L', 'R')}
+        gap = (abs(sum(by_side['L']) / float(len(by_side['L'])) - sum(by_side['R']) / float(len(by_side['R'])))
+               if by_side['L'] and by_side['R'] else None)
+        if self._warmup_ended_at is None:
+            rows.append(('WARM-UP running: {0} trials (ends {1}-{2})'.format(
+                gate.n_drawn, gate.n_min, gate.n_max), 'head'))
+        else:
+            rows.append(('WARM-UP ended at trial {0} ({1})'.format(
+                self._warmup_ended_at, 'cap' if gate.n_drawn >= gate.n_max else 'criterion'), 'head'))
+        check('last {0} correct'.format(gate.accuracy_window), pct(recent_acc),
+              '>= {0:.0%}'.format(gate.accuracy),
+              None if len(recent) < gate.accuracy_window else recent_acc >= gate.accuracy)
+        check('L/R accuracy gap', '-' if gap is None else '{0:.0f} pts'.format(gap * 100),
+              '<= {0:.0f} pts'.format(gate.max_bias * 100), None if gap is None else gap <= gate.max_bias)
+
+        # what this session needs to qualify (main trials = after the warm-up, no correction trials)
         if self._stage == 3:
-            step = st.get('fade_step')
-            return [
-                (min(self._main_responded / 100.0, 1.3), '{0} responded main'.format(self._main_responded), 'ok'),
-                ((step or 0) / 5.0, 'step {0}: p_corr {1}, clicks until {2}'.format(
-                    step, st.get('p_corr'), str(st.get('tail_mode', '?')).replace('_', ' ')), 'ok'),
-                ((min(acc / 0.70, 1.3), '{0:.0%} correct (no correction trials)'.format(acc), 'info')
-                 if acc is not None else (0.0, 'accuracy: n/a', 'info')),
-                _limit(abort_rate, 0.30, '{0:.0%} of trials'.format(abort_rate)),
-                _z_bar(),
-            ]
-        if self._stage == 4:
-            attenuated = bool(st.get('click_attenuated'))
-            return [
-                (min(self._main_responded / 100.0, 1.3), '{0} responded main'.format(self._main_responded), 'ok'),
-                ((min(acc / 0.70, 1.3), '{0:.0%} correct'.format(acc), 'ok') if acc is not None
-                 else (0.0, 'accuracy: n/a', 'info')),
-                _limit(abort_rate, 0.20, '{0:.0%} of trials'.format(abort_rate)),
-                _z_bar(),
-                (0.5 if attenuated else 1.0, 'ATTENUATED (-6dB)' if attenuated else 'FULL LEVEL',
-                 'bad' if attenuated else 'ok'),
-            ]
-        active = st.get('staircase_active')
-        resp_target = staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
-        q = self._cur_quiescence_s if self._cur_quiescence_s is not None else st.get('quiescence_s')
-        q_span = staircase.QUIESCENCE_CEILING_S - staircase.QUIESCENCE_FLOOR_S
-        return [
-            (min(self._main_responded / 100.0, 1.3), '{0} responded main'.format(self._main_responded), 'ok'),
-            (min(thr / (resp_target * self._threshold_final_deg), 1.3), '{0:.1f}deg (target {1:.0%}){2}'.format(
-                thr, resp_target, '  <- ACTIVE' if active == 'response' else ''), 'ok'),
-            ((min(max((q - staircase.QUIESCENCE_FLOOR_S) / q_span, 0.0), 1.3),
-              '{0:.3f}s (target {1:.2f}s){2}'.format(q, staircase.QUIESCENCE_CEILING_S,
-                                                    '  <- ACTIVE' if active == 'quiescence' else ''), 'ok')
-             if q is not None else (0.0, '?', 'info')),
-            _limit(abort_rate, 0.25, '{0:.0%} of trials'.format(abort_rate)),
-        ]
+            need_n, n_ok = '>= 100', self._main_responded >= stage3_scaffold.QUALIFY_MIN_MAIN_TRIALS
+            abort_limit = stage3_scaffold.QUALIFY_MAX_ABORT_RATE
+        elif self._stage == 4:
+            need_n, n_ok = '> 100', self._main_responded > 100
+            abort_limit = staircase.STAGE4_ABORT_RATE_GATE
+        else:
+            need_n, n_ok = '>= 100', self._main_responded >= 100
+            abort_limit = staircase.STAGE5_ABORT_RATE_GATE
+        z_ok = None if fit is None else bool(fit['criterion_met'])
+        checks = [n_ok, abort_rate < abort_limit]
+        if self._stage in (4, 5):
+            acc_gate = staircase.STAGE4_ACCURACY_GATE if self._stage == 4 else staircase.STAGE5_ACCURACY_GATE
+            checks.append(acc is not None and acc > acc_gate)
+        if self._stage in (3, 4):
+            checks.append(bool(z_ok))
+        if self._stage == 5:
+            thr = self._cur_threshold_deg or 0
+            resp_target = staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
+            q = self._cur_quiescence_s if self._cur_quiescence_s is not None else st.get('quiescence_s')
+            resp_ok = thr >= resp_target * self._threshold_final_deg - 1e-9
+            q_ok = q is not None and q >= staircase.QUIESCENCE_CEILING_S - 1e-9
+            checks += [resp_ok, q_ok]
+        rows.append(('SESSION QUALIFIES: {0}'.format('YES' if all(checks) else 'not yet'), 'head'))
+        check('responded main trials', self._main_responded, need_n, n_ok)
+        check('abort rate', pct(abort_rate), '< {0:.0%}'.format(abort_limit), abort_rate < abort_limit)
+        if self._stage in (4, 5):
+            check('accuracy (main)', pct(acc), '> {0:.0%}'.format(acc_gate), checks[2])
+        if self._stage in (3, 4):
+            check('click-weight z', '-' if fit is None else '{0:.1f}'.format(fit['z_click']),
+                  '>= {0:g}'.format(choice_regression.CLICK_WEIGHT_Z_CRITERION), z_ok)
+            if fit is None:
+                rows.append(('    (fitted once {0} main trials responded)'.format(
+                    choice_regression.CHOICE_REGRESSION_MIN_TRIALS), 'info'))
+            else:
+                rows.append(('    click {0:.2f} vs history {1:.2f}/{2:.2f}: must beat both'.format(
+                    fit['b_click'], fit['b_prev'], fit['b_win']), 'info'))
+        if self._stage == 5:
+            active = st.get('staircase_active')
+            check('response threshold', '{0:.1f}deg'.format(thr),
+                  '>= {0:.1f}deg'.format(resp_target * self._threshold_final_deg), resp_ok)
+            check('quiescence', '-' if q is None else '{0:.3f}s'.format(q),
+                  '>= {0:.2f}s'.format(staircase.QUIESCENCE_CEILING_S), q_ok)
+            rows.append(('    tightening this session: {0}'.format(active or 'none'), 'info'))
+
+        split = len(rows)   # left column: warm-up and qualifying; right: the rest
+        if self._stage == 3:
+            step = st.get('fade_step') or 0
+            rows.append(('FADE step {0} of {1}: p_corr {2}, clicks until {3}'.format(
+                step, stage3_scaffold.FADE_LAST_STEP, st.get('p_corr'),
+                str(st.get('tail_mode', '?')).replace('_', ' ')), 'head'))
+            rows.append((('  next session: step {0} if this one qualifies'.format(step + 1)
+                          if step < stage3_scaffold.FADE_LAST_STEP else
+                          '  last step: advance after {0} qualifying sessions in a row'.format(
+                              stage3_scaffold.ADVANCE_SESSIONS_AT_LAST_STEP)), 'info'))
+            check('accuracy (main)', pct(acc), 'info only', None)
+        elif self._stage == 4:
+            in_a_row = st.get('sessions_in_a_row')
+            rows.append(('ADVANCE after 3 qualifying sessions in a row{0}'.format(
+                '' if in_a_row is None else ' (so far {0})'.format(in_a_row)), 'head'))
+        else:
+            rows.append(('ADVANCE after 2 qualifying sessions in a row', 'head'))
+        # the task ends the session on either of these (it used to be its own panel)
+        rows.append(('ENGAGEMENT (session ends if not)', 'head'))
+        check('consecutive aborts', self._consecutive_aborts,
+              '< {0}'.format(_ENGAGEMENT_ABORT_LIMIT_DISPLAY),
+              self._consecutive_aborts < _ENGAGEMENT_ABORT_LIMIT_DISPLAY)
+        gap_s = self._time_since_last_trial_s
+        check('since last trial', '-' if gap_s is None else '{0:.0f}s'.format(gap_s), '< 180s',
+              None if gap_s is None else gap_s < 180)
+        return rows[:split], rows[split:]
 
     def _redraw_progress(self, ax):
+        if self._stage in (3, 4, 5):
+            for rows, texts in zip(self._checklist_rows(), self._checklist_texts):
+                for i, text in enumerate(texts):
+                    label, state = rows[i] if i < len(rows) else ('', 'info')
+                    text.set_text(label)
+                    text.set_color(self._CHECKLIST_COLORS[state])
+                    text.set_fontweight('bold' if state == 'head' else 'normal')
+            self._progress_title.set_text(self._progress_header())
+            return
         for i, (bar, text, (frac, label, state)) in enumerate(
                 zip(self._progress_bars, self._progress_texts, self._progress_specs())):
             bar.set_width(frac)
@@ -929,29 +1015,6 @@ class WheelShapingPlots(object):
         if self._trial_idx:
             ax.set_xlim(0, max(10, self._trial_idx[-1] + 1))
 
-    # --- session-engagement indicator (Stage 3/4 only, cheap cla()+text against the same triggers
-    # the task script itself uses to end a session) --------------------------------------------------
-
-    def _setup_engagement_axes(self):
-        ax = self._axes['engagement']
-        ax.axis('off')
-
-    def _redraw_engagement(self, ax):
-        ax.cla()
-        ax.axis('off')
-        gap_s = self._time_since_last_trial_s
-        gap_text = '{0:.0f}s since last trial'.format(gap_s) if gap_s is not None else 'n/a'
-        lines = [
-            'Consecutive aborts: {0}/{1}'.format(self._consecutive_aborts,
-                                                   _ENGAGEMENT_ABORT_LIMIT_DISPLAY),
-            gap_text,
-        ]
-        color = ('tab:red' if self._consecutive_aborts >= _ENGAGEMENT_ABORT_LIMIT_DISPLAY - 5
-                 else 'black')
-        ax.text(0.05, 0.6, '\n'.join(lines), fontsize=10, va='center', color=color,
-                transform=ax.transAxes)
-        ax.set_title('Session engagement')
-
     # --- outcome percentage bars (Stage 3/4 only, cheap cla()+bar -- small panel, whole-session
     # totals across all 4 trial-level outcomes including Abort/NoResponse, which the accuracy
     # panel's rolling correct/incorrect line doesn't cover at all) -------------------------------
@@ -1084,7 +1147,6 @@ class WheelShapingPlots(object):
             self._redraw_direction_ratio(self._axes['direction_ratio'])
         if self._stage in (3, 4, 5):
             self._redraw_accuracy(self._axes['accuracy'])
-            self._redraw_engagement(self._axes['engagement'])
             self._redraw_sidebias(self._axes['sidebias'])
             self._redraw_percent_outcome(self._axes['percent_outcome'])
             self._redraw_psychometric(self._axes['psychometric'])

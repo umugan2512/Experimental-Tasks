@@ -878,10 +878,12 @@ class TrialRunner(object):
         self._quiescence = {'hold': required_hold, 'thr': steady_threshold_deg, 'start': now,
                             'breaks': 0, 'moving': False, 'met_t': None}
 
-    def poll_quiescence(self):
+    def poll_quiescence(self, allow_met=True):
         """ True once the wheel's peak-to-peak range over the trailing hold window is within the
         threshold (and at least one full hold has elapsed since start_quiescence()). Registers a
-        QUIESCENCE_RESET_TIME row each time movement restarts the window. """
+        QUIESCENCE_RESET_TIME row each time movement restarts the window. allow_met=False still
+        tracks movement and breaks but never declares the hold met (Stages 3-5: the trial's audio
+        is still uploading). """
         q = self._quiescence
         if q is None:
             return False
@@ -895,7 +897,7 @@ class TrialRunner(object):
             q['moving'] = True
             return False
         q['moving'] = False
-        if now - q['start'] >= q['hold']:
+        if allow_met and now - q['start'] >= q['hold']:
             q['met_t'] = now
             return True
         return False

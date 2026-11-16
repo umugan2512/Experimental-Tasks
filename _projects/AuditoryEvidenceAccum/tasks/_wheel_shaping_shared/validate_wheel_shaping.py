@@ -1949,7 +1949,10 @@ print("  Stages 3-5: VAR_ITI_S 1.5, VAR_INCORRECT_ITI_S 4.0, no ITI staircase, n
       "register ITI_RESET_FROM_S: {0}".format(iti_checks))
 _ns25 = {'VAR_ITI_S': 1.5}
 for _saved, _want in ((2.25, 2.25), (1.5, None), (1.3, None), (None, None)):
-    _ns25['state'] = type('S', (), {'get': staticmethod(lambda k, v=_saved: v)})
+    # like StageState: .data, and get() raises on a missing key (None = no 'iti_s' saved, a
+    # subject that never ran Stage 1/2 -- the 2026-11-16 KeyError)
+    _d25 = {} if _saved is None else {'iti_s': _saved}
+    _ns25['state'] = type('S', (), {'data': _d25, 'get': staticmethod(lambda k, d=_d25: d[k])})
     exec(_re25.search(r'^ITI_RESET_FROM_S = .*$', stage_source(3), _re25.M).group(0), _ns25)
     iti_checks['reset %s' % _saved] = _ns25['ITI_RESET_FROM_S'] == _want
 print("  a saved 'iti_s' above 1.5s is reported, at or below it isn't: {0}".format(

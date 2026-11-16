@@ -34,7 +34,7 @@ from bpod_trial_helpers import PC_EVENT_DOT_SHOWN, PC_EVENT_QUIESCENCE_MET, pop_
 def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disappear_delay_s,
                           render_interval, softcode_dot_on, freeze_softcodes,
                           quiescence=None, punish_softcode=None, on_quiescence_met=None,
-                          dot_phase_event=None, punish_flash_s=0.35):
+                          dot_phase_event=None, punish_flash_s=0.35, quiescence_gate=None):
     """
     Runs until `done_event` is set (the Bpod thread finished). Returns a dict of what happened and
     when (host seconds, log_python_t0-relative), for the caller to register:
@@ -55,6 +55,9 @@ def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disapp
     :param dot_phase_event: if given, the dot handshake is only serviced once this Event is set
         (Stage 3-5: the choice machine has started -- set by the Bpod thread right after its
         runner.begin_trial()).
+    :param quiescence_gate: if given, quiescence can only be declared met once this Event is set
+        (Stage 3-5: the trial's click train has finished uploading to the HiFi). Movement and
+        breaks are tracked meanwhile, as usual.
     """
     t0 = runner.log_python_t0
     now_s = lambda: host_clock.now() - t0
@@ -66,7 +69,8 @@ def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disapp
     last_frame = host_clock.now()
 
     while not done_event.is_set():
-        if phase == 'quiescence' and runner.poll_quiescence():
+        if phase == 'quiescence' and runner.poll_quiescence(
+                allow_met=quiescence_gate is None or quiescence_gate.is_set()):
             rotary_setup.arm_for_trial(runner.rotary)
             runner.inject_softcode(PC_EVENT_QUIESCENCE_MET)
             out['quiescence_met_t'] = now_s()
@@ -115,6 +119,20 @@ def run_trial_render_loop(runner, dot, camera, done_event, threshold_deg, disapp
         last_frame = host_clock.now()
 
     return out
+
+
+def outcome_reached(runner, choice_started, softcode_dot_on, softcode_crossed, softcode_punish,
+                    response_timeout_s):
+    """ Stage 3-5: True once this trial's outcome has happened, so the HiFi is silent until the
+    next trial -- an abort (SOFTCODE_PUNISH from the cue machine, before the choice machine
+    starts), a crossing (Reward/ErrorConsumption), or NoResponse (the response window after the
+    dot ran out). Polled from a background thread; runner.softcode_seen() takes its own lock. """
+    if not choice_started.is_set():
+        return runner.softcode_seen(softcode_punish) is not None
+    if runner.softcode_seen(softcode_crossed) is not None:
+        return True
+    dot_on_t = runner.softcode_seen(softcode_dot_on)
+    return dot_on_t is not None and runner._now() > dot_on_t + response_timeout_s + 0.05
 
 
 def register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_return_t, visited,

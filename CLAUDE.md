@@ -729,18 +729,46 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     persisted state key mapped in `STATE_KEY_COLUMNS` (the suite fails on an unmapped one), and no
     sheets with "test" in the name (`drop_test_sheets()`, also on the two-computer merge).
   - Live plots: each stage's progress panel shows the numbers its gate uses, with targets.
-  - Stages 3-5 are soak-tested only (fake Bpod, full audit PASS); no animal has run them. Before
-    the first Stage 3 animal, measure the click tail's HiFi load on the rig (~4.4MB per trial).
-  - **The soak harness (scratchpad `soak.py`) lives in the session's temp folder and was once
-    wiped.** It was rebuilt by replaying its Write/Edit and scripted edits from the session
-    transcript (`~/.claude/projects/.../*.jsonl`). Consider moving it into the repo.
+  - Stages 3-5 were soak-tested only (fake Bpod, full audit PASS) until a first bench session
+    with a `test` subject on 2026-11-16 (`20261116-121858`, full audit PASS); no animal has run them.
+  - **HiFi audio in Stages 3-5 (2026-11-16):**
+    - The click tail was 4.4MB per trial at 192 kHz and its one-shot upload failed on the rig
+      with `SerialTimeoutException: Write timeout`. That's pyserial reporting a SHORT write
+      (`write_timeout=None`): Windows' USB-serial driver completed the multi-MB `WriteFile`
+      partly. `HiFiModule.load()` (pybpod fork) now writes 64KB chunks: 4.4MB in 0.37s on the rig.
+    - Stages 3-5 run the HiFi at 44.1 kHz (`VAR_HIFI_SAMPLING_RATE`, its lowest rate; VAL
+      `HIFI_SAMPLING_RATE`): 4x less to upload. Recheck SPL calibration at that rate (it was
+      measured at 192 kHz).
+    - The next trial's click train is built for BOTH sides and uploaded to slots 1/2 during this
+      trial's ITI, after the outcome (`_shared/next_trial_audio.NextTrialAudio`,
+      `trial_render.outcome_reached()`), like MATLAB's `HiFiSound2AFC_TrialManager`; the next
+      trial pushes and plays the drawn side's slot. Possible because the waveform depends only on
+      the side. The first trial (or one whose outcome the PC never saw) uploads to slot 0 while
+      its cue machine sits in `WaitQuiescence`, and quiescence can't be declared until that's
+      done (`poll_quiescence(allow_met=)`, `quiescence_gate`). Never in a gap between machines.
+      VALs `AUDIO_SOURCE` (iti/quiescence), `AUDIO_PREP_MS`, `AUDIO_PREP_WAIT_MS`, `AUDIO_UPLOAD_MS`.
+    - Don't make the new slots live with a state-machine `'*'` push like the MATLAB example: that's
+      a second HiFi relay output in a trial that can also send STOP (the twice-per-trial hang).
+  - **The Stage 3-5 progress panel is a checklist** (2026-11-16): each check the task makes (its
+    `WarmupGate`, `session_qualifies`/`stage4_gates_met`/`stage5_gates_met`, the engagement stops),
+    its value, target and ok/no. The bars it replaced were each value divided by its target.
+  - **A subject with no Stage 1/2 history has no `iti_s`** in its state; Stages 3-5 read it with
+    `state.data.get('iti_s')` (a `test` subject crashed with `KeyError` on 2026-11-16).
+    `StageState.get()` raises on a missing key, and so does the soak's fake state now.
+  - **The soak harness is in the repo since 2026-11-16:** `_wheel_shaping_shared/soak.py` (it used
+    to live in a session scratchpad, and was wiped once). Fake-mouse profiles are env vars
+    (`SOAK_P_CORRECT` = a mouse that listens, `SOAK_P_LEFT`, `SOAK_P_REPEAT`, `SOAK_P_NOMOVE`,
+    `SOAK_P_EARLY`). `SOAK_STATE_FILE` persists the stage state between runs, so runs chain like
+    days. `soak_matrix.py matrix [n] [stages]` runs every profile, and `soak_matrix.py chain
+    <stage> <profile> <n_sessions>` runs back-to-back days. Both print one summary line per run.
+    Use the `UM-pybpod` conda env (Python 3.6) on this machine.
 
 - **`parameter_progression.md`** (in `_wheel_shaping_shared/` — and unlike the gitignored
   `docs_local/` design docs, it IS committed) is the written record of how every staircased/stepped
   parameter moves within and across sessions, per stage. Check it before changing any
   threshold/ITI/gain/duration progression, and update it alongside the code.
 - **The LED (`VAR_GO_CUE_LED_CHANNEL = 'PWM1'`) is NOT a go cue anywhere any more — it is a
-  punishment signal only.** Stages 3-5 fire it for `VAR_ERROR_FLASH_S` (0.35s) together with a
+  punishment signal only.** Stages 3-5 fire it for `VAR_ERROR_FLASH_S` (0.5s since 2026-11-16, was 0.35s) together with a
   full-white screen (`DotDisplay.flash_white()`, pumped concurrently so the screen flash lands in
   near-lockstep with the native LED output) from their own `AbortPunish`/`ErrorPunish` states —
   i.e. on aborts and incorrect choices only, never on a correct trial and never as a trial-start
@@ -1194,12 +1222,13 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     for: dot before reward, dot never frozen early, state-machine coverage ≥ 97%, no wheel/CSV
     gaps, clock fit, camera gaps, and render/onset/freeze/between-machine/reader-stall budgets. The
     dashboard runs it when a session it launched ends, writing `<session>/audit_report.txt`.
-  - **Hardware-free test:** scratchpad `soak.py` drives a real stage script against a fake Bpod that
+  - **Hardware-free test:** `_wheel_shaping_shared/soak.py` drives a real stage script against a fake Bpod that
     interprets any state machine (timers, injected stdin SoftCodes, rotary events, relay/SoftCode
     outputs) plus fake firmware. All 5 stages pass the full audit there. It is not a substitute for
     the rig: run `Tests/tasks/rotary_stream_test` (now incl. the injected-SoftCode round trip)
     first.
-  - Still host-timed: Stage 3–5 audio onset (`hifi.play()` the moment quiescence is met).
+  - Still host-timed: Stage 3–5 audio onset (`hifi.play()` the moment quiescence is met). The
+    upload itself happens during the previous ITI (see "HiFi audio in Stages 3-5").
 - **The `PreDotDelay` state described in the next bullet was itself a bug, and is gone (2026-10-22).**
   Its thresholds were armed but nothing listened for them, and the firmware disarms a crossed
   threshold (see "Hardware module notes"). So a turn during the 100–200ms delay used up that side,
