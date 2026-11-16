@@ -1,4 +1,4 @@
-""" Water the animal actually CONSUMED this session, for the Stage 1/2 session water cap.
+""" Water the animal actually CONSUMED this session (Stage 1/2 logging and the training log).
 
 A delivered drop counts as consumed once the animal licks after it was delivered. Until then it
 sits at the spout as "pending": a lick in a LATER trial (e.g. during the next WaitQuiescence) still

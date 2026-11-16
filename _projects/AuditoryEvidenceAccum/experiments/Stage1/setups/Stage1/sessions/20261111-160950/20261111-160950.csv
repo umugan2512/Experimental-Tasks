@@ -1,0 +1,66 @@
+__UUID4__;25f1d52d-1d0f-4b3c-b4fe-783d095d96a5
+__CREATED-ON__;2026-11-11 16:09:53.295120
+__DEF-URL__;http://pybpod-api.readthedocs.org
+__DEF-TEXT__;This file contains data recorded during a session from the PyBpod system
+__SOFTWARE__;PyBpod API v1.8.2
+__HAS-HEADER__
+TYPE;PC-TIME;BPOD-INITIAL-TIME;BPOD-FINAL-TIME;MSG;+INFO
+INFO;2026-11-11 16:09:53.295120;;;SERIAL-PORT;COM10
+INFO;2026-11-11 16:09:53.295120;;;PROTOCOL-NAME;stage1_wheel_shaping
+INFO;2026-11-11 16:09:53.295120;;;CREATOR-NAME;["UM", "f519825a-ab5d-4fe9-91c0-a52f3d5afee3", "local"]
+INFO;2026-11-11 16:09:53.295120;;;PROJECT-NAME;AuditoryEvidenceAccum
+INFO;2026-11-11 16:09:53.310747;;;EXPERIMENT-NAME;Stage1
+INFO;2026-11-11 16:09:53.310747;;;BOARD-NAME;Box3
+INFO;2026-11-11 16:09:53.310747;;;SETUP-NAME;Stage1
+INFO;2026-11-11 16:09:53.310747;;;BPOD-GUI-VERSION;
+INFO;2026-11-11 16:09:53.310747;;;NET-PORT;36000
+INFO;2026-11-11 16:09:53.310747;;;SUBJECT-NAME;['UM002', '5382e99b-4d76-44b4-8c1e-168da0b92439']
+stderr;2026-11-11 16:09:53.326372;;|Traceback (most recent call last):
+|;;
+stderr;2026-11-11 16:09:53.326372;;|  File "C:\Ugurcan\Experimental-Tasks\_projects\AuditoryEvidenceAccum\tasks\stage1_wheel_shaping\stage1_wheel_shaping.py", line 252, in <module>
+|;;
+stderr;2026-11-11 16:09:53.326372;;    ;;
+stderr;2026-11-11 16:09:53.326372;;my_bpod = Bpod();;
+stderr;2026-11-11 16:09:53.326372;;|
+|;;
+stderr;2026-11-11 16:09:53.326372;;|  File "c:\ugurcan\experimental-tasks\pybpod\base\pybpod-api\pybpodapi\bpod\bpod_io.py", line 27, in __init__
+|;;
+stderr;2026-11-11 16:09:53.357627;;    ;;
+stderr;2026-11-11 16:09:53.357627;;super(BpodIO, self).__init__(serial_port, sync_channel, sync_mode);;
+stderr;2026-11-11 16:09:53.357627;;|
+|;;
+stderr;2026-11-11 16:09:53.357627;;|  File "c:\ugurcan\experimental-tasks\pybpod\base\pybpod-api\pybpodapi\bpod\bpod_com_protocol.py", line 43, in __init__
+|;;
+stderr;2026-11-11 16:09:53.373254;;    ;;
+stderr;2026-11-11 16:09:53.373254;;self.open();;
+stderr;2026-11-11 16:09:53.373254;;|
+|;;
+stderr;2026-11-11 16:09:53.373254;;|  File "c:\ugurcan\experimental-tasks\pybpod\base\pybpod-api\pybpodapi\bpod\bpod_com_protocol.py", line 46, in open
+|;;
+stderr;2026-11-11 16:09:53.373254;;    ;;
+stderr;2026-11-11 16:09:53.373254;;super(BpodCOMProtocol, self).open();;
+stderr;2026-11-11 16:09:53.373254;;|
+|;;
+stderr;2026-11-11 16:09:53.373254;;|  File "c:\ugurcan\experimental-tasks\pybpod\base\pybpod-api\pybpodapi\bpod\bpod_base.py", line 136, in open
+|;;
+stderr;2026-11-11 16:09:53.388879;;    ;;
+stderr;2026-11-11 16:09:53.388879;;if not self._bpodcom_handshake():;;
+stderr;2026-11-11 16:09:53.388879;;|
+|;;
+stderr;2026-11-11 16:09:53.388879;;|  File "c:\ugurcan\experimental-tasks\pybpod\base\pybpod-api\pybpodapi\bpod\bpod_com_protocol.py", line 127, in _bpodcom_handshake
+|;;
+stderr;2026-11-11 16:09:53.388879;;    ;;
+stderr;2026-11-11 16:09:53.388879;;response = self._arcom.read_char()  # Receive response;;
+stderr;2026-11-11 16:09:53.388879;;|
+|;;
+stderr;2026-11-11 16:09:53.388879;;|  File "c:\ugurcan\experimental-tasks\pybpod\base\pybpod-api\pybpodapi\com\arcom.py", line 137, in read_char
+|;;
+stderr;2026-11-11 16:09:53.402363;;    ;;
+stderr;2026-11-11 16:09:53.402363;;return message_bytes.decode("utf-8");;
+stderr;2026-11-11 16:09:53.402363;;|
+|;;
+stderr;2026-11-11 16:09:53.402363;;UnicodeDecodeError;;
+stderr;2026-11-11 16:09:53.402363;;: ;;
+stderr;2026-11-11 16:09:53.402363;;'utf-8' codec can't decode byte 0xde in position 0: unexpected end of data;;
+stderr;2026-11-11 16:09:53.402363;;|
+|;;

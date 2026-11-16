@@ -1,0 +1,15 @@
+AUDIT 20261111-160950
+[PASS] reward only after the dot is painted  --  0 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[N/A ] dot visible on every painted trial  --  no DOT_VISIBLE_S
+[N/A ] Bpod machine coverage  --  fewer than 2 trials with SM_RUN_TIME
+[N/A ] WHEEL_POS continuity  --  no WHEEL_POS rows
+[N/A ] no wheel samples lost  --  no module-time WHEEL_POS rows (polling mode)
+[N/A ] wheel clock map stability  --  too few WHEEL_CLOCK_OFFSET rows
+[N/A ] dot painted within 40ms of DotOn (p95)  --  no RENDER_ONSET_LATENCY_MS rows
+[N/A ] dot frozen within 30ms of the outcome (p95)  --  no DOT_FREEZE_LATENCY_MS rows
+[N/A ] no render-loop frame > 100ms  --  no RENDER_MAX_FRAME_MS rows
+[N/A ] between-machine gap < 150ms  --  no INTER_TRIAL_GAP_MS rows
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[FAIL] no crash in the task (SESSION_ERROR / stderr traceback)  --  1 traceback(s) on stderr
+[PASS] no warnings/errors logged  --  none

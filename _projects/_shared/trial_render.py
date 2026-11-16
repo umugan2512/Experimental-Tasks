@@ -125,7 +125,8 @@ def register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_retu
       always meant "the moment the hold was satisfied")
     - DOT_ONSET_TIME: the response state's start -- the hardware time the PC's "dot is painted"
       answer arrived -- on the host clock (send_t + Bpod-relative start)
-    - DOT_ONSET_PAINT_TIME, DOT_FREEZE_TIME/_SOURCE, DOT_VISIBLE_S (paint -> clear)
+    - DOT_ONSET_PAINT_TIME, DOT_FREEZE_TIME/_SOURCE, DOT_CLEAR_TIME (dot offset painted; J2 is
+      DOT_CLEAR_TIME - DOT_FREEZE_TIME), DOT_VISIBLE_S (paint -> clear)
     - RENDER_MAX_FRAME_MS, RENDER_ONSET_LATENCY_MS, DOT_FREEZE_LATENCY_MS
     - INTER_TRIAL_GAP_MS: HOST-side, previous Bpod call returning -> this RUN write. The Bpod's
       own dead time (previous machine's end -> this machine's start, Bpod clock) runs ~22 ms
@@ -150,6 +151,8 @@ def register_trial_timing(runner, render, quiescence_hold_s, n_breaks, prev_retu
     if render['freeze_t'] is not None:
         reg('DOT_FREEZE_TIME', render['freeze_t'])
         reg('DOT_FREEZE_SOURCE', render['freeze_source'])
+    if render['clear_t'] is not None:
+        reg('DOT_CLEAR_TIME', render['clear_t'])
     if render['dot_paint_t'] is not None:
         end = render['clear_t'] if render['clear_t'] is not None else runner._now()
         reg('DOT_VISIBLE_S', end - render['dot_paint_t'])

@@ -5,10 +5,11 @@ Data = `records/training_log.xlsx` plus the session folders under `AuditoryEvide
 JPGs, launch logs, session-local user_settings.py, and the box-specific setup `.json` files).
 
 Two entry points:
-- `commit_data_locally()` -- called after every weight/notes Save in run_session.py. Commits the
-  data onto the LOCAL `main` branch only; never pushes.
+- `commit_data_locally()` -- commits the data onto the LOCAL `main` branch only; never pushes.
 - `sync()` -- run via `Sync Training Log.bat`: rebuild training_log.xlsx, commit the data, bring in
-  every other computer's latest main, and push main.
+  every other computer's latest main, and push main. run_session.py's weight/notes Save calls
+  `sync(rebuild=False)` (since 2026-11-05; it used to commit locally only): Save has just written
+  the workbook itself.
 
 **Nothing another computer wrote is ever overwritten.** Every computer commits to the same main,
 under the rule "one mouse, one computer":
@@ -423,7 +424,10 @@ def reconcile_with_origin(branch):
                             .format(MAIN, branch))
 
 
-def sync():
+def sync(rebuild=True):
+    """Commit the data, merge in origin/main and push main. Returns a one-line status message;
+    raises SyncError (or CalledProcessError, e.g. offline) on failure. `rebuild=False` skips the
+    training_log.xlsx rebuild, for a caller that just wrote the workbook."""
     branch = git_out('rev-parse', '--abbrev-ref', 'HEAD')
     if branch == 'HEAD':
         raise SyncError('Detached HEAD -- check out main or this computer\'s branch first.')
@@ -433,8 +437,10 @@ def sync():
     print('Fetching latest changes...', flush=True)
     fetched = git('fetch', 'origin', check=False).returncode == 0
 
-    build_log()
-    print(commit_data_locally(), flush=True)
+    if rebuild:
+        build_log()
+    committed = commit_data_locally()
+    print(committed, flush=True)
 
     if not fetched:
         git('fetch', 'origin')
@@ -448,13 +454,16 @@ def sync():
             raise SyncError('git push to {0} failed -- another computer probably pushed in the '
                             'meantime. Your data is committed locally; just run this again.'
                             .format(MAIN))
+        status = 'Committed and pushed training data to {0}.'.format(MAIN)
     else:
         print('Nothing new to push.')
+        status = committed if committed.startswith('No new data') else 'Nothing new to push.'
 
     if branch != MAIN and git('push', '-u', 'origin', branch, check=False).returncode != 0:
         print('\nWARNING: backing up branch "{0}" to origin failed -- the data on {1} is '
               'unaffected.'.format(branch, MAIN))
     print('\nDone.')
+    return status
 
 
 if __name__ == '__main__':

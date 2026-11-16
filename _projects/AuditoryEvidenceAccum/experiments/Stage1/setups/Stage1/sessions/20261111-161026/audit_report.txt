@@ -1,0 +1,25 @@
+AUDIT 20261111-161026
+[PASS] reward only after the dot is painted  --  250 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[PASS] dot visible on every painted trial  --  ok
+[PASS] Bpod machine running >= 99% of the session, excluding handovers  --  100.0% (raw 97.1%); between-machine gaps median 54ms, max 69ms
+[PASS] WHEEL_POS has no gap > 100ms  --  0 gaps; longest 0.05s at t=457.0s; 64 rows/s
+[PASS] WHEEL_POS rows in time order  --  0 out of order
+[PASS] no wheel samples lost (module-clock gap < 100ms, never backward)  --  longest 50.1ms, 0 backward step(s), 29198 samples
+[PASS] wheel module timestamps advance (no run of one time while moving)  --  0 sample(s) with a frozen timestamp
+[PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms)  --  0.08ms around a +22.0ppm drift, 1 stream epoch(s)
+[PASS] no CSV-wide silence > 0.5s  --  longest 0.08s after 16:11:26.221856
+[PASS] host->Bpod clock fit residual SD < 2ms (outliers <= 5%)  --  0.29ms (max 0.89ms) over 250 trials, drift -14.6ppm
+[PASS] camera frame gap < 150ms  --  max 50ms, 29.8fps realized
+[PASS] dot painted within 40ms of DotOn (p95)  --  p95 1.7ms (median 1.0ms, n=250)
+[PASS] dot frozen within 30ms of the outcome (p95)  --  p95 0.7ms (median 0.3ms, n=134)
+[PASS] no render-loop frame > 100ms  --  max 34.3ms (median 3.1ms, n=250)
+[PASS] between-machine gap < 150ms  --  max 44.0ms (median 29.7ms, n=249)
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[INFO] rotary reader pauses (host side, no data loss if the check above passes)  --  max 9ms, median 8ms; > 50ms on 0 trial(s)
+[PASS] dot offset painted within 50ms of its drawn J2 delay  --  measured - drawn: max 33.0ms, median 16.6ms; measured J2 rewarded 0.30-0.56s (n=208)
+[INFO] longest garbage collection per trial (holds every thread)  --  max 5.0ms, median 0.1ms
+[PASS] rotary '#' marker logged on every trial that reached the response state  --  0/250 missing
+[PASS] no crash in the task (SESSION_ERROR / stderr traceback)  --  none
+[INFO] Bpod->PC SoftCode numbers  --  1=DotOnRequest,2=OutcomeFreeze
+[PASS] no warnings/errors logged  --  none

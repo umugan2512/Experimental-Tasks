@@ -30,14 +30,19 @@ playing a tone) fighting over the same key. `closeEvent()` force-closes the valv
 the LED) if either was left on when the window closes, mirroring `flush_valve.py`'s own
 `finally`-guaranteed close-on-exit.
 
-**Lick sensor**: `Port1In` has no polling/`manual_override`-read API at all -- it's only observable
-while a `StateMachine` is actively listening via `state_change_conditions` (see this repo's own
-`CLAUDE.md`, Hardware module notes). `LickMonitorThread` gets real, continuous lick timestamps
-anyway by repeatedly sending a short listening state machine
-(`Listen` -> `Port1In`: `Licked`, `Tup`: `exit`) back-to-back on a background `QThread` (same
-"background thread for anything that blocks on real Bpod time" pattern as `calibrate_liquid.py`'s
-own `PulseRunner`) for as long as the monitor is running, logging each lick's own real elapsed time
-since the monitor started (not just "a lick happened at some point").
+**Lick sensor / TTL monitor** (training01): this box's lick sensor is an OPB815WZ IR beam break
+read by an Arduino (`arduino_lick_relay/`), which copies the beam state to Bpod BNC In 2
+(HIGH = beam broken: BNC2High = lick in). Digital inputs have no polling/`manual_override`-read API -- they're only
+timestamped while a `StateMachine` runs (see this repo's own `CLAUDE.md`, Hardware module notes).
+`TtlMonitorThread` repeatedly sends a short `Listen` state (`Tup`: `exit`, nothing else) back to
+back on a background `QThread` (same "background thread for anything that blocks on real Bpod
+time" pattern as `calibrate_liquid.py`'s own `PulseRunner`). Bpod logs every enabled input's edges
+whether or not a state listens for them, so every Port/BNC/Wire edge is reported with its Bpod
+timestamp (elapsed since the monitor started). The per-channel edge counts show which input is
+actually wired; the "Lick input" channel (default: this box's own, `_shared/lick_input.py`; or, on
+Auto, the first input that fires) is read as the
+lick port: `PortNIn`/`BNCNHigh`/`WireNHigh` = lick in. Edges during the ~50 ms handover between
+1 s windows are not logged.
 
 **Tone check**: same channel/frequency selector as `calibrate_sound.py`, but the amplitude is
 looked up live via `sound_calibration.get_calibrated_amplitude()` at a fixed `VAR_CHECK_SPL_DB`
@@ -59,6 +64,7 @@ for the tool's whole lifetime the way Bpod/rotary/HiFi are, since nothing else i
 the camera connection to stay alive.
 """
 import os
+import re
 import sys
 import time
 import traceback
@@ -77,6 +83,7 @@ _CALIBRATION_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_CALIBRATION_DIR, '..', '_projects', '_shared'))
 import rotary_setup
 import hifi_setup
+import lick_input
 from bpod_trial_helpers import was_visited
 from camera_recorder import discover_camera, open_capture
 from click_train_v2 import VAR_CLICK_DURATION_S, VAR_CLICK_RAMP_MS
@@ -91,6 +98,7 @@ VAR_BPOD_SERIAL_PORT = None   # None = auto-detect from this box's own board con
 VAR_VALVE_ID = 1                 # this rig's single valve (see CLAUDE.md).
 VAR_LED_CHANNEL_NUMBER = 1       # PWM1, Port 1's built-in LED -- same convention every task script
                                   # already uses for a go-cue LED.
+VAR_LICK_INPUT_CHOICES = ['BNC1', 'BNC2', 'Wire1', 'Wire2', 'Port1', 'Port2', 'Port3', 'Port4']
 VAR_LICK_LISTEN_WINDOW_S = 1.0   # per-window duration for the repeated lick-monitor state machine
                                   # -- how often the monitor briefly hands control back to Python
                                   # between listens; not a limit on total monitoring time.
@@ -149,19 +157,45 @@ class CameraCheckThread(QThread):
             cap.release()
 
 
-class LickMonitorThread(QThread):
-    """ Repeatedly sends a short listening StateMachine while running, emitting lick_detected
-    (elapsed_s_since_monitor_started) for every real Port1In event observed -- see module docstring
-    for why this repeated-short-listen approach is the only way to get continuous lick timestamps
-    at all outside a real Bpod session. stop() requests the loop end after its CURRENT window
-    finishes (up to VAR_LICK_LISTEN_WINDOW_S later) -- it can't interrupt an in-flight
-    run_state_machine() call, same "a background thread can never signal into an already-running
-    call" constraint documented in CLAUDE.md. """
-    lick_detected = pyqtSignal(float)
+INPUT_EDGE_RE = re.compile(r'^(Port\d+(In|Out)|BNC\d+(High|Low)|Wire\d+(High|Low))$')
+_EDGE_SUFFIX_RE = re.compile(r'(In|Out|High|Low)$')
+
+
+def ttl_edges(events):
+    """ [(t, event_name), ...] sorted by time, for the digital-input edges in a trial's
+    {event_name: [timestamps]} dict (get_all_timestamps_by_event()) -- Tup, SoftCodes and module
+    events (RotaryEncoder1_N ...) are dropped. """
+    return sorted((t, name) for name, times in events.items() if INPUT_EDGE_RE.match(name)
+                  for t in times)
+
+
+def edge_channel(name):
+    """ 'BNC1High' -> 'BNC1', 'Port1In' -> 'Port1'. """
+    return _EDGE_SUFFIX_RE.sub('', name)
+
+
+def lick_edge_kind(name, channel):
+    """ 'in'/'out' if `name` is an edge of lick input `channel`, else None. A port's In is a lick
+    in; on a BNC/Wire input HIGH is a lick in (arduino_lick_relay drives HIGH while the beam is
+    broken). """
+    if edge_channel(name) != channel:
+        return None
+    return 'in' if name.endswith(('In', 'High')) else 'out'
+
+
+class TtlMonitorThread(QThread):
+    """ Repeatedly sends a short listening StateMachine while running, emitting ttl_edge
+    (event_name, elapsed_s_since_monitor_started) for every digital-input edge Bpod logged -- see
+    module docstring for why this repeated-short-listen approach is the only way to get continuous
+    input timestamps at all outside a real Bpod session. stop() requests the loop end after its
+    CURRENT window finishes (up to VAR_LICK_LISTEN_WINDOW_S later) -- it can't interrupt an
+    in-flight run_state_machine() call, same "a background thread can never signal into an
+    already-running call" constraint documented in CLAUDE.md. """
+    ttl_edge = pyqtSignal(str, float)
     error = pyqtSignal(str)
 
     def __init__(self, my_bpod, listen_window_s):
-        super(LickMonitorThread, self).__init__()
+        super(TtlMonitorThread, self).__init__()
         self.my_bpod = my_bpod
         self.listen_window_s = listen_window_s
         self._stop_requested = False
@@ -170,30 +204,27 @@ class LickMonitorThread(QThread):
         self._stop_requested = True
 
     def run(self):
-        start_time = time.time()
+        first_bpod_start = None
         try:
             while not self._stop_requested:
-                window_start_elapsed = time.time() - start_time
                 sma = StateMachine(self.my_bpod)
+                # no input transitions: Bpod still logs every enabled input's edges, so the
+                # window always runs its full length and catches every channel
                 sma.add_state(
                     state_name='Listen',
                     state_timer=self.listen_window_s,
-                    state_change_conditions={'Port1In': 'Licked', Bpod.Events.Tup: 'exit'},
-                    output_actions=[])
-                sma.add_state(
-                    state_name='Licked',
-                    state_timer=0,
                     state_change_conditions={Bpod.Events.Tup: 'exit'},
                     output_actions=[])
                 self.my_bpod.send_state_machine(sma)
                 self.my_bpod.run_state_machine(sma)
-                if self._stop_requested:
-                    break
-                visited = self.my_bpod.session.current_trial.states_durations
-                if was_visited(visited, 'Licked'):
-                    events = self.my_bpod.session.current_trial.get_all_timestamps_by_event()
-                    for t in events.get('Port1In', []):
-                        self.lick_detected.emit(window_start_elapsed + t)
+                trial = self.my_bpod.session.current_trial
+                # Bpod clock throughout: each window's start (TrialStartTimestamp) relative to
+                # the first window's, plus the window-relative event time
+                if first_bpod_start is None:
+                    first_bpod_start = trial.trial_start_timestamp
+                window_start_elapsed = trial.trial_start_timestamp - first_bpod_start
+                for t, name in ttl_edges(trial.get_all_timestamps_by_event()):
+                    self.ttl_edge.emit(name, window_start_elapsed + t)
         except Exception as err:
             print(traceback.format_exc(), flush=True)
             self.error.emit(str(err))
@@ -309,16 +340,28 @@ class RigCheckWindow(QWidget):
         led_group.setLayout(led_form)
         layout.addWidget(led_group)
 
-        lick_group = QGroupBox('3. Lick sensor monitor')
+        lick_group = QGroupBox('3. Lick sensor / TTL monitor (every Bpod input)')
         lick_form = QFormLayout()
+        self.lick_input_combo = QComboBox()
+        self.lick_input_combo.addItem('Auto (first input that fires)', None)
+        for channel in VAR_LICK_INPUT_CHOICES:
+            self.lick_input_combo.addItem(channel, channel)
+        # start on this box's own lick input (_shared/lick_input.py: BNC2 on training01)
+        box_index = self.lick_input_combo.findData(lick_input.lick_input())
+        if box_index >= 0:
+            self.lick_input_combo.setCurrentIndex(box_index)
+        self.lick_input_combo.currentIndexChanged.connect(self._on_lick_input_changed)
+        lick_form.addRow('Lick input:', self.lick_input_combo)
         self.lick_button = QPushButton('Start Lick Monitor')
         self.lick_button.clicked.connect(self._on_lick_monitor_toggle)
         lick_form.addRow(self.lick_button)
         self.lick_status_label = QLabel('Not running.')
         lick_form.addRow(self.lick_status_label)
+        self.ttl_counts_label = QLabel('--')
+        lick_form.addRow('Edges per input:', self.ttl_counts_label)
         self.lick_log = QTextEdit()
         self.lick_log.setReadOnly(True)
-        self.lick_log.setMaximumHeight(120)
+        self.lick_log.setMaximumHeight(160)
         lick_form.addRow(self.lick_log)
         lick_group.setLayout(lick_form)
         layout.addWidget(lick_group)
@@ -430,16 +473,53 @@ class RigCheckWindow(QWidget):
             return
 
         self.lick_log.clear()
-        self._lick_thread = LickMonitorThread(self.my_bpod, VAR_LICK_LISTEN_WINDOW_S)
-        self._lick_thread.lick_detected.connect(self._on_lick_detected)
+        self._ttl_counts = {}
+        self._lick_in_t = None
+        self._n_licks = 0
+        self._lick_channel = self.lick_input_combo.currentData()
+        self.ttl_counts_label.setText('none yet')
+        self._lick_thread = TtlMonitorThread(self.my_bpod, VAR_LICK_LISTEN_WINDOW_S)
+        self._lick_thread.ttl_edge.connect(self._on_ttl_edge)
         self._lick_thread.error.connect(self._on_lick_monitor_error)
         self._lick_thread.finished.connect(self._on_lick_monitor_finished)
         self._lick_thread.start()
         self.lick_button.setText('Stop Lick Monitor')
-        self.lick_status_label.setText('Listening...')
+        self._update_lick_status()
 
-    def _on_lick_detected(self, elapsed_s):
-        self.lick_log.append('Lick at t={0:.3f}s'.format(elapsed_s))
+    def _on_lick_input_changed(self):
+        self._lick_channel = self.lick_input_combo.currentData()
+        self._lick_in_t = None
+        self._update_lick_status()
+
+    def _update_lick_status(self):
+        if self._lick_thread is None or not self._lick_thread.isRunning():
+            return
+        if self._lick_channel is None:
+            self.lick_status_label.setText('Listening on every input -- waiting for one to fire.')
+        else:
+            self.lick_status_label.setText('Listening -- lick input {0}, {1} lick(s).'.format(
+                self._lick_channel, self._n_licks))
+
+    def _on_ttl_edge(self, name, elapsed_s):
+        channel = edge_channel(name)
+        self._ttl_counts[channel] = self._ttl_counts.get(channel, 0) + 1
+        self.ttl_counts_label.setText(', '.join(
+            '{0}: {1}'.format(ch, n) for ch, n in sorted(self._ttl_counts.items())))
+        if self._lick_channel is None:   # Auto: the first input that fires is the lick input
+            self._lick_channel = channel
+        kind = lick_edge_kind(name, self._lick_channel)
+        if kind == 'in':
+            self._lick_in_t = elapsed_s
+            self._n_licks += 1
+            self.lick_log.append('t={0:.4f}s  {1}  LICK IN'.format(elapsed_s, name))
+        elif kind == 'out':
+            contact = ('' if self._lick_in_t is None else
+                       ' (contact {0:.0f} ms)'.format((elapsed_s - self._lick_in_t) * 1000))
+            self._lick_in_t = None
+            self.lick_log.append('t={0:.4f}s  {1}  LICK OUT{2}'.format(elapsed_s, name, contact))
+        else:
+            self.lick_log.append('t={0:.4f}s  {1}'.format(elapsed_s, name))
+        self._update_lick_status()
 
     def _on_lick_monitor_error(self, message):
         QMessageBox.critical(self, 'Lick monitor failed', message)

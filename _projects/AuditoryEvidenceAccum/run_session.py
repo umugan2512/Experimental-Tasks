@@ -37,10 +37,10 @@ needed), all embedded in ONE window (no separate popups)**:
   full panel set is taller than most screens). Fed incrementally: each new trial found in the
   parsed CSV since the last poll has its `add_trial()` arguments reconstructed from the raw STATE/
   EVENT/VAL rows (`classify_trial()` for outcome/side, direct VAL lookups for threshold/gain/ITI/
-  trial_type/response_time/click counts). `p_right_target` (Stage 3/4's debiasing target) is the
-  one value never logged -- it's fully recoverable anyway, since `debiasing.next_side_after_error()`'s
-  target is a deterministic function of only the PREVIOUS trial's own logged outcome/side, replayed
-  here trial-by-trial rather than guessed.
+  trial_type/response_time/click counts). `p_right_target` (Stage 3-5's debiasing target) is the
+  P_RIGHT_TARGET VAL since the Hu debiaser (2026-11-11). Older sessions never logged it; their
+  repeat-after-error target (p=0.80, a deterministic function of the previous trial's own logged
+  outcome/side) is replayed trial-by-trial instead.
 - A camera snippet, refreshed from `CameraRecorder`'s own new live-frame JPEG export
   (`<video_stem>_latest.jpg`, see `_shared/camera_recorder.py`) rather than the growing
   `session_video.avi` file itself -- confirmed directly that `cv2.VideoWriter` (XVID/.avi) writes
@@ -112,7 +112,6 @@ import session_csv_parser     # noqa: E402
 import build_training_log     # noqa: E402
 import sync_training_log      # noqa: E402
 import wheel_shaping_plots    # noqa: E402
-import debiasing               # noqa: E402
 
 import openpyxl  # noqa: E402
 
@@ -153,8 +152,8 @@ VAR_PLOTS_POLL_MS = 500       # how often to read the watched CSV's new rows and
                               # (incremental -- see session_csv_parser.IncrementalSessionParser)
 VAR_CAMERA_POLL_MS = 1000     # how often to read the latest camera JPEG (see grab_latest_frame())
 VAR_STOP_GRACE_S = 8.0        # how long to wait for a graceful 'close' before escalating to kill
-VAR_DAILY_WATER_CAP_UL = 1500.0   # must match the stage scripts' own VAR_DAILY_WATER_CAP_UL
-VAR_DAILY_WATER_CAP_TASKS = ('stage1_wheel_shaping', 'stage2_threshold_staircase')
+VAR_DAY_WATER_NOTE_TASKS = ('stage1_wheel_shaping', 'stage2_threshold_staircase')   # launch label
+                              # shows the water consumed today (no daily cap since 2026-11-06)
 VAR_QUICK_DEATH_CHECK_MS = 2000   # how long after launch to check whether the task subprocess has
                                    # already died (e.g. missing dependency, bad COM port) -- long
                                    # enough for a real Bpod handshake/import to get underway, short
@@ -851,6 +850,10 @@ def _val_str(trial, key, session_vals=None):
     return v
 
 
+# The pre-2026-11-11 repeat-after-error probability, only to replay old sessions' side target.
+_OLD_DEBIAS_REPEAT_PROB = 0.80
+
+
 class PlotFeeder(object):
     """ Owns one long-lived WheelShapingPlots instance for the currently-watched session and feeds
     it incrementally -- each poll() call only replays trials beyond the count already fed, mirroring
@@ -879,20 +882,36 @@ class PlotFeeder(object):
                 session_status['in_trial_threshold_deg'] = float(cue_abort)
             except (TypeError, ValueError):
                 pass
-        # Stage 3 only -- SESSION_SIDE is a session-level VAL (registered once, before the first
-        # TRIAL marker, so it only ever lands in session_vals, never first_trial_vals -- but
-        # checking both mirrors every other lookup here and costs nothing). Missing this was
-        # exactly why the dashboard's own embedded progress panel showed "today's side: ?" even
-        # though the real task script's own separate live-plot window (which builds this same
-        # dict directly, not through a CSV round-trip) always showed the real side correctly.
-        session_side = first_trial_vals.get('SESSION_SIDE') or session_vals.get('SESSION_SIDE')
-        if session_side is not None:
-            session_status['session_side'] = session_side
+        # Session-level VALs (registered once, before the first TRIAL marker, so they land in
+        # session_vals) the progress panel's header and bars show: Stage 2's day-start rule and
+        # debias sigma, Stage 3's fade schedule.
+        def _num(key):
+            try:
+                return float(session_vals.get(key))
+            except (TypeError, ValueError):
+                return None
+        if info['stage'] == 2:
+            day = _num('STAGE2_DAY_NUMBER')
+            session_status['stage2_day'] = int(day) if day else None
+            session_status['prev_day_peak_deg'] = _num('PREV_DAY_MAX_THRESHOLD_DEG')
+            session_status['direction_sigma'] = _num('DIRECTION_SIGMA')
+            flags = [(name, _num(key)) for name, key in (
+                ('halved', 'THRESHOLD_BIAS_HALVED'), ('raised', 'THRESHOLD_DAY_START_RAISED'),
+                ('stepped', 'THRESHOLD_DAY_START_STEPPED'))]
+            if any(v is not None for _n, v in flags):
+                session_status['day_start_rule'] = ', '.join(n for n, v in flags if v) or 'unchanged'
+        if info['stage'] == 3:
+            step = _num('FADE_STEP')
+            session_status['fade_step'] = int(step) if step is not None else None
+            session_status['p_corr'] = _num('P_CORR')
+            session_status['tail_mode'] = session_vals.get('CLICK_TAIL_MODE')
+            session_status['asym_step'] = session_vals.get('ASYM_STEP')
         # Stage 4 only -- CLICK_LEVEL_ATTENUATED is a per-trial VAL, logged as the string
         # 'True'/'False' (see session_csv_parser's own str-vs-float VAL convention).
-        click_attenuated = first_trial_vals.get('CLICK_LEVEL_ATTENUATED')
+        click_attenuated = (first_trial_vals.get('CLICK_LEVEL_ATTENUATED')
+                            or session_vals.get('CLICK_LEVEL_ATTENUATED'))   # trial 1's pre-RUN VALs
         if click_attenuated is not None:
-            session_status['click_attenuated'] = (click_attenuated == 'True')
+            session_status['click_attenuated'] = str(click_attenuated) == 'True'
         # Stage 5 only -- STAIRCASE_ACTIVE is per-trial, STAIRCASE_ACTIVE_THIS_SESSION is the
         # session-level fallback (see stage5_resume_staircases.py's own two registrations).
         staircase_active = (first_trial_vals.get('STAIRCASE_ACTIVE')
@@ -960,10 +979,13 @@ class PlotFeeder(object):
             if state is not None and state[0] is not None:
                 kwargs['reward_time_abs'] = anchor + state[0]
 
+        if info['stage'] in (1, 2):
+            kwargs['day_water_ul'] = _val_float(trial, 'DAY_WATER_CONSUMED_UL', self.session_vals)
         if info['stage'] == 1:
             kwargs['gain_mult'] = _val_float(trial, 'GAIN_MULT', self.session_vals)
         elif info['stage'] == 2:
             kwargs['direction_ratio'] = _val_float(trial, 'DIRECTION_RATIO', self.session_vals)
+            kwargs['quiescence_s'] = _val_float(trial, 'QUIESCENCE_SCALE_S')
             iti_state = trial['states'].get('ITI')
             if iti_state is not None and iti_state[2] is not None:
                 kwargs['iti_s'] = iti_state[2]
@@ -973,12 +995,19 @@ class PlotFeeder(object):
             in_trial_threshold = _val_float(trial, 'CUE_ABORT_THRESHOLD_DEG', self.session_vals)
             if in_trial_threshold is not None:
                 kwargs['in_trial_threshold_deg'] = in_trial_threshold
+            kwargs['quiescence_s'] = _val_float(trial, 'QUIESCENCE_SCALE_S')
+            kwargs['e_right'] = _val_float(trial, 'E_RIGHT')   # Hu debiaser, fresh draws only
+            kwargs['e_left'] = _val_float(trial, 'E_LEFT')
 
-            if trial_type == 'repeat':
+            if trial_type in ('repeat', 'correction'):   # the side was fixed, not drawn
                 p_right_target = 1.0 if side == 'R' else 0.0
-            elif self._replay_prev_outcome == 'incorrect':
-                p_right_target = (debiasing.VAR_DEBIAS_REPEAT_PROB if self._replay_prev_side == 'R'
-                                   else 1.0 - debiasing.VAR_DEBIAS_REPEAT_PROB)
+            elif _val_float(trial, 'P_RIGHT_TARGET', self.session_vals) is not None:
+                p_right_target = _val_float(trial, 'P_RIGHT_TARGET', self.session_vals)
+            elif info['stage'] == 3:   # Stage 3 before 2026-11-11: the side was the block's/day's
+                p_right_target = 1.0 if side == 'R' else 0.0
+            elif self._replay_prev_outcome == 'incorrect':   # sessions before the Hu debiaser
+                p_right_target = (_OLD_DEBIAS_REPEAT_PROB if self._replay_prev_side == 'R'
+                                   else 1.0 - _OLD_DEBIAS_REPEAT_PROB)
             else:
                 p_right_target = 0.5
             kwargs['p_right_target'] = p_right_target
@@ -988,8 +1017,9 @@ class PlotFeeder(object):
                 state = trial['states'].get(outcome_state_name)
                 if state is not None and state[0] is not None:
                     kwargs['response_time_s'] = state[0]
-                n_l = _val_float(trial, 'N_CLICKS_L', self.session_vals)
-                n_r = _val_float(trial, 'N_CLICKS_R', self.session_vals)
+                cue = _val_float(trial, 'N_CLICKS_CUE_L') is not None   # Stage 3's click tail
+                n_l = _val_float(trial, 'N_CLICKS_CUE_L' if cue else 'N_CLICKS_L', self.session_vals)
+                n_r = _val_float(trial, 'N_CLICKS_CUE_R' if cue else 'N_CLICKS_R', self.session_vals)
                 if n_l is not None and n_r is not None:
                     kwargs['click_diff'] = n_r - n_l
                 self._replay_prev_outcome = 'correct' if outcome_raw == 'rewarded' else 'incorrect'
@@ -2003,26 +2033,14 @@ class SessionRunnerWindow(QWidget):
                                  'Choose a stage, subject, and user first.')
             return
         water_note = ''
-        if cfg.get('task_name') in VAR_DAILY_WATER_CAP_TASKS:
-            # Same per-day total the task itself uses for its cap (session_csv_parser).
+        if cfg.get('task_name') in VAR_DAY_WATER_NOTE_TASKS:
+            # Same per-day total the task itself logs (session_csv_parser).
             try:
                 today_ul, today_sessions = session_csv_parser.water_consumed_today(
                     _PROJECT_DIR, subject, datetime.datetime.now().strftime('%Y%m%d'))
             except Exception:
                 today_ul, today_sessions = 0.0, []
-            if today_ul >= VAR_DAILY_WATER_CAP_UL:
-                answer = QMessageBox.question(
-                    self, 'Daily water cap reached',
-                    '{0} has already consumed {1:.0f} uL today in {2} session(s) ({3}), at or over '
-                    'the {4:.0f} uL daily cap.\n\nThe session will end immediately, before the '
-                    'first trial. Start anyway?'.format(
-                        subject, today_ul, len(today_sessions), ', '.join(today_sessions),
-                        VAR_DAILY_WATER_CAP_UL),
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if answer != QMessageBox.Yes:
-                    return
-            water_note = " -- {0:.0f} uL of today's {1:.0f} uL water left".format(
-                max(0.0, VAR_DAILY_WATER_CAP_UL - today_ul), VAR_DAILY_WATER_CAP_UL)
+            water_note = " -- {0:.0f} uL water consumed earlier today".format(today_ul)
         try:
             session_path = self.launcher.start(cfg, subject, user,
                                                 reward_ul=self.reward_ul_input.value())
@@ -2338,12 +2356,14 @@ class SessionRunnerWindow(QWidget):
         else:
             saved_text = ('Header fields saved -- session row not found yet '
                           '(try again once the session has at least one trial).')
-        self.save_status_label.setText(saved_text + ' Committing to main...')
+        self.save_status_label.setText(saved_text + ' Committing and pushing to main...')
         self._commit_training_log(saved_text)
 
     def _commit_training_log(self, saved_text):
-        """ Commits the just-saved training_log.xlsx and any new session data onto the local
-        `main` branch (never pushes -- see sync_training_log.commit_data_locally()). Runs on a
+        """ Commits the just-saved training_log.xlsx and any new session data onto `main` and
+        pushes it (sync_training_log.sync(rebuild=False): fetch, commit, merge in other
+        computers' data, push; since 2026-11-05, it used to commit locally only). If the push
+        fails (offline, say), the commit stays local and the label says so. Runs on a
         background thread since git can be slow on some rigs (CLAUDE.md's Stage 3 startup-freeze
         note), polled via QTimer so the label is only ever touched from the GUI thread. The Save
         button stays disabled meanwhile, so a second save can't rewrite the file while git is
@@ -2352,10 +2372,10 @@ class SessionRunnerWindow(QWidget):
 
         def work():
             try:
-                result['msg'] = sync_training_log.commit_data_locally()
+                result['msg'] = sync_training_log.sync(rebuild=False)
             except Exception as err:
                 print(traceback.format_exc(), flush=True)
-                result['msg'] = 'Commit to main FAILED: {0}'.format(err)
+                result['msg'] = 'Commit/push to main FAILED: {0}'.format(err)
 
         thread = threading.Thread(target=work, daemon=True)
         self.save_weight_button.setEnabled(False)

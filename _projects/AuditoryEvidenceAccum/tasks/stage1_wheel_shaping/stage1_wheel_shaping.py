@@ -74,6 +74,9 @@ from bpod_trial_helpers import TrialRunner, was_visited, triggering_event, PC_EV
 from trial_render import run_trial_render_loop, register_trial_timing
 import host_clock
 import rotary_setup
+import lick_input
+# lick events: Port1In/Port1Out on every box (TrialRunner relabels training01's BNC2 input)
+LICK_IN, LICK_OUT = lick_input.lick_events()
 import dot_display
 from camera_recorder import CameraRecorder
 from liquid_calibration import get_reward_duration_s
@@ -132,8 +135,8 @@ VAR_PROJECT_DIR = os.path.abspath(os.path.join(_TASK_DIR, '..', '..'))
 # --- stage parameters (training_protocol.md Part 4, Stage 1's table) --------------------------------
 
 VAR_MAX_TRIALS = 400                # hard-ceiling SAFETY backstop only, above both real caps
-                                     # below (VAR_TRIAL_COUNT_ADVANCE trials / VAR_SESSION_WATER_
-                                     # CAP_UL) -- should essentially never be the thing that
+                                     # below (VAR_TRIAL_CAP trials / 30 minutes) -- should
+                                     # essentially never be the thing that
                                      # actually ends a session.
 # If the LAST session for this subject+protocol ended via Stop/Kill/crash (no SESSION_END_REASON
 # registered) and this one is starting soon enough to count as its own continuation (same
@@ -176,14 +179,12 @@ VAR_TRIAL_COUNT_ADVANCE = 100       # The QUALIFYING threshold only (lowered fro
                                      # those two numbers used to share one variable/value, but per
                                      # explicit instruction they're now independent: a session can
                                      # run well past 100 rewarded trials before actually ending.
-VAR_TRIAL_CAP = 250                 # The session's own hard trial-count cap (one of three --
-                                     # see below), checked against every ATTEMPTED trial
-                                     # (rewarded or not), not the qualifying count above.
-VAR_DAILY_WATER_CAP_UL = 1500.0     # CONSUMED per animal per calendar DAY, across all of its
-                                     # sessions (session_csv_parser.water_consumed_today()).
-                                     # Per explicit instruction: three caps on the session --
-                                     # VAR_TRIAL_CAP trials, 1.5mL consumed, or 30 minutes
-                                     # elapsed -- whichever comes first.
+VAR_TRIAL_CAP = 250                 # The session's own hard trial-count cap (one of two, with
+                                     # 30 minutes elapsed -- whichever comes first), checked
+                                     # against every ATTEMPTED trial (rewarded or not), not the
+                                     # qualifying count above. (The 1.5mL daily water cap was
+                                     # removed 2026-11-06, per explicit instruction; consumed
+                                     # water is still logged.)
 VAR_SESSION_DURATION_CAP_S = 30 * 60
 
 VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target reward volume --
@@ -197,9 +198,9 @@ VAR_REWARD_UL = float(os.environ.get('RUN_SESSION_REWARD_UL', 4.0))   # target r
 VAR_REWARD_DURATION = get_reward_duration_s(VAR_REWARD_UL)
 
 VAR_DOT_ONSET_JITTER_MIN_S = 0.1    # J1 (training_protocol.md SS1.5) -- runs at its FINAL value
-VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes (doc: "the LED->dot and
-VAR_DOT_DISAPPEAR_MIN_S = 0.4       # crossing->offset relationships should never change during
-VAR_DOT_DISAPPEAR_MAX_S = 0.9       # training")
+VAR_DOT_ONSET_JITTER_MAX_S = 0.2    # from Stage 1 onward and never changes
+VAR_DOT_DISAPPEAR_MIN_S = staircase.DOT_DISAPPEAR_MIN_S   # J2, shared by all stages (spec A5)
+VAR_DOT_DISAPPEAR_MAX_S = staircase.DOT_DISAPPEAR_MAX_S
 
 VAR_DOT_EDGE_FRACTION = 0.9         # SS1.3: place the threshold at ~90% of edge azimuth
 VAR_GAIN_INITIAL_MULT = 3.0         # decays via staircase.decay_gain() (-0.1x/qualifying session,
@@ -263,8 +264,9 @@ event_names = rotary_setup.set_and_enable_thresholds(
 rotary.enable_evt_transmission()
 neg_event, pos_event = event_names[0], event_names[1]
 
-my_bpod.register_value('THRESHOLD_DEG', cur_threshold_deg)
+my_bpod.register_value('THRESHOLD_DEG', round(cur_threshold_deg, 3))
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
+lick_input.register_lick_input(my_bpod)   # LICK_INPUT=Port1 (logged names), LICK_INPUT_PHYSICAL
 my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.
@@ -322,7 +324,7 @@ bench_plots = WheelShapingPlots(
 
 # --- trial loop -----------------------------------------------------------------------------------
 
-# The water cap is per DAY: what this animal already consumed in today's earlier sessions counts.
+# Logged only (no cap since 2026-11-06): what this animal already consumed in today's earlier sessions.
 water_earlier_today_ul, _water_earlier_sessions = session_csv_parser.water_consumed_today(
     VAR_PROJECT_DIR, VAR_SUBJECT_ID, os.path.basename(os.path.abspath(os.getcwd()))[:8],
     exclude_session=os.path.basename(os.path.abspath(os.getcwd())))
@@ -331,27 +333,19 @@ print("Water consumed earlier today: {0:.0f}uL in {1} session(s){2}".format(
     water_earlier_today_ul, len(_water_earlier_sessions),
     ' ({0})'.format(', '.join(_water_earlier_sessions)) if _water_earlier_sessions else ''),
     flush=True)
-print("Starting up to {0} trials, capped at {1} attempted trials, {2:.1f}mL consumed today, or "
-      "{3:.0f}min elapsed -- whichever first ({4} REWARDED trials targeted for "
+print("Starting up to {0} trials, capped at {1} attempted trials or "
+      "{2:.0f}min elapsed -- whichever first ({3} REWARDED trials targeted for "
       "advancement)".format(
-          VAR_MAX_TRIALS, VAR_TRIAL_CAP, VAR_DAILY_WATER_CAP_UL / 1000.0,
+          VAR_MAX_TRIALS, VAR_TRIAL_CAP,
           VAR_SESSION_DURATION_CAP_S / 60.0, VAR_TRIAL_COUNT_ADVANCE), flush=True)
 
 session_trial_count = 0
 session_reward_ul_total = 0.0
-water = ConsumedWaterTracker(VAR_REWARD_UL)   # the water cap counts CONSUMED water
+water = ConsumedWaterTracker(VAR_REWARD_UL)   # CONSUMED water, logged per trial
 session_start_time = host_clock.now()
 session_end_reason = None
-skipped_for_daily_cap = False   # ended before trial 1: no session happened
 
 for trial in range(1, VAR_MAX_TRIALS + 1):
-    if trial == 1 and water_earlier_today_ul >= VAR_DAILY_WATER_CAP_UL:
-        session_end_reason = 'water_cap'
-        skipped_for_daily_cap = True
-        print("Daily water cap already reached ({0:.0f}uL of {1:.0f}uL consumed today) -- ending "
-              "before the first trial.".format(water_earlier_today_ul, VAR_DAILY_WATER_CAP_UL),
-              flush=True)
-        break
     try:
         # J1 lives INSIDE the quiescence requirement (per explicit instruction: the dot may only
         # appear after quiescence, and the wheel is zeroed the moment it does): the wheel must stay
@@ -522,6 +516,7 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         runner.register('MOVEMENT_DIRECTION', side if side is not None else 'none')
         runner.register('OUTCOME', outcome)
         runner.register('GAIN_MULT', cur_gain_mult)
+        runner.register('DOT_DISAPPEAR_JITTER_S', disappear_delay_s)
         if rewarded:
             runner.register('THRESHOLD_CROSSING_TIME', send_t + visited[outcome_state][-1][0])
 
@@ -529,13 +524,13 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
             trial, quiescence_hold_s, n_breaks, outcome,
             " ({0})".format(side) if side else "", cur_gain_mult), flush=True)
 
-        # Port1In/Port1Out licks are already natively logged as raw EVENT rows in the session CSV
+        # Licks (LICK_IN/LICK_OUT) are already natively logged as raw EVENT rows in the session CSV
         # (see CLAUDE.md) -- register_port_events() also explicitly registers both edges as their
         # own VALs (per explicit instruction: always report port in AND out times, not just in --
         # useful on its own, and makes per-contact duration directly auditable without hand-
         # parsing raw EVENT rows, relevant to a suspected sensor debounce/threshold issue).
         lick_times_abs, _lick_times_out = runner.register_port_events('LICK', choice_events, send_t)
-        water.record_trial(choice_events.get('Port1In', []), visited['Reward'][-1][0] if rewarded else None)
+        water.record_trial(choice_events.get(LICK_IN, []), visited['Reward'][-1][0] if rewarded else None)
         runner.register('SESSION_WATER_CONSUMED_UL', water.consumed_ul)
         runner.register('DAY_WATER_CONSUMED_UL', water_earlier_today_ul + water.consumed_ul)
         reward_time_abs = send_t + visited['Reward'][-1][0] if rewarded else None
@@ -544,18 +539,17 @@ for trial in range(1, VAR_MAX_TRIALS + 1):
         bench_plots.add_trial(side or 'R', magnitude_deg, cur_threshold_deg,
                                'Abort' if early else outcome,
                                gain_mult=cur_gain_mult, lick_times_abs=lick_times_abs,
-                               reward_time_abs=reward_time_abs)
+                               reward_time_abs=reward_time_abs,
+                               day_water_ul=water_earlier_today_ul + water.consumed_ul)
 
         # Deliberate session cap, per explicit instruction: stop at VAR_TRIAL_CAP ATTEMPTED
-        # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold),
-        # 1.5mL CONSUMED today (licked after delivery, all of the day's sessions), or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400)
+        # trials (not the separate, smaller VAR_TRIAL_COUNT_ADVANCE qualifying-count threshold)
+        # or 30 minutes elapsed -- whichever comes first. VAR_MAX_TRIALS (400)
         # above is only a further-out safety backstop, not the real target. Checked at trial end
         # (not trial start) so the trial that actually crosses a cap still completes and gets
         # logged.
         if trial >= VAR_TRIAL_CAP:
             session_end_reason = 'trial_count_cap'
-        elif water_earlier_today_ul + water.consumed_ul >= VAR_DAILY_WATER_CAP_UL:
-            session_end_reason = 'water_cap'
         elif (host_clock.now() - session_start_time) >= VAR_SESSION_DURATION_CAP_S:
             session_end_reason = 'duration_cap_30min'
         if session_end_reason is not None:
@@ -588,8 +582,7 @@ if session_end_reason is not None:
 # by the time the session actually ends; >= still correctly recognizes "met or exceeded."
 cleared_this_session = session_trial_count >= VAR_TRIAL_COUNT_ADVANCE
 history = state.get('sessions_trial_count_history')
-if not skipped_for_daily_cap:   # a session that never ran is not a non-qualifying session
-    history.append(cleared_this_session)
+history.append(cleared_this_session)
 state.set('sessions_trial_count_history', history[-2:])   # only need the last 2 to judge
                                                             # "two consecutive"
 

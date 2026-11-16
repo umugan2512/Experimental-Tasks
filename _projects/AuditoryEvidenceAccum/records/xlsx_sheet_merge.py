@@ -56,6 +56,8 @@ def merge_workbooks(theirs_bytes, ours_bytes, our_sheet_names):
         else:
             index = len(theirs.sheetnames)
         _copy_sheet(ours[name], theirs.create_sheet(name, index))
+    for name in [n for n in theirs.sheetnames if 'test' in n.lower()]:   # real animals only
+        theirs.remove(theirs[name])
     out = io.BytesIO()
     theirs.save(out)
     return out.getvalue()

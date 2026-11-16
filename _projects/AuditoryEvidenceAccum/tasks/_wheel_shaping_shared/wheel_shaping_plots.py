@@ -64,6 +64,7 @@ import time
 
 import matplotlib.pyplot as plt
 
+import choice_regression   # Stage 3/4's click-weight criterion, refit live
 import staircase   # for Stage 4's own target constants (STAGE4_RESPONSE_THRESHOLD_FINAL_FRACTION/
                     # QUIESCENCE_CEILING_S/QUIESCENCE_FLOOR_S), so the progress panel's fractions
                     # match the task script's own advancement gate exactly rather than a second,
@@ -125,7 +126,8 @@ OUTCOME_COLORS = {
 SIDE_COLORS = {'L': 'tab:blue', 'R': 'tab:red'}
 LICK_COLOR = 'tab:cyan'
 FIRST_LICK_COLOR = 'tab:pink'
-TRIAL_TYPE_MARKERS = {'main': 'o', 'warmup': '^', 'repeat': 's'}
+TRIAL_TYPE_MARKERS = {'main': 'o', 'warmup': '^', 'repeat': 's', 'correction': 'D'}
+CLICK_Z_REFIT_EVERY = 10   # responded main trials between live click-weight refits
 
 # Stage 3/4's whole-session outcome-percentage bars -- a fixed 4-category vocabulary (not the same
 # as OUTCOME_COLORS' raw per-protocol outcome strings above), one bar order/coloring used
@@ -170,9 +172,11 @@ class WheelShapingPlots(object):
             annotated (e.g. Stage 1 has no 'iti_s').
         :param dict session_status: Stage 3/4/5 only -- static-for-the-whole-session display info
             the progress panel can't derive from prev_session_values/add_trial() alone:
-            {'in_trial_threshold_deg': 10.0} (Stage 4/5, the in-trial abort threshold in force),
-            {'session_side': 'R'} (Stage 3 only, today's fixed side),
-            {'click_attenuated': True} (Stage 4 only, whether the click-level ramp is still active),
+            {'in_trial_threshold_deg': 10.0} (Stage 3-5, the in-trial abort threshold in force),
+            {'stage2_day', 'day_start_rule', 'prev_day_peak_deg', 'direction_sigma'} (Stage 2),
+            {'fade_step', 'p_corr', 'tail_mode', 'asym_step'} (Stage 3's fade schedule),
+            {'click_attenuated': True} (Stage 3/4, whether the clicks are still -6dB),
+            {'sessions_in_a_row': 1} (Stage 4, qualifying sessions so far),
             {'staircase_active': 'response'} (Stage 5 only, this session's Tag-B selection).
         :param float reward_ul: this session's own VAR_REWARD_UL (constant for the whole session,
             same as threshold_final_deg) -- used only to show total CONSUMED water (reward_ul times
@@ -222,8 +226,21 @@ class WheelShapingPlots(object):
         self._accuracy_trial_idx = []
         self._accuracy_values = []       # 1.0/0.0 per MAIN trial, for the rolling-mean line
         self._accuracy_rolling = []
-        self._accuracy_marker_idx = {'main': [], 'warmup': [], 'repeat': []}
-        self._accuracy_marker_val = {'main': [], 'warmup': [], 'repeat': []}
+        self._accuracy_marker_idx = {t: [] for t in TRIAL_TYPE_MARKERS}
+        self._accuracy_marker_val = {t: [] for t in TRIAL_TYPE_MARKERS}
+        # Progress-panel tallies (every stage) and the live click-weight fit (Stage 3/4).
+        self._rewarded_count = 0
+        self._withheld_count = 0
+        self._turns = {'L': 0, 'R': 0}
+        self._main_responded = 0
+        self._main_correct = 0
+        self._cur_day_water_ul = None
+        self._cur_quiescence_s = None
+        self._warmup_ended_at = None
+        self._choice_trials = []
+        self._click_fit = None
+        self._click_z_series = []        # (trial, z) at each refit
+        self._e_series = []              # (trial, e_right, e_left), Hu debiaser (Stage 3-5)
         self._consecutive_aborts = 0
         self._last_trial_time_s = None
         self._time_since_last_trial_s = None
@@ -275,7 +292,7 @@ class WheelShapingPlots(object):
                       ['reaction_time', 'reward_licks'],
                       ['staircase_trajectory', 'staircase_trajectory'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 0.8, 1.0, 1.1, 1.1, 0.9, 0.9]
+            height_ratios = [2.2, 1.1, 1.0, 1.1, 1.1, 0.9, 0.9]
         elif stage == 2:
             # Each label's cells must form one contiguous rectangle (subplot_mosaic's own
             # requirement).
@@ -284,13 +301,13 @@ class WheelShapingPlots(object):
                       ['staircase_trajectory', 'staircase_trajectory'],
                       ['reward_licks', 'reward_licks'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 1.0, 0.9, 1.3, 1.0]
+            height_ratios = [2.2, 1.2, 0.9, 1.3, 1.0]
         else:
             mosaic = [['raster', 'raster'],
                       ['progress', 'progress'],
                       ['reward_licks', 'reward_licks'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 0.8, 1.3, 1.0]
+            height_ratios = [2.2, 1.1, 1.3, 1.0]
 
         self._embed = embed
         # headless: keep accumulating data but never draw. Stage scripts launched from
@@ -358,7 +375,7 @@ class WheelShapingPlots(object):
                    direction_ratio=None, lick_times_abs=None, reward_time_abs=None,
                    trial_type=None, in_trial_threshold_deg=None, p_right_target=None,
                    response_time_s=None, click_diff=None, stim_duration_s=None,
-                   quiescence_s=None):
+                   quiescence_s=None, day_water_ul=None, e_right=None, e_left=None):
         """ Call once per trial. side='L'/'R' (whichever direction the movement was, even if
         below threshold -- use the larger-magnitude direction for a NoMovement trial); magnitude_deg
         is the signed peak displacement that trial; outcome is 'Rewarded'/'Withheld'/'NoMovement'
@@ -391,13 +408,17 @@ class WheelShapingPlots(object):
         parameter). stim_duration_s (Stage 3/4 only) / quiescence_s (Stage 5 only) -- this
         trial's own CURRENT staircase.BoundedStaircase/QuiescenceStaircase value, feeds the
         staircase-trajectory panel alongside threshold_deg/iti_s (Stage 2/3/4/5 all feed that
-        panel from whichever of these four values apply to that stage). """
+        panel from whichever of these four values apply to that stage). quiescence_s is also the
+        Stage 2 quiescence scale. day_water_ul (Stage 1/2): water consumed today so far, for the
+        progress panel. e_right/e_left (Stage 3-5): the Hu debiaser's error rates, for the
+        side-bias panel. """
         self._session_trial_count += 1
         self._trial_idx.append(self._session_trial_count)
         signed_mag = magnitude_deg if side == 'R' else -magnitude_deg
         self._magnitude_deg.append(signed_mag)
         self._side_colors.append(OUTCOME_COLORS.get(outcome, 'gray'))
 
+        self._cur_side = side
         self._cur_threshold_deg = threshold_deg
         self._cur_gain_mult = gain_mult
         self._cur_iti_s = iti_s
@@ -407,6 +428,16 @@ class WheelShapingPlots(object):
         self._quiescence_s_series.append(quiescence_s)
         if direction_ratio is not None:
             self._direction_ratio_series.append(direction_ratio)
+        if day_water_ul is not None:
+            self._cur_day_water_ul = day_water_ul
+        if quiescence_s is not None:
+            self._cur_quiescence_s = quiescence_s
+        if outcome in ('Rewarded', 'Reward'):
+            self._rewarded_count += 1
+        elif outcome == 'Withheld':
+            self._withheld_count += 1
+        if outcome in ('Rewarded', 'Withheld') and side in self._turns:
+            self._turns[side] += 1
         if in_trial_threshold_deg is not None:
             self._cur_in_trial_threshold_deg = in_trial_threshold_deg
 
@@ -431,9 +462,27 @@ class WheelShapingPlots(object):
             if outcome4_key is not None:
                 self._outcome4_counts[outcome4_key] += 1
 
+            ttype0 = trial_type or 'main'
+            if ttype0 == 'main' and self._warmup_ended_at is None:
+                self._warmup_ended_at = row
+            if outcome in ('Reward', 'NoReward'):
+                choice = side if outcome == 'Reward' else ('L' if side == 'R' else 'R')
+                self._choice_trials.append({'choice': choice, 'stim': side,
+                                            'rewarded': outcome == 'Reward', 'fit': ttype0 == 'main'})
+                if ttype0 == 'main':
+                    self._main_responded += 1
+                    self._main_correct += outcome == 'Reward'
+                    if self._stage in (3, 4) and self._main_responded % CLICK_Z_REFIT_EVERY == 0:
+                        self._click_fit = choice_regression.fit_choice_regression(self._choice_trials)
+                        if self._click_fit is not None:
+                            self._click_z_series.append((row, self._click_fit['z_click']))
+            if e_right is not None and e_left is not None:
+                self._e_series.append((row, e_right, e_left))
+
             if p_right_target is not None:
                 self._sidebias_trial_idx.append(row)
-                self._p_right_target_series.append(p_right_target)
+                self._p_right_target_series.append(
+                    p_right_target if ttype0 in ('main', 'warmup') else float('nan'))
                 self._side_history.append(side)
                 window = self._side_history[-20:]
                 self._recent_right_frac_series.append(
@@ -508,24 +557,30 @@ class WheelShapingPlots(object):
 
     # --- progress / staircase state (persistent bars, mirrors live_plots_lookback.py's style) ------
 
+    _PROGRESS_LABELS = {
+        1: ['rewarded/100', 'threshold/20% cap', 'gain -> 2.0x', 'L/R balance', 'water today'],
+        2: ['trials/100', 'threshold/35deg', 'ITI/1.5s', 'withheld (<20%)', 'quiescence/0.25s'],
+        3: ['main trials/100', 'fade step/5', 'accuracy (main)', 'aborts (<30%)', 'click z/3'],
+        4: ['main trials/100', 'accuracy/70%', 'aborts (<20%)', 'click z/3', 'click level'],
+        5: ['main trials/100', 'response/target', 'quiescence/target', 'aborts (<25%)'],
+    }
+
     def _setup_progress_axes(self):
+        """ One bar per number the stage's own advancement or health check uses, each scaled so
+        1.0 (the dashed line) is its target; green once met, orange when a must-stay-below value
+        is over its limit. """
         ax = self._axes['progress']
-        if self._stage == 1:
-            labels = ['trials/200', 'threshold/final', 'gain (final=1.0x)']
-        elif self._stage == 2:
-            labels = ['trials/200', 'threshold/final', 'ITI/1.5s']
-        elif self._stage == 3:
-            labels = ['main trials', 'response thresh (frozen)', "today's side"]
-        elif self._stage == 4:
-            labels = ['main trials', 'response thresh (frozen)', 'click level']
-        else:   # stage 5
-            labels = ['main trials', 'response thresh/target', 'quiescence/target']
+        labels = self._PROGRESS_LABELS[self._stage]
         self._progress_bars = ax.barh(labels, [0] * len(labels), color='tab:blue')
-        self._progress_texts = [ax.text(0.02, i, '', va='center', fontsize=8)
+        self._progress_texts = [ax.text(0.02, i, '', va='center', fontsize=7,
+                                        bbox=dict(facecolor='white', alpha=0.75, edgecolor='none', pad=1))
                                  for i in range(len(labels))]
+        ax.invert_yaxis()
         ax.axvline(1.0, color='black', linestyle='--', linewidth=0.8)
         ax.set_xlim(0, 1.3)
-        ax.set_title('Session progress (vs. last session, in parens)')
+        ax.tick_params(axis='y', labelsize=7)
+        ax.tick_params(axis='x', labelsize=6)
+        self._progress_title = ax.set_title('Session progress', fontsize=8)
         _style_axes(ax)
 
     def _prev_session_suffix(self, key, fmt):
@@ -537,81 +592,134 @@ class WheelShapingPlots(object):
             return ''
         return ' (was {0})'.format(fmt.format(self._prev_session_values[key]))
 
-    def _redraw_progress(self, ax):
-        trial_frac = min(self._session_trial_count / 200.0, 1.3)
-        threshold_frac = min((self._cur_threshold_deg or 0) / self._threshold_final_deg, 1.3)
-        threshold_text = '{0:.1f}/{1:.0f}deg{2}'.format(
-            self._cur_threshold_deg or 0, self._threshold_final_deg,
-            self._prev_session_suffix('threshold_deg', '{0:.1f}deg'))
-        colors = None
+    def _progress_header(self):
+        """ The title line: what this session started with, per stage. """
+        st = self._session_status
+        parts = []
+        if self._stage == 2:
+            if st.get('stage2_day'):
+                parts.append('day {0}'.format(st['stage2_day']))
+            if st.get('day_start_rule'):
+                parts.append('start {0}{1}'.format(
+                    st['day_start_rule'], ' from {0:g}deg peak'.format(st['prev_day_peak_deg'])
+                    if st.get('prev_day_peak_deg') and 'stepped' in st['day_start_rule'] else ''))
+            if st.get('direction_sigma') is not None:
+                parts.append('debias sigma {0:g}'.format(st['direction_sigma']))
+        if self._stage in (3, 4, 5):
+            if self._stage == 3 and st.get('asym_step') not in (None, 'off'):
+                parts.append('ASYMMETRIC threshold step {0}'.format(st['asym_step']))
+            if self._stage == 4 and st.get('sessions_in_a_row') is not None:
+                parts.append('qualifying in a row {0}/3'.format(st['sessions_in_a_row']))
+            if st.get('click_attenuated'):
+                parts.append('clicks -6dB')
+            parts.append('warm-up ended at trial {0}'.format(self._warmup_ended_at)
+                         if self._warmup_ended_at else 'warm-up')
+        return 'Session progress' + (' -- ' + ', '.join(parts) if parts else '')
+
+    def _progress_specs(self):
+        """ [(fraction of target, text, state)] per bar; state 'ok' (green when >= 1), 'bad'
+        (orange: over a must-stay-below limit) or 'info' (blue). """
+        thr = self._cur_threshold_deg or 0
+        n = self._session_trial_count
+        st = self._session_status
+        aborts = self._outcome4_counts.get('abort', 0)
+        abort_rate = aborts / float(n) if n else 0.0
+        acc = self._main_correct / float(self._main_responded) if self._main_responded else None
+        z = self._click_fit['z_click'] if self._click_fit else None
+
+        def _limit(value, limit, text):
+            return (min(value / limit, 1.3), text, 'bad' if value >= limit else 'info')
+
+        def _z_bar():
+            if z is None:
+                return (0.0, 'click z: needs {0} main trials'.format(
+                    choice_regression.CHOICE_REGRESSION_MIN_TRIALS), 'info')
+            met = self._click_fit['criterion_met']
+            return (min(max(z, 0.0) / choice_regression.CLICK_WEIGHT_Z_CRITERION, 1.3),
+                    'click z {0:.1f} (weight {1:.2f}, history {2:.2f}/{3:.2f}){4}'.format(
+                        z, self._click_fit['b_click'], self._click_fit['b_prev'],
+                        self._click_fit['b_win'], ' MET' if met else ''), 'ok' if met else 'info')
+
         if self._stage == 1:
-            # Gain DECAYS toward 1.0x (unlike every other bar here, which grows toward its
-            # target) -- framed as "fraction of the way decayed from the initial 2.0x down to
-            # 1.0x" so the bar still fills up (and turns green) as training progresses, same
-            # visual language as the other bars, instead of a raw gain_mult/1.0 ratio that would
-            # show FULL/green at the *start* of the stage (furthest from converged) and empty once
-            # actually converged -- backwards.
-            gain_mult = self._cur_gain_mult or GAIN_INITIAL_MULT_DISPLAY_REF
-            decay_progress = ((GAIN_INITIAL_MULT_DISPLAY_REF - gain_mult) /
-                               (GAIN_INITIAL_MULT_DISPLAY_REF - 1.0))
-            gain_frac = min(max(decay_progress, 0.0), 1.3)
-            fracs = [trial_frac, threshold_frac, gain_frac]
-            texts = ['{0}/200'.format(self._session_trial_count),
-                     threshold_text,
-                     '{0:.2f}x (target 1.0x){1}'.format(
-                         gain_mult, self._prev_session_suffix('gain_mult', '{0:.2f}x'))]
-        elif self._stage == 2:
-            iti_frac = min((self._cur_iti_s or 0) / 1.5, 1.3)
-            fracs = [trial_frac, threshold_frac, iti_frac]
-            texts = ['{0}/200'.format(self._session_trial_count),
-                     threshold_text,
-                     '{0:.2f}/1.50s{1}'.format(
-                         self._cur_iti_s or 0, self._prev_session_suffix('iti_s', '{0:.2f}s'))]
-        elif self._stage == 3:
-            session_side = self._session_status.get('session_side')
-            fracs = [trial_frac, threshold_frac, 1.0]
-            texts = ['{0} (this session)'.format(self._session_trial_count),
-                     '{0:.1f}deg (frozen from Stage 2)'.format(self._cur_threshold_deg or 0),
-                     "today's side: {0}".format(session_side or '?')]
-            colors = ['tab:blue', 'tab:blue', SIDE_COLORS.get(session_side, 'tab:blue')]
-        elif self._stage == 4:
-            attenuated = bool(self._session_status.get('click_attenuated'))
-            click_frac = 0.5 if attenuated else 1.0
-            fracs = [trial_frac, threshold_frac, click_frac]
-            texts = ['{0} (this session)'.format(self._session_trial_count),
-                     '{0:.1f}deg (frozen from Stage 2)'.format(self._cur_threshold_deg or 0),
-                     'ATTENUATED (-6dB)' if attenuated else 'FULL LEVEL']
-            colors = ['tab:blue', 'tab:blue', 'tab:orange' if attenuated else 'tab:green']
-        else:   # stage 5
-            active = self._session_status.get('staircase_active')
-            resp_target = staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
-            resp_frac = min((self._cur_threshold_deg or 0)
-                             / (resp_target * self._threshold_final_deg), 1.3)
-            quiescence_s = self._session_status.get('quiescence_s')
-            q_span = staircase.QUIESCENCE_CEILING_S - staircase.QUIESCENCE_FLOOR_S
-            q_frac = (min(max((quiescence_s - staircase.QUIESCENCE_FLOOR_S) / q_span, 0.0), 1.3)
-                      if quiescence_s is not None else 0.0)
-            fracs = [trial_frac, resp_frac, q_frac]
-            texts = ['{0} (this session)'.format(self._session_trial_count),
-                     '{0:.1f}deg (target {1:.0%} of final){2}'.format(
-                         self._cur_threshold_deg or 0, resp_target,
-                         '  <- ACTIVE' if active == 'response' else ''),
-                     '{0}s (target {1:.1f}s){2}'.format(
-                         '{0:.3f}'.format(quiescence_s) if quiescence_s is not None else '?',
-                         staircase.QUIESCENCE_CEILING_S,
-                         '  <- ACTIVE' if active == 'quiescence' else '')]
-            colors = ['tab:blue',
-                      'tab:orange' if active == 'response' else 'tab:blue',
-                      'tab:orange' if active == 'quiescence' else 'tab:blue']
-        for i, (bar, text, frac, label) in enumerate(
-                zip(self._progress_bars, self._progress_texts, fracs, texts)):
+            cap = staircase.THRESHOLD_GROWTH_CEILING_FRACTION * self._threshold_final_deg
+            gain = self._cur_gain_mult or GAIN_INITIAL_MULT_DISPLAY_REF
+            gain_start = self._prev_session_values.get('gain_mult', gain) or gain
+            gain_frac = (1.0 if gain <= staircase.GAIN_FLOOR_MULT else
+                         min(max((3.0 - gain) / (3.0 - staircase.GAIN_FLOOR_MULT), 0.0), 1.0))
+            l, r = self._turns['L'], self._turns['R']
+            water = self._cur_day_water_ul
+            return [
+                (min(self._rewarded_count / 100.0, 1.3), '{0} rewarded'.format(self._rewarded_count), 'ok'),
+                (min(thr / cap, 1.3) if cap else 0, '{0:.1f}/{1:.1f}deg{2}'.format(
+                    thr, cap, self._prev_session_suffix('threshold_deg', '{0:.1f}deg')), 'ok'),
+                (gain_frac, '{0:.2f}x (floor {1:.1f}x){2}'.format(
+                    gain, staircase.GAIN_FLOOR_MULT, self._prev_session_suffix('gain_mult', '{0:.2f}x')), 'ok'),
+                (min(l, r) / float(max(l, r)) if max(l, r) else 0.0, 'L {0} / R {1}'.format(l, r), 'ok'),
+                ((min(water / 1500.0, 1.3), '{0:.0f} uL consumed today (line: 1.5 mL)'.format(water), 'info')
+                 if water is not None else (0.0, 'water today: n/a', 'info')),
+            ]
+        if self._stage == 2:
+            responded = self._rewarded_count + self._withheld_count
+            withheld = self._withheld_count / float(responded) if responded else 0.0
+            q = self._cur_quiescence_s
+            return [
+                (min(n / 100.0, 1.3), '{0} trials'.format(n), 'ok'),
+                (min(thr / self._threshold_final_deg, 1.3), '{0:.1f}/{1:.0f}deg{2}'.format(
+                    thr, self._threshold_final_deg,
+                    self._prev_session_suffix('threshold_deg', '{0:.1f}deg')), 'ok'),
+                (min((self._cur_iti_s or 0) / 1.5, 1.3), '{0:.2f}/1.50s{1}'.format(
+                    self._cur_iti_s or 0, self._prev_session_suffix('iti_s', '{0:.2f}s')), 'ok'),
+                _limit(withheld, 0.20, '{0:.0%} of turns withheld ({1} L / {2} R turns)'.format(
+                    withheld, self._turns['L'], self._turns['R'])),
+                ((min(q / staircase.STAGE234_QUIESCENCE_CEILING_S, 1.3), 'scale {0:.3f}s'.format(q), 'ok')
+                 if q is not None else (0.0, 'fixed 0.1s (unlocks once the threshold steps up)', 'info')),
+            ]
+        if self._stage == 3:
+            step = st.get('fade_step')
+            return [
+                (min(self._main_responded / 100.0, 1.3), '{0} responded main'.format(self._main_responded), 'ok'),
+                ((step or 0) / 5.0, 'step {0}: p_corr {1}, clicks until {2}'.format(
+                    step, st.get('p_corr'), str(st.get('tail_mode', '?')).replace('_', ' ')), 'ok'),
+                ((min(acc / 0.70, 1.3), '{0:.0%} correct (no correction trials)'.format(acc), 'info')
+                 if acc is not None else (0.0, 'accuracy: n/a', 'info')),
+                _limit(abort_rate, 0.30, '{0:.0%} of trials'.format(abort_rate)),
+                _z_bar(),
+            ]
+        if self._stage == 4:
+            attenuated = bool(st.get('click_attenuated'))
+            return [
+                (min(self._main_responded / 100.0, 1.3), '{0} responded main'.format(self._main_responded), 'ok'),
+                ((min(acc / 0.70, 1.3), '{0:.0%} correct'.format(acc), 'ok') if acc is not None
+                 else (0.0, 'accuracy: n/a', 'info')),
+                _limit(abort_rate, 0.20, '{0:.0%} of trials'.format(abort_rate)),
+                _z_bar(),
+                (0.5 if attenuated else 1.0, 'ATTENUATED (-6dB)' if attenuated else 'FULL LEVEL',
+                 'bad' if attenuated else 'ok'),
+            ]
+        active = st.get('staircase_active')
+        resp_target = staircase.STAGE5_RESPONSE_THRESHOLD_FINAL_FRACTION
+        q = self._cur_quiescence_s if self._cur_quiescence_s is not None else st.get('quiescence_s')
+        q_span = staircase.QUIESCENCE_CEILING_S - staircase.QUIESCENCE_FLOOR_S
+        return [
+            (min(self._main_responded / 100.0, 1.3), '{0} responded main'.format(self._main_responded), 'ok'),
+            (min(thr / (resp_target * self._threshold_final_deg), 1.3), '{0:.1f}deg (target {1:.0%}){2}'.format(
+                thr, resp_target, '  <- ACTIVE' if active == 'response' else ''), 'ok'),
+            ((min(max((q - staircase.QUIESCENCE_FLOOR_S) / q_span, 0.0), 1.3),
+              '{0:.3f}s (target {1:.2f}s){2}'.format(q, staircase.QUIESCENCE_CEILING_S,
+                                                    '  <- ACTIVE' if active == 'quiescence' else ''), 'ok')
+             if q is not None else (0.0, '?', 'info')),
+            _limit(abort_rate, 0.25, '{0:.0%} of trials'.format(abort_rate)),
+        ]
+
+    def _redraw_progress(self, ax):
+        for i, (bar, text, (frac, label, state)) in enumerate(
+                zip(self._progress_bars, self._progress_texts, self._progress_specs())):
             bar.set_width(frac)
-            if colors is not None:
-                bar.set_color('tab:green' if frac >= 1.0 and colors[i] == 'tab:blue' else colors[i])
-            else:
-                bar.set_color('tab:green' if frac >= 1.0 else 'tab:blue')
-            text.set_position((frac + 0.02, i))
+            bar.set_color('tab:orange' if state == 'bad' else
+                          'tab:green' if state == 'ok' and frac >= 1.0 else 'tab:blue')
+            text.set_position((0.02, i))
             text.set_text(label)
+        self._progress_title.set_text(self._progress_header())
 
     # --- reward-aligned lick raster (persistent: incremental eventplot+scatter, copied from
     # live_plots_lookback.py's own already-optimized _redraw_reward_lick_raster()) ------------------
@@ -694,7 +802,9 @@ class WheelShapingPlots(object):
         ax.set_ylim(0, 1)
         ax.set_xlabel('trial')
         ax.set_ylabel('rolling R-fraction')
-        ax.set_title('Direction ratio (withhold band 0.30-0.70)')
+        sigma = self._session_status.get('direction_sigma')
+        ax.set_title('Direction ratio (withhold band 0.30-0.70{0})'.format(
+            ', sigma {0:g}'.format(sigma) if sigma is not None else ''), fontsize=8)
         _style_axes(ax)
 
     def _redraw_direction_ratio(self, ax):
@@ -724,12 +834,15 @@ class WheelShapingPlots(object):
             ax.set_ylabel('deg', fontsize=8)
             ax.legend(fontsize=6, loc='best', framealpha=0.8)
         elif self._stage in (3, 4):
-            self._staircase_lines['stim_duration_s'], = ax.plot(
-                [], [], color='tab:blue', label='stim duration (s)')
-            self._staircase_lines['iti_s'], = ax.plot(
-                [], [], color='tab:orange', label='ITI (s)')
-            ax.set_ylabel('seconds', fontsize=8)
-            ax.legend(fontsize=6, loc='best', ncol=2, framealpha=0.8)
+            # The cue and ITIs are fixed since 2026-11-11: what changes within a session is whether
+            # the choice follows the clicks -- the click-weight z, refit every 10 main trials.
+            self._staircase_lines['click_z'], = ax.plot(
+                [], [], color='tab:blue', marker='o', markersize=3, label='click weight z')
+            ax.axhline(choice_regression.CLICK_WEIGHT_Z_CRITERION, color='gray', linestyle=':',
+                       linewidth=0.8)
+            ax.axhline(0, color='#cccccc', linewidth=0.6)
+            ax.set_ylabel('z', fontsize=8)
+            ax.legend(fontsize=6, loc='best', framealpha=0.8)
         elif self._stage == 5:
             # Two incompatible units (degrees/seconds) -- a twin y-axis, not two lines sharing
             # one axis the way Stage 3/4's stim-duration/ITI (both seconds) can. Legend combines
@@ -751,7 +864,8 @@ class WheelShapingPlots(object):
             ax.legend(handles=handles, labels=[h.get_label() for h in handles], fontsize=6,
                       loc='best', ncol=2, framealpha=0.8)
         ax.set_xlabel('trial', fontsize=8)
-        ax.set_title('Staircase trajectory', fontsize=8)
+        ax.set_title('Click-weight z (dotted: criterion 3)' if self._stage in (3, 4)
+                     else 'Staircase trajectory', fontsize=8)
         ax.tick_params(axis='both', labelsize=7)
         _style_axes(ax)
 
@@ -764,10 +878,8 @@ class WheelShapingPlots(object):
             x, y = _series_xy(self._threshold_deg_series)
             self._staircase_lines['threshold_deg'].set_data(x, y)
         elif self._stage in (3, 4):
-            x1, y1 = _series_xy(self._stim_duration_s_series)
-            self._staircase_lines['stim_duration_s'].set_data(x1, y1)
-            x2, y2 = _series_xy(self._iti_s_series)
-            self._staircase_lines['iti_s'].set_data(x2, y2)
+            if self._click_z_series:
+                self._staircase_lines['click_z'].set_data(*zip(*self._click_z_series))
         elif self._stage == 5:
             x1, y1 = _series_xy(self._threshold_deg_series)
             self._staircase_lines['threshold_deg'].set_data(x1, y1)
@@ -794,7 +906,8 @@ class WheelShapingPlots(object):
         for ttype, marker in TRIAL_TYPE_MARKERS.items():
             self._accuracy_scatters[ttype] = ax.scatter(
                 [], [], s=14, marker=marker, alpha=0.5,
-                color='tab:blue' if ttype == 'main' else 'tab:gray', label=ttype)
+                color={'main': 'tab:blue', 'correction': 'tab:orange'}.get(ttype, 'tab:gray'),
+                label=ttype)
         ax.axhline(0.70, color='gray', linestyle=':', linewidth=0.8)
         ax.axhline(0.5, color='#cccccc', linewidth=0.6)
         ax.set_ylim(0, 1)
@@ -802,7 +915,7 @@ class WheelShapingPlots(object):
         ax.set_ylabel('accuracy', fontsize=8)
         ax.set_title('Rolling accuracy (main trials, w=20; dotted=70% gate)', fontsize=8)
         ax.tick_params(axis='both', labelsize=7)
-        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=3)
+        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=4)
         _style_axes(ax)
 
     def _redraw_accuracy(self, ax):
@@ -934,19 +1047,27 @@ class WheelShapingPlots(object):
             [], [], color='tab:purple', linewidth=1.2, label='target')
         self._sidebias_line_recent, = ax.plot(
             [], [], color='tab:blue', linewidth=1.0, alpha=0.8, label='empirical (w=20)')
+        self._sidebias_line_er, = ax.plot([], [], color='tab:red', linewidth=0.8, linestyle='--',
+                                          label='error rate R')
+        self._sidebias_line_el, = ax.plot([], [], color='tab:cyan', linewidth=0.8, linestyle='--',
+                                          label='error rate L')
         ax.axhline(0.5, color='#cccccc', linewidth=0.6)
         ax.set_ylim(0, 1)
         ax.set_xlabel('trial', fontsize=8)
         ax.set_ylabel('P(right)', fontsize=8)
-        ax.set_title('Side bias / debiasing', fontsize=9)
+        ax.set_title('Side bias / debiasing (Hu: target P(R) from the error rates)', fontsize=8)
         ax.tick_params(axis='both', labelsize=7)
-        ax.legend(fontsize=6, loc='lower right', frameon=False)
+        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=2)
         _style_axes(ax)
 
     def _redraw_sidebias(self, ax):
         if self._sidebias_trial_idx:
             self._sidebias_line_target.set_data(self._sidebias_trial_idx, self._p_right_target_series)
             self._sidebias_line_recent.set_data(self._sidebias_trial_idx, self._recent_right_frac_series)
+        if self._e_series:
+            rows, e_r, e_l = zip(*self._e_series)
+            self._sidebias_line_er.set_data(rows, e_r)
+            self._sidebias_line_el.set_data(rows, e_l)
         if self._trial_idx:
             ax.set_xlim(0, max(10, self._trial_idx[-1] + 1))
 

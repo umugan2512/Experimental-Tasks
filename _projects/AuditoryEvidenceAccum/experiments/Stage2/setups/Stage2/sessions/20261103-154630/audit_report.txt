@@ -1,0 +1,24 @@
+AUDIT 20261103-154630
+[PASS] reward only after the dot is painted  --  168 trials ok
+[PASS] dot never frozen before its trial  --  ok
+[PASS] dot visible on every painted trial  --  ok
+[PASS] Bpod machine running >= 99% of the session, excluding handovers  --  100.0% (raw 98.5%); between-machine gaps median 56ms, max 159ms
+[PASS] WHEEL_POS has no gap > 100ms  --  0 gaps; longest 0.05s at t=686.4s; 138 rows/s
+[PASS] WHEEL_POS rows in time order  --  0 out of order
+[PASS] no wheel samples lost (module-clock gap < 100ms, never backward)  --  longest 52.5ms, 0 backward step(s), 94794 samples
+[PASS] wheel module timestamps advance (no run of one time while moving)  --  0 sample(s) with a frozen timestamp
+[PASS] wheel module->PC clock map stable (detrended p95-p5 < 5ms)  --  2.65ms around a +11.0ppm drift
+[PASS] no CSV-wide silence > 0.5s  --  longest 0.11s after 15:54:57.187485
+[PASS] host->Bpod clock fit residual SD < 2ms (outliers <= 5%)  --  0.32ms (max 0.90ms) over 168 trials, drift -14.7ppm
+[PASS] camera frame gap < 150ms  --  max 50ms, 29.8fps realized
+[PASS] dot painted within 40ms of DotOn (p95)  --  p95 1.7ms (median 1.4ms, n=168)
+[PASS] dot frozen within 30ms of the outcome (p95)  --  p95 1.2ms (median 0.6ms, n=105)
+[PASS] no render-loop frame > 100ms  --  max 43.2ms (median 10.9ms, n=168)
+[PASS] between-machine gap < 150ms  --  max 139.7ms (median 30.4ms, n=167)
+[N/A ] cue->choice machine gap < 150ms (Stage 3-5)  --  no CUE_TO_CHOICE_GAP_MS rows
+[INFO] rotary reader pauses (host side, no data loss if the check above passes)  --  max 17ms, median 8ms; > 50ms on 0 trial(s)
+[INFO] longest garbage collection per trial (holds every thread)  --  max 1.0ms, median 0.2ms
+[PASS] rotary '#' marker logged on every trial that reached the response state  --  0/168 missing
+[PASS] no crash in the task (SESSION_ERROR / stderr traceback)  --  none
+[INFO] Bpod->PC SoftCode numbers  --  1=DotOnRequest,2=OutcomeFreeze
+[PASS] no warnings/errors logged  --  none
