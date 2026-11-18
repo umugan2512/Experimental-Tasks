@@ -776,6 +776,11 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   - **The Stage 3-5 progress panel is a checklist** (2026-11-16): each check the task makes (its
     `WarmupGate`, `session_qualifies`/`stage4_gates_met`/`stage5_gates_met`, the engagement stops),
     its value, target and ok/no. The bars it replaced were each value divided by its target.
+  - **Stages 3-5 stop after 10 response timeouts with no choice between them** (2026-11-18,
+    `VAR_CONSECUTIVE_NO_RESPONSE_LIMIT`, `SESSION_END_REASON=consecutive_no_responses`). Aborts
+    in between neither count nor reset: UM001's first Stage 3 session mixed timeouts with
+    aborts once it disengaged, so a strict "in a row" never fired. All stops are listed in
+    `parameter_progression.md` ("Session stops").
   - **A subject with no Stage 1/2 history has no `iti_s`** in its state; Stages 3-5 read it with
     `state.data.get('iti_s')` (a `test` subject crashed with `KeyError` on 2026-11-16).
     `StageState.get()` raises on a missing key, and so does the soak's fake state now.

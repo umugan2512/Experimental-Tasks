@@ -248,6 +248,8 @@ _, VAR_SESSION_CAP_S = session_csv_parser.compute_remaining_quota(
     os.path.splitext(os.path.basename(__file__))[0], VAR_SUBJECT_ID, full_cap_s=VAR_SESSION_CAP_S)
 VAR_NO_INIT_TIMEOUT_S = 3 * 60
 VAR_CONSECUTIVE_ABORT_LIMIT = 20
+VAR_CONSECUTIVE_NO_RESPONSE_LIMIT = 10   # ...or 10 response timeouts with no choice between
+                                         # them (aborts in between neither count nor reset)
 VAR_SUBCHANCE_BLOCK_SIZE = 20
 VAR_SUBCHANCE_BLOCKS = 3
 
@@ -418,6 +420,7 @@ session_trial_count = 0
 total_attempts = 0
 total_aborts = 0
 consecutive_aborts = 0
+consecutive_no_responses = 0
 main_trial_correct = []
 warmup = staircase.WarmupGate(VAR_WARMUP_TRIAL_MIN, VAR_WARMUP_TRIAL_MAX, VAR_WARMUP_EXIT_ACCURACY,
                               VAR_WARMUP_EXIT_MAX_BIAS)
@@ -470,6 +473,9 @@ while True:
         break
     if consecutive_aborts >= VAR_CONSECUTIVE_ABORT_LIMIT:
         session_end_reason = 'consecutive_aborts'
+        break
+    if consecutive_no_responses >= VAR_CONSECUTIVE_NO_RESPONSE_LIMIT:
+        session_end_reason = 'consecutive_no_responses'
         break
     if len(main_trial_correct) >= VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS:
         recent = main_trial_correct[-(VAR_SUBCHANCE_BLOCK_SIZE * VAR_SUBCHANCE_BLOCKS):]
@@ -939,6 +945,10 @@ while True:
             outcome_state, outcome, rewarded = 'DotTimeout', 'Abort', False
         else:
             outcome_state, outcome, rewarded = 'Unknown', 'Unknown', False
+        if outcome == 'NoResponse':
+            consecutive_no_responses += 1
+        elif outcome in ('Reward', 'NoReward'):
+            consecutive_no_responses = 0
 
         # Response staircase, when active: "success" = cleared the threshold at all (a genuine
         # response, correct or incorrect) -- same convention as Stage 2's own ThresholdStaircase

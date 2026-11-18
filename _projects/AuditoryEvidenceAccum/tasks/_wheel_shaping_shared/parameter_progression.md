@@ -184,6 +184,24 @@ Whichever comes first ends the session. The 1.5 mL daily water cap was removed o
 `DAY_WATER_CONSUMED_UL`, `WATER_CONSUMED_EARLIER_TODAY_UL`); older sessions may show
 `SESSION_END_REASON=water_cap`.
 
+## Session stops (Stages 3-5)
+
+Whichever comes first ends the session (`SESSION_END_REASON` in brackets):
+
+| Stop | Value |
+|---|---|
+| Time (`cap_90min`, a label from before the cap was cut) | 45 min, shortened by an interrupted bout earlier the same hour |
+| No trial started (`no_initiation_3min`) | 3 min |
+| Aborts in a row (`consecutive_aborts`) | 20 |
+| Response timeouts (`consecutive_no_responses`, since 2026-11-18) | 10, with no correct or wrong choice between them. Aborts in between neither count nor reset. |
+| Sub-chance accuracy (`subchance_accuracy`) | 3 consecutive 20-trial main blocks below 50% |
+| Trials (`max_trials`) | 1000 |
+
+The response-timeout stop came from UM001's first Stage 3 session (`20261118-161324`, stopped by
+hand at 34 min): from minute 25 it mostly let the dot time out, mixed with the odd abort, and no
+other stop could fire. With aborts neutral it would have ended at minute 26; had an abort reset
+the count, it would never have fired.
+
 ## Punishment and error/abort ITIs (not staircased, any stage)
 
 The LED + full-white-screen flash on errors and aborts (`VAR_ERROR_FLASH_S` = 0.5s since

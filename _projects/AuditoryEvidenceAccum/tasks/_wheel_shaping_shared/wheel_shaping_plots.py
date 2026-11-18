@@ -144,6 +144,7 @@ _OUTCOME4_COLORS = {'correct': 'tab:green', 'incorrect': 'tab:red', 'no_response
 # either task script (this module has no dependency on either), so kept as its own constant; if
 # that VAR_ is ever retuned, update this one too.
 _ENGAGEMENT_ABORT_LIMIT_DISPLAY = 20
+_ENGAGEMENT_NO_RESPONSE_LIMIT_DISPLAY = 10   # VAR_CONSECUTIVE_NO_RESPONSE_LIMIT, same caveat
 
 # Display-only reference for the Stage 1 gain-progress bar (see _redraw_progress()) -- matches
 # stage1_wheel_shaping.py's own VAR_GAIN_INITIAL_MULT (training_protocol.md's stated "~2x final").
@@ -246,6 +247,7 @@ class WheelShapingPlots(object):
         self._click_z_series = []        # (trial, z) at each refit
         self._e_series = []              # (trial, e_right, e_left), Hu debiaser (Stage 3-5)
         self._consecutive_aborts = 0
+        self._consecutive_no_responses = 0   # aborts in between neither count nor reset
         self._last_trial_time_s = None
         self._time_since_last_trial_s = None
         self._cur_in_trial_threshold_deg = self._session_status.get('in_trial_threshold_deg')
@@ -459,6 +461,10 @@ class WheelShapingPlots(object):
                 self._consecutive_aborts += 1
             else:
                 self._consecutive_aborts = 0
+            if outcome == 'NoResponse':
+                self._consecutive_no_responses += 1
+            elif outcome in ('Reward', 'NoReward'):
+                self._consecutive_no_responses = 0
 
             outcome4_key = {'Reward': 'correct', 'NoReward': 'incorrect',
                              'NoResponse': 'no_response', 'Abort': 'abort'}.get(outcome)
@@ -783,6 +789,9 @@ class WheelShapingPlots(object):
         check('consecutive aborts', self._consecutive_aborts,
               '< {0}'.format(_ENGAGEMENT_ABORT_LIMIT_DISPLAY),
               self._consecutive_aborts < _ENGAGEMENT_ABORT_LIMIT_DISPLAY)
+        check('no-responses in a row', self._consecutive_no_responses,
+              '< {0}'.format(_ENGAGEMENT_NO_RESPONSE_LIMIT_DISPLAY),
+              self._consecutive_no_responses < _ENGAGEMENT_NO_RESPONSE_LIMIT_DISPLAY)
         gap_s = self._time_since_last_trial_s
         check('since last trial', '-' if gap_s is None else '{0:.0f}s'.format(gap_s), '< 180s',
               None if gap_s is None else gap_s < 180)
