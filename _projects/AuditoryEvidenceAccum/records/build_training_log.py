@@ -117,6 +117,7 @@ SESSION_VAL_FIELDS = [
     ('cue_reset_from_s', 'STIM_DURATION_RESET_FROM_S', 'num', 'first'),
     ('hifi_sampling_rate_hz', 'HIFI_SAMPLING_RATE', 'num', 'first'),
     ('error_flash_s', 'ERROR_FLASH_S', 'num', 'first'),
+    ('incorrect_iti_s', 'INCORRECT_ITI_S', 'num', 'first'),
 ]
 
 # Every key a stage script persists in wheel_shaping_state.json, and the column that shows it (None:
@@ -788,6 +789,7 @@ COLUMNS = [
     ('target_spl_db', 'Target SPL (dB)'),
     ('hifi_sampling_rate_hz', 'HiFi rate (Hz)'),
     ('error_flash_s', 'Error flash (s)'),
+    ('incorrect_iti_s', 'Error ITI (s)'),
     ('left_freq_hz', 'Left Freq (Hz)'),
     ('right_freq_hz', 'Right Freq (Hz)'),
     ('num_sessions', 'Num. Sessions'),

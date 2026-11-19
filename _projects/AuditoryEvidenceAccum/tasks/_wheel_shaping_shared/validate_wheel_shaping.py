@@ -1941,11 +1941,11 @@ def stage_var(stage, name):
 iti_checks = {}
 for _st in (3, 4, 5):
     _src = stage_source(_st)
-    iti_checks[_st] = (stage_var(_st, 'VAR_ITI_S') == 1.5 and stage_var(_st, 'VAR_INCORRECT_ITI_S') == 4.0
+    iti_checks[_st] = (stage_var(_st, 'VAR_ITI_S') == 1.5 and stage_var(_st, 'VAR_INCORRECT_ITI_S') == (7.0 if _st == 3 else 4.0)
                        and 'iti_staircase' not in _src and "state.set('iti_s'" not in _src
                        and "register_value('ITI_RESET_FROM_S'" in _src
                        and ('state_timer=iti_this_trial' in _src or 'state_timer=VAR_ITI_S' in _src))
-print("  Stages 3-5: VAR_ITI_S 1.5, VAR_INCORRECT_ITI_S 4.0, no ITI staircase, never write 'iti_s', "
+print("  Stages 3-5: VAR_ITI_S 1.5, VAR_INCORRECT_ITI_S 7.0 (Stage 3) / 4.0, no ITI staircase, never write 'iti_s', "
       "register ITI_RESET_FROM_S: {0}".format(iti_checks))
 _ns25 = {'VAR_ITI_S': 1.5}
 for _saved, _want in ((2.25, 2.25), (1.5, None), (1.3, None), (None, None)):

@@ -73,6 +73,13 @@ import staircase   # for Stage 4's own target constants (STAGE4_RESPONSE_THRESHO
                     # separately-maintained copy of the same numbers.
 
 
+def _legend_above(ax, ncol, fontsize=6):
+    """ A legend in its own strip between the title and the plot (give the title pad=12), so it
+    never covers data at any window size. """
+    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.0), ncol=ncol, fontsize=fontsize,
+              frameon=False, borderaxespad=0.1, handlelength=1.5, columnspacing=1.0)
+
+
 def _style_axes(ax):
     """ Despine (drop top/right borders) + soften remaining spines + light horizontal-only
     gridlines -- called after every ax.cla(), which resets spine visibility each time. """
@@ -591,6 +598,8 @@ class WheelShapingPlots(object):
                                               va='center', ha='left', fontsize=8.5, family='monospace')
                                       for i in range(n)] for x in (0.0, 0.53)]
             self._progress_title = ax.set_title('Session progress', fontsize=8)
+            canvas = self.canvas if self.canvas is not None else self._fig.canvas
+            canvas.mpl_connect('resize_event', lambda _e: self._fit_checklist_font())
             return
         labels = self._PROGRESS_LABELS[self._stage]
         self._progress_bars = ax.barh(labels, [0] * len(labels), color='tab:blue')
@@ -696,7 +705,7 @@ class WheelShapingPlots(object):
 
         def check(label, now, target, met):
             mark = '' if met is None else ('ok' if met else 'no')
-            rows.append(('  {0:<22}{1:>9}   {2:<12}{3}'.format(label, now, target, mark),
+            rows.append(('  {0:<21}{1:>7}  {2:<10}{3}'.format(label, now, target, mark),
                          'info' if met is None else ('ok' if met else 'no')))
 
         def pct(x):
@@ -757,7 +766,7 @@ class WheelShapingPlots(object):
                 rows.append(('    (fitted once {0} main trials responded)'.format(
                     choice_regression.CHOICE_REGRESSION_MIN_TRIALS), 'info'))
             else:
-                rows.append(('    click {0:.2f} vs history {1:.2f}/{2:.2f}: must beat both'.format(
+                rows.append(('    click {0:.2f} must beat {1:.2f}, {2:.2f}'.format(
                     fit['b_click'], fit['b_prev'], fit['b_win']), 'info'))
         if self._stage == 5:
             active = st.get('staircase_active')
@@ -770,22 +779,22 @@ class WheelShapingPlots(object):
         split = len(rows)   # left column: warm-up and qualifying; right: the rest
         if self._stage == 3:
             step = st.get('fade_step') or 0
-            rows.append(('FADE step {0} of {1}: p_corr {2}, clicks until {3}'.format(
+            rows.append(('FADE {0}/{1}: p_corr {2}, clicks to {3}'.format(
                 step, stage3_scaffold.FADE_LAST_STEP, st.get('p_corr'),
                 str(st.get('tail_mode', '?')).replace('_', ' ')), 'head'))
-            rows.append((('  next session: step {0} if this one qualifies'.format(step + 1)
+            rows.append((('  next session: step {0} if qualifies'.format(step + 1)
                           if step < stage3_scaffold.FADE_LAST_STEP else
-                          '  last step: advance after {0} qualifying sessions in a row'.format(
+                          '  last step: advance after {0} in a row'.format(
                               stage3_scaffold.ADVANCE_SESSIONS_AT_LAST_STEP)), 'info'))
             check('accuracy (main)', pct(acc), 'info only', None)
         elif self._stage == 4:
             in_a_row = st.get('sessions_in_a_row')
-            rows.append(('ADVANCE after 3 qualifying sessions in a row{0}'.format(
+            rows.append(('ADVANCE after 3 qualifying in a row{0}'.format(
                 '' if in_a_row is None else ' (so far {0})'.format(in_a_row)), 'head'))
         else:
-            rows.append(('ADVANCE after 2 qualifying sessions in a row', 'head'))
+            rows.append(('ADVANCE after 2 qualifying in a row', 'head'))
         # the task ends the session on either of these (it used to be its own panel)
-        rows.append(('ENGAGEMENT (session ends if not)', 'head'))
+        rows.append(('ENGAGEMENT (else session ends)', 'head'))
         check('consecutive aborts', self._consecutive_aborts,
               '< {0}'.format(_ENGAGEMENT_ABORT_LIMIT_DISPLAY),
               self._consecutive_aborts < _ENGAGEMENT_ABORT_LIMIT_DISPLAY)
@@ -797,6 +806,19 @@ class WheelShapingPlots(object):
               None if gap_s is None else gap_s < 180)
         return rows[:split], rows[split:]
 
+    _CHECKLIST_MAX_FONT = 8.5
+
+    def _fit_checklist_font(self):
+        """ Largest monospace size (<= 8.5pt) at which each column's longest row fits its share of
+        the panel's width, so the two columns never run into each other in a narrow window. """
+        ax = self._axes['progress']
+        panel_pts = ax.get_position().width * self._fig.get_figwidth() * 72.0
+        for (x0, x1), texts in zip(((0.0, 0.53), (0.53, 1.0)), self._checklist_texts):
+            longest = max([len(t.get_text()) for t in texts] + [1])
+            size = 0.97 * (x1 - x0) * panel_pts / (0.6 * longest)   # monospace: ~0.6 em per char
+            for t in texts:
+                t.set_fontsize(min(self._CHECKLIST_MAX_FONT, size))
+
     def _redraw_progress(self, ax):
         if self._stage in (3, 4, 5):
             for rows, texts in zip(self._checklist_rows(), self._checklist_texts):
@@ -806,6 +828,7 @@ class WheelShapingPlots(object):
                     text.set_color(self._CHECKLIST_COLORS[state])
                     text.set_fontweight('bold' if state == 'head' else 'normal')
             self._progress_title.set_text(self._progress_header())
+            self._fit_checklist_font()
             return
         for i, (bar, text, (frac, label, state)) in enumerate(
                 zip(self._progress_bars, self._progress_texts, self._progress_specs())):
@@ -870,7 +893,7 @@ class WheelShapingPlots(object):
         # more row was added above it for the new staircase-trajectory panel), so a borderless
         # legend sitting at the same corner as a late-session lick marker is still hard to read at
         # a glance even with real y-headroom; an opaque-ish frame keeps it legible regardless.
-        ax.legend(fontsize=7, loc='upper right', framealpha=0.85)
+        _legend_above(ax, ncol=2, fontsize=7)
         _style_axes(ax)
 
     def _redraw_lick_timeline(self, ax):
@@ -884,7 +907,7 @@ class WheelShapingPlots(object):
         if all_x:
             ax.set_xlim(min(all_x) - 1, max(all_x) + 1)
         ax.set_title('Lick events -- full session ({0} total licks logged)'.format(
-            self._total_lick_count))
+            self._total_lick_count), pad=14)
 
     # --- direction ratio (Stage 2 only, persistent line) --------------------------------------------
 
@@ -1008,9 +1031,9 @@ class WheelShapingPlots(object):
         ax.set_ylim(0, 1)
         ax.set_xlabel('trial', fontsize=8)
         ax.set_ylabel('accuracy', fontsize=8)
-        ax.set_title('Rolling accuracy (main trials, w=20; dotted=70% gate)', fontsize=8)
+        ax.set_title('Rolling accuracy (main, w=20; dotted 70%)', fontsize=8, pad=12)
         ax.tick_params(axis='both', labelsize=7)
-        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=4)
+        _legend_above(ax, ncol=4)
         _style_axes(ax)
 
     def _redraw_accuracy(self, ax):
@@ -1118,7 +1141,7 @@ class WheelShapingPlots(object):
         self._sidebias_line_target, = ax.plot(
             [], [], color='tab:purple', linewidth=1.2, label='target')
         self._sidebias_line_recent, = ax.plot(
-            [], [], color='tab:blue', linewidth=1.0, alpha=0.8, label='empirical (w=20)')
+            [], [], color='tab:blue', linewidth=1.0, alpha=0.8, label='actual (w=20)')
         self._sidebias_line_er, = ax.plot([], [], color='tab:red', linewidth=0.8, linestyle='--',
                                           label='error rate R')
         self._sidebias_line_el, = ax.plot([], [], color='tab:cyan', linewidth=0.8, linestyle='--',
@@ -1127,9 +1150,9 @@ class WheelShapingPlots(object):
         ax.set_ylim(0, 1)
         ax.set_xlabel('trial', fontsize=8)
         ax.set_ylabel('P(right)', fontsize=8)
-        ax.set_title('Side bias / debiasing (Hu: target P(R) from the error rates)', fontsize=8)
+        ax.set_title('Side bias (Hu debiaser)', fontsize=8, pad=12)
         ax.tick_params(axis='both', labelsize=7)
-        ax.legend(fontsize=6, loc='lower right', frameon=False, ncol=2)
+        _legend_above(ax, ncol=4)
         _style_axes(ax)
 
     def _redraw_sidebias(self, ax):

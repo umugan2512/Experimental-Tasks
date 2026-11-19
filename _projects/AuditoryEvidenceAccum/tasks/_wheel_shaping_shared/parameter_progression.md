@@ -210,6 +210,14 @@ aversive and doesn't interfere with the auditory cues; there is no auditory erro
 trials it follows errors only, so it is confounded with the error outcome and must be its own
 event regressor in any neural model.
 
+**Stage 3 has no flash since 2026-11-19** (`VAR_PUNISH_FLASH = False`, per instruction: it
+didn't help and hindered), and its error ITI is **7.0s** (was 4.0s); aborts still cost the error
+ITI, so 7.0s too. `AbortPunish`/`ErrorPunish` stay in the machine as 0s states that send
+SoftCode 3, the outcome marker the next trial's ITI audio upload waits for. `ERROR_FLASH_S`
+is registered as 0 and `INCORRECT_ITI_S` as 7.0 (training-log columns `Error flash (s)`,
+`Error ITI (s)`). Stages 4/5 keep the 0.5s flash and the 4.0s ITI. The bullets below describe
+Stages 4/5, and Stage 3 before 2026-11-19.
+
 - **Wrong-direction wheel turn** (Stages 3/4/5 only — Stages 1/2 have no correct-side concept at
   all): `ErrorConsumption` → `ErrorPunish` (0.5s flash) → `IncorrectITI` (fixed
   `VAR_INCORRECT_ITI_S = 4.0s`). Since 2026-11-11 (spec B8) `ErrorConsumption` lasts a per-trial

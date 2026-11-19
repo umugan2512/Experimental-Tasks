@@ -47,7 +47,7 @@ direction was being learned, and with one-sided clicks it only added same-side c
 STIM_DURATION_RESET_FROM_S; the key is no longer written.
 
 The ITIs are FIXED from Stage 3 on (2026-11-11 spec A2): correct VAR_ITI_S = 1.5s (where Stage 2
-leaves 'iti_s'), error VAR_INCORRECT_ITI_S = 4.0s. A correct-ITI staircase raised the ITI on
+leaves 'iti_s'), error VAR_INCORRECT_ITI_S = 7.0s (4.0s until 2026-11-19). A correct-ITI staircase raised the ITI on
 correct streaks, which cut the reward rate for good performance and shrank the error/correct
 contrast from 2.7x toward 1.33x while direction was being learned. A saved 'iti_s' above 1.5s
 (from the old ramp) is registered as ITI_RESET_FROM_S; Stages 3-5 no longer write 'iti_s'.
@@ -237,7 +237,8 @@ VAR_ITI_S = 1.5                      # fixed correct-trial ITI from Stage 3 on (
 # AbortITI lasts VAR_INCORRECT_ITI_S. With a cheaper abort, breaking fixation would be the cheaper
 # exit from a trial the animal expects to get wrong -- concentrated at low |gamma| once the cue has
 # wrong-side clicks, which biases the psychometric and accumulator fits.
-VAR_INCORRECT_ITI_S = 4.0            # fixed error-trial ITI, per the doc's epoch table
+VAR_INCORRECT_ITI_S = 7.0            # fixed error-trial ITI (4.0s, the doc's epoch table, until
+                                      # 2026-11-19; raised per instruction with the flash removed)
 VAR_CONSUMPTION_WINDOW_S = 3.0       # not doc-specified for this stage -- same flagged/tunable
                                       # placeholder convention as every other unspecified duration
                                       # in this codebase; matches full_protocol_lookback_test.py's
@@ -325,6 +326,13 @@ VAR_ERROR_FLASH_DELAY_MIN_S = 0.7
 VAR_ERROR_FLASH_DELAY_MAX_S = 1.0
 VAR_ERROR_FLASH_S = 0.5              # 0.35s until 2026-11-16 (lengthened per instruction); punishment flash duration (LED + full-white screen), on
                                       # WheelAbort and the incorrect-choice path only.
+VAR_PUNISH_FLASH = False             # Stage 3 has no punishment flash since 2026-11-19 (per
+                                      # instruction: it didn't help and hindered). Errors and
+                                      # aborts cost only the error ITI. AbortPunish/ErrorPunish
+                                      # stay as 0s states sending SOFTCODE_PUNISH: the outcome
+                                      # marker the next trial's audio upload waits for.
+PUNISH_STATE_S = VAR_ERROR_FLASH_S if VAR_PUNISH_FLASH else 0
+PUNISH_OUTPUTS = ([(VAR_GO_CUE_LED_CHANNEL, 255)] if VAR_PUNISH_FLASH else []) + [('SoftCode', SOFTCODE_PUNISH)]
 
 VAR_CAMERA_INDEX = None
 VAR_CAMERA_OUTPUT_PATH = 'session_video.avi'
@@ -436,7 +444,8 @@ my_bpod.register_value('RIGHT_THRESHOLD_DEG', VAR_RESPONSE_THRESHOLD_DEG)
 my_bpod.register_value('GIT_COMMIT', _git_commit())
 my_bpod.register_value('REWARD_UL', VAR_REWARD_UL)
 lick_input.register_lick_input(my_bpod)   # LICK_INPUT=Port1 (logged names), LICK_INPUT_PHYSICAL
-my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze,3=PunishFlash')   # Bpod->PC SoftCode numbers (SOFTCODE rows)
+my_bpod.register_value('SOFTCODE_MAP', '1=DotOnRequest,2=OutcomeFreeze,3={0}'.format(
+    'PunishFlash' if VAR_PUNISH_FLASH else 'ErrorOrAbort'))   # Bpod->PC SoftCode numbers (SOFTCODE rows)
 # What compute_remaining_quota() found at startup (an interrupted-and-restarted bout shortens this
 # session's quota) -- registered so a surprisingly short session is traceable to its cause.
 my_bpod.register_value('QUOTA_REDUCED_BY', session_csv_parser.LAST_QUOTA_INFO.get('used_trials', 0))
@@ -444,7 +453,8 @@ my_bpod.register_value('QUOTA_CHAIN_SESSIONS',
                        ','.join(session_csv_parser.LAST_QUOTA_INFO.get('chain_sessions', [])))
 my_bpod.register_value('TARGET_SPL_DB', VAR_TARGET_SPL_DB)
 my_bpod.register_value('HIFI_SAMPLING_RATE', hifi.sampling_rate)
-my_bpod.register_value('ERROR_FLASH_S', VAR_ERROR_FLASH_S)
+my_bpod.register_value('ERROR_FLASH_S', PUNISH_STATE_S)   # 0 = no flash
+my_bpod.register_value('INCORRECT_ITI_S', VAR_INCORRECT_ITI_S)
 if STIM_DURATION_RESET_FROM_S is not None:
     my_bpod.register_value('STIM_DURATION_RESET_FROM_S', STIM_DURATION_RESET_FROM_S)
 if ITI_RESET_FROM_S is not None:
@@ -758,9 +768,9 @@ while True:
         # a hardware signal, instead of the render loop's own threshold comparison.
         cue_sma.add_state(
             state_name='AbortPunish',
-            state_timer=VAR_ERROR_FLASH_S,
+            state_timer=PUNISH_STATE_S,
             state_change_conditions={Bpod.Events.Tup: 'AbortITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255), ('SoftCode', SOFTCODE_PUNISH)])
+            output_actions=PUNISH_OUTPUTS)
 
         cue_sma.add_state(
             state_name='AbortITI',
@@ -849,9 +859,9 @@ while True:
 
         sma.add_state(
             state_name='ErrorPunish',
-            state_timer=VAR_ERROR_FLASH_S,
+            state_timer=PUNISH_STATE_S,
             state_change_conditions={Bpod.Events.Tup: 'IncorrectITI'},
-            output_actions=[(VAR_GO_CUE_LED_CHANNEL, 255), ('SoftCode', SOFTCODE_PUNISH)])
+            output_actions=PUNISH_OUTPUTS)
 
         sma.add_state(
             state_name='IncorrectITI',
@@ -964,7 +974,8 @@ while True:
             runner, dot, camera, decision_done, RENDER_THRESHOLD_DEG, disappear_delay_s,
             render_interval, SOFTCODE_DOT_ON, (SOFTCODE_CROSSED,),
             quiescence=(quiescence_duration_this_trial, VAR_STEADY_THRESHOLD_DEG),
-            punish_softcode=SOFTCODE_PUNISH, punish_flash_s=VAR_ERROR_FLASH_S,
+            punish_softcode=SOFTCODE_PUNISH if VAR_PUNISH_FLASH else None,
+            punish_flash_s=VAR_ERROR_FLASH_S,
             on_quiescence_met=_start_cue_audio, dot_phase_event=choice_started,
             quiescence_gate=audio_uploaded)
         n_breaks = runner.quiescence_breaks

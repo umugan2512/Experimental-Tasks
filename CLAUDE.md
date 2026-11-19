@@ -739,7 +739,7 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     but Stages 2-4 stop at 0.25s (`STAGE234_QUIESCENCE_CEILING_S`). Verified against iblrig's
     `base_choice_world.py`: IBL's hold is Exp(0.35) truncated to 0.4-0.7s, so the scale is
     0.636·q, not q as the spec first said.
-  - Stages 3-5: fixed ITIs (1.5s / 4.0s), abort ITI = error ITI (4.0s), fixed 0.35s cue (no cue
+  - Stages 3-5: fixed ITIs (1.5s / 4.0s; Stage 3's error ITI is 7.0s since 2026-11-19), abort ITI = error ITI (4.0s), fixed 0.35s cue (no cue
     staircase), every cue with >= 1 click on its side, J2 0.3-0.6s in every stage, the error flash
     0.7-1.0s after the crossing with no lick exit, a performance-gated warm-up
     (`staircase.WarmupGate`), and the Hu et al. (2009) debiaser (`debiasing.HuDebiaser`) instead of
@@ -797,7 +797,10 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   parameter moves within and across sessions, per stage. Check it before changing any
   threshold/ITI/gain/duration progression, and update it alongside the code.
 - **The LED (`VAR_GO_CUE_LED_CHANNEL = 'PWM1'`) is NOT a go cue anywhere any more — it is a
-  punishment signal only.** Stages 3-5 fire it for `VAR_ERROR_FLASH_S` (0.5s since 2026-11-16, was 0.35s) together with a
+  punishment signal only, and Stage 3 no longer uses it** (2026-11-19, `VAR_PUNISH_FLASH =
+  False`, per instruction; Stage 3's error/abort ITI went 4.0s -> 7.0s at the same time, and its
+  `AbortPunish`/`ErrorPunish` are 0s states that still send SoftCode 3 as the outcome marker for
+  the ITI audio upload). Stages 4-5 fire it for `VAR_ERROR_FLASH_S` (0.5s since 2026-11-16, was 0.35s) together with a
   full-white screen (`DotDisplay.flash_white()`, pumped concurrently so the screen flash lands in
   near-lockstep with the native LED output) from their own `AbortPunish`/`ErrorPunish` states —
   i.e. on aborts and incorrect choices only, never on a correct trial and never as a trial-start
