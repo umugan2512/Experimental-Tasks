@@ -758,6 +758,7 @@ while True:
         choice_started = threading.Event()
         decision_done = threading.Event()
         cue_audio = {}
+        click_stop_s = None   # for the live click raster
 
         def _start_cue_audio():
             # Called by the render loop the moment quiescence is met and the cue machine has been
@@ -893,6 +894,8 @@ while True:
             abort_time_abs = cue_send_t + cue_visited['WheelAbort'][-1][0]
             abort_epoch = 'delay' if was_visited(cue_visited, 'DelayPeriod') else 'cue'
             runner.register('ABORT', abort_time_abs)
+            if 't' in cue_audio:   # the abort's HiFi STOP ended the click train
+                click_stop_s = abort_time_abs - (cue_audio['t'] + click_train.CLICK_START_OFFSET_S)
             runner.register('ABORT_EPOCH', abort_epoch)
             runner.register('ABORT_ITI_S', abort_timeout_this_trial)
             # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
@@ -912,7 +915,8 @@ while True:
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
                                    p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], quiescence_s=cur_quiescence_s,
                                    click_times_l=trial_clicks['left_times'],
-                                   click_times_r=trial_clicks['right_times'])
+                                   click_times_r=trial_clicks['right_times'],
+                                   click_stop_s=click_stop_s)
             continue
 
         consecutive_aborts = 0
@@ -996,6 +1000,8 @@ while True:
             threshold_crossing_t = send_t + visited[outcome_state][-1][0]
             dot_disappear_t = threshold_crossing_t + disappear_delay_s
             runner.register('THRESHOLD_CROSSING_TIME', threshold_crossing_t)
+            if 't' in cue_audio:
+                click_stop_s = threshold_crossing_t - (cue_audio['t'] + click_train.CLICK_START_OFFSET_S)
             runner.register('DOT_DISAPPEAR_JITTER_S', disappear_delay_s)
             if outcome_state == 'ErrorConsumption':
                 runner.register('ERROR_FLASH_DELAY_S', error_flash_delay_s)
@@ -1030,7 +1036,8 @@ while True:
                                in_trial_threshold_deg=VAR_CUE_ABORT_THRESHOLD_DEG,
                                quiescence_s=cur_quiescence_s,
                                click_times_l=trial_clicks['left_times'],
-                               click_times_r=trial_clicks['right_times'])
+                               click_times_r=trial_clicks['right_times'],
+                               click_stop_s=click_stop_s)
 
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)

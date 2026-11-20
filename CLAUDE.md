@@ -777,7 +777,10 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
     `WarmupGate`, `session_qualifies`/`stage4_gates_met`/`stage5_gates_met`, the engagement stops),
     its value, target and ok/no. The bars it replaced were each value divided by its target.
   - **Click raster (2026-11-20):** next to the now half-width click-weight z panel, the last 15
-    trials' `CLICK_TIMES_L/R` (0-2 s from cue onset, cue shaded), newest on top. Each row is
+    trials' `CLICK_TIMES_L/R` from cue onset (cue shaded), newest on top, drawn only up to when
+    the clicks stopped (black tick): Stage 3's `CLICK_STOP_S`, else the abort or crossing time
+    minus `CUE_ONSET_TIME` (logged with the cue machine's trial, one parsed trial earlier than
+    the crossing). Each row is
     labelled with the CORRECT turn's rotary sign (`CORRECT_TURN_SIGN`: R clicks -> −, L -> +,
     as the stage scripts' rewarded event) and its outcome. The dashboard canvas now keeps the
     figure's full height and scrolls (`_embed_plots_canvas`); squeezed to the window height, the

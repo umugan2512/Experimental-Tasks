@@ -527,6 +527,7 @@ def _register_clicks_played(stop_t, audio_start_t, trial_clicks):
     runner.register('CLICK_STOP_S', round(click_stop_s, 4))
     runner.register('N_CLICKS_PLAYED', int(sum(1 for t in list(trial_clicks['left_times'])
                                                + list(trial_clicks['right_times']) if t < click_stop_s)))
+    return click_stop_s
 
 
 print("Starting Stage 3 -- fade step {0} (correction trials p={1:.1f}, click tail until {2}){3}, "
@@ -895,6 +896,7 @@ while True:
         choice_started = threading.Event()
         decision_done = threading.Event()
         cue_audio = {}
+        click_stop_s = None   # for the live click raster
 
         def _start_cue_audio():
             # Called by the render loop the moment quiescence is met and the cue machine has been
@@ -1034,8 +1036,8 @@ while True:
             runner.register('ABORT_EPOCH', abort_epoch)
             runner.register('ABORT_ITI_S', abort_timeout_this_trial)
             if 't' in cue_audio:   # the abort's HiFi STOP ended the click train
-                _register_clicks_played(cue_send_t + cue_visited['WheelAbort'][-1][0],
-                                        cue_audio['t'], trial_clicks)
+                click_stop_s = _register_clicks_played(
+                    cue_send_t + cue_visited['WheelAbort'][-1][0], cue_audio['t'], trial_clicks)
             pending_repeat = True
             repeat_side = side
             # 'INCLUDED' means: did this trial produce a genuine L/R response (Reward or
@@ -1052,7 +1054,8 @@ while True:
                                    p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], iti_s=iti_this_trial,
                                    stim_duration_s=stim_duration_this_trial,
                                    click_times_l=trial_clicks['left_times'],
-                                   click_times_r=trial_clicks['right_times'])
+                                   click_times_r=trial_clicks['right_times'],
+                                   click_stop_s=click_stop_s)
             continue
 
         consecutive_aborts = 0
@@ -1124,7 +1127,8 @@ while True:
         # When the click train stopped, and how many clicks the animal heard.
         _stop_state = 'DotOn' if VAR_CLICK_TAIL_MODE == 'dot_onset' else outcome_state
         if 't' in cue_audio and _stop_state in visited and was_visited(visited, _stop_state):
-            _register_clicks_played(send_t + visited[_stop_state][-1][0], cue_audio['t'], trial_clicks)
+            click_stop_s = _register_clicks_played(send_t + visited[_stop_state][-1][0], cue_audio['t'],
+                                                   trial_clicks)
 
         consumption_state_name = {'Reward': 'Consumption',
                                    'ErrorConsumption': 'ErrorConsumption'}.get(outcome_state)
@@ -1181,7 +1185,8 @@ while True:
                                response_time_s=response_time_s, click_diff=click_diff,
                                iti_s=iti_this_trial, stim_duration_s=stim_duration_this_trial,
                                click_times_l=trial_clicks['left_times'],
-                               click_times_r=trial_clicks['right_times'])
+                               click_times_r=trial_clicks['right_times'],
+                               click_stop_s=click_stop_s)
 
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)

@@ -937,6 +937,7 @@ class PlotFeeder(object):
         self._n_fed = 0
         self._replay_prev_outcome = None
         self._replay_prev_side = None
+        self._last_cue_onset = None   # CUE_ONSET_TIME, logged with the cue machine's trial
 
     def feed_new_trials(self, trials, session_ended=False):
         """ Feeds every trial whose rows are complete, in order, exactly once. A poll can land while
@@ -964,6 +965,8 @@ class PlotFeeder(object):
     def _reconstruct_kwargs(self, trial):
         info = self.info
         config = session_csv_parser.PROTOCOL_CONFIG[self.protocol_name]
+        if _val_float(trial, 'CUE_ONSET_TIME') is not None:
+            self._last_cue_onset = _val_float(trial, 'CUE_ONSET_TIME')
         outcome_raw, event_side, _reward_duration, _consumed = session_csv_parser.classify_trial(
             trial, config)
         side = _val_str(trial, 'TRIAL_SIDE', self.session_vals) or event_side or 'R'
@@ -1016,6 +1019,12 @@ class PlotFeeder(object):
             if click_l is not None and click_r is not None:
                 kwargs['click_times_l'] = _click_times(click_l)
                 kwargs['click_times_r'] = _click_times(click_r)
+                # Stage 3 logs when the clicks stopped; Stages 4-5: the abort or the crossing
+                stop = _val_float(trial, 'CLICK_STOP_S')
+                end_t = _val_float(trial, 'ABORT') or _val_float(trial, 'THRESHOLD_CROSSING_TIME')
+                if stop is None and end_t is not None and self._last_cue_onset is not None:
+                    stop = end_t - self._last_cue_onset
+                kwargs['click_stop_s'] = stop
 
             if trial_type in ('repeat', 'correction'):   # the side was fixed, not drawn
                 p_right_target = 1.0 if side == 'R' else 0.0

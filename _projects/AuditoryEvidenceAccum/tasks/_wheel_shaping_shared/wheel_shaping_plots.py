@@ -161,7 +161,7 @@ _ENGAGEMENT_NO_RESPONSE_LIMIT_DISPLAY = 10   # VAR_CONSECUTIVE_NO_RESPONSE_LIMIT
 # rig's wiring changes.
 CORRECT_TURN_SIGN = {'R': u'\u2212', 'L': '+'}
 CLICK_RASTER_ROWS = 15
-CLICK_RASTER_MAX_S = 2.0   # x range; Stage 3's tail can run to the response timeout
+CLICK_RASTER_MAX_S = 6.0   # x range cap; Stage 3's tail runs until the crossing
 _CLICK_RASTER_MARKS = {'correct': u'\u2713', 'incorrect': u'\u2717', 'abort': 'ab',
                        'no_response': u'\u2013'}
 _CLICK_COLORS = {'L': 'tab:blue', 'R': 'tab:orange'}
@@ -265,7 +265,7 @@ class WheelShapingPlots(object):
         self._choice_trials = []
         self._click_fit = None
         self._click_z_series = []        # (trial, z) at each refit
-        # click raster: (trial, side, outcome4 key, trial type, left times, right times)
+        # click raster: (trial, side, outcome4 key, trial type, left times, right times, stop)
         self._click_rows = deque(maxlen=CLICK_RASTER_ROWS)
         self._e_series = []              # (trial, e_right, e_left), Hu debiaser (Stage 3-5)
         self._consecutive_aborts = 0
@@ -404,7 +404,7 @@ class WheelShapingPlots(object):
                    trial_type=None, in_trial_threshold_deg=None, p_right_target=None,
                    response_time_s=None, click_diff=None, stim_duration_s=None,
                    quiescence_s=None, day_water_ul=None, e_right=None, e_left=None,
-                   click_times_l=None, click_times_r=None):
+                   click_times_l=None, click_times_r=None, click_stop_s=None):
         """ Call once per trial. side='L'/'R' (whichever direction the movement was, even if
         below threshold -- use the larger-magnitude direction for a NoMovement trial); magnitude_deg
         is the signed peak displacement that trial; outcome is 'Rewarded'/'Withheld'/'NoMovement'
@@ -442,6 +442,8 @@ class WheelShapingPlots(object):
         progress panel. e_right/e_left (Stage 3-5): the Hu debiaser's error rates, for the
         side-bias panel. click_times_l/click_times_r (Stage 3-5, every trial, aborts included):
         the trial's click times in seconds from cue onset (CLICK_TIMES_L/R), for the click raster.
+        click_stop_s: when the clicks stopped (Stage 3's CLICK_STOP_S, else the abort or wheel
+        crossing), same zero; clicks after it weren't heard and aren't drawn.
         """
         self._session_trial_count += 1
         self._trial_idx.append(self._session_trial_count)
@@ -518,8 +520,9 @@ class WheelShapingPlots(object):
             if e_right is not None and e_left is not None:
                 self._e_series.append((row, e_right, e_left))
             if click_times_l is not None and click_times_r is not None:
-                self._click_rows.append((row, side, outcome4_key, ttype0,
-                                         list(click_times_l), list(click_times_r)))
+                heard = (lambda ts: [t for t in ts if click_stop_s is None or t < click_stop_s])
+                self._click_rows.append((row, side, outcome4_key, ttype0, heard(click_times_l),
+                                         heard(click_times_r), click_stop_s))
 
             if p_right_target is not None:
                 self._sidebias_trial_idx.append(row)
@@ -1200,6 +1203,9 @@ class WheelShapingPlots(object):
             self._click_coll[s] = LineCollection([], colors=_CLICK_COLORS[s], linewidths=1.0,
                                                  label=name)
             ax.add_collection(self._click_coll[s])
+        self._click_stop_coll = LineCollection([], colors='black', linewidths=2.0,
+                                               label='crossing / stop')
+        ax.add_collection(self._click_stop_coll)
         ax.axvspan(0, staircase.CUE_DURATION_S, color='#eeeeee', zorder=0)
         ax.axvline(staircase.CUE_DURATION_S, color='gray', linestyle='--', linewidth=0.7)
         ax.set_xlim(0, 1.0)
@@ -1210,17 +1216,21 @@ class WheelShapingPlots(object):
         ax.set_title(u'Clicks, last {0} trials (label: correct turn +/\u2212)'.format(
             CLICK_RASTER_ROWS), fontsize=8, pad=12)
         ax.tick_params(axis='x', labelsize=7)
-        _legend_above(ax, ncol=2)
+        _legend_above(ax, ncol=3)
         _style_axes(ax)
 
     def _redraw_click_raster(self, ax):
         if not self._click_rows:
             return
         segs = {'L': [], 'R': []}
+        stops = []
         ticks, labels, colors = [], [], []
         t_max = 0.0
-        for k, (row, side, out4, ttype, left, right) in enumerate(reversed(self._click_rows)):
+        for k, (row, side, out4, ttype, left, right, stop) in enumerate(reversed(self._click_rows)):
             y = CLICK_RASTER_ROWS - 1 - k
+            if stop is not None:
+                stops.append([(stop, y - 0.45), (stop, y + 0.45)])
+                t_max = max(t_max, stop)
             for s, times in (('L', left), ('R', right)):
                 segs[s].extend([[(t, y - 0.38), (t, y + 0.38)] for t in times])
                 if times:
@@ -1232,6 +1242,7 @@ class WheelShapingPlots(object):
             colors.append(_OUTCOME4_COLORS.get(out4, 'black'))
         for s in ('L', 'R'):
             self._click_coll[s].set_segments(segs[s])
+        self._click_stop_coll.set_segments(stops)
         ax.set_yticks(ticks)
         ax.set_yticklabels(labels, fontsize=6)
         for lbl, c in zip(ax.get_yticklabels(), colors):
