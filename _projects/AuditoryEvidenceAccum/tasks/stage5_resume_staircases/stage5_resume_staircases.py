@@ -910,7 +910,9 @@ while True:
 
             bench_plots.add_trial(side, 0.0, cur_response_threshold_deg, 'Abort',
                                    lick_times_abs=cue_lick_times_abs, trial_type=trial_type,
-                                   p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], quiescence_s=cur_quiescence_s)
+                                   p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1], quiescence_s=cur_quiescence_s,
+                                   click_times_l=trial_clicks['left_times'],
+                                   click_times_r=trial_clicks['right_times'])
             continue
 
         consecutive_aborts = 0
@@ -1026,7 +1028,9 @@ while True:
                                trial_type=trial_type, p_right_target=p_right_target, e_right=hu_e[0], e_left=hu_e[1],
                                response_time_s=response_time_s, click_diff=click_diff,
                                in_trial_threshold_deg=VAR_CUE_ABORT_THRESHOLD_DEG,
-                               quiescence_s=cur_quiescence_s)
+                               quiescence_s=cur_quiescence_s,
+                               click_times_l=trial_clicks['left_times'],
+                               click_times_r=trial_clicks['right_times'])
 
     except Exception as err:
         print("Trial {0} FAILED: {1}".format(trial, err), flush=True)

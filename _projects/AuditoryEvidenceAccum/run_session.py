@@ -849,6 +849,20 @@ def _val_str(trial, key, session_vals=None):
     return v
 
 
+def _click_times(v):
+    """ A CLICK_TIMES_L/R VAL ('0.0123,0.0456,...', '' for no clicks) as a list of floats. The
+    parser may already have turned a single-click value into a float. """
+    if isinstance(v, (int, float)):
+        return [float(v)]
+    out = []
+    for part in str(v).split(','):
+        try:
+            out.append(float(part))
+        except ValueError:
+            pass
+    return out
+
+
 # The pre-2026-11-11 repeat-after-error probability, only to replay old sessions' side target.
 _OLD_DEBIAS_REPEAT_PROB = 0.80
 
@@ -997,6 +1011,11 @@ class PlotFeeder(object):
             kwargs['quiescence_s'] = _val_float(trial, 'QUIESCENCE_SCALE_S')
             kwargs['e_right'] = _val_float(trial, 'E_RIGHT')   # Hu debiaser, fresh draws only
             kwargs['e_left'] = _val_float(trial, 'E_LEFT')
+            click_l = _val_str(trial, 'CLICK_TIMES_L')   # comma-joined seconds, '' for none
+            click_r = _val_str(trial, 'CLICK_TIMES_R')
+            if click_l is not None and click_r is not None:
+                kwargs['click_times_l'] = _click_times(click_l)
+                kwargs['click_times_r'] = _click_times(click_r)
 
             if trial_type in ('repeat', 'correction'):   # the side was fixed, not drawn
                 p_right_target = 1.0 if side == 'R' else 0.0
@@ -2289,6 +2308,12 @@ class SessionRunnerWindow(QWidget):
             widget = old.widget()
             if widget is not None:
                 widget.setParent(None)
+        fig = getattr(canvas, 'figure', None)
+        if fig is not None:
+            # The scroll area is widgetResizable, so without a minimum the canvas shrank to the
+            # window's height and squeezed every panel (the checklist rows ran into each other).
+            # Keep the figure's own height and scroll instead.
+            canvas.setMinimumHeight(int(fig.get_figheight() * fig.dpi))
         self.plots_container_layout.addWidget(canvas)
 
     # --- camera --------------------------------------------------------------------------------

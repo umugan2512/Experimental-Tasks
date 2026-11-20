@@ -62,8 +62,10 @@ question, not something that should change what a bench tester does mid-session)
 live "is training going well" signal like the panels that remain.
 """
 import time
+from collections import deque
 
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 
 import choice_regression   # Stage 3/4's click-weight criterion, refit live
 import stage3_scaffold     # Stage 3's qualifying thresholds and fade steps, for the checklist
@@ -152,6 +154,17 @@ _OUTCOME4_COLORS = {'correct': 'tab:green', 'incorrect': 'tab:red', 'no_response
 # that VAR_ is ever retuned, update this one too.
 _ENGAGEMENT_ABORT_LIMIT_DISPLAY = 20
 _ENGAGEMENT_NO_RESPONSE_LIMIT_DISPLAY = 10   # VAR_CONSECUTIVE_NO_RESPONSE_LIMIT, same caveat
+
+# Stage 3-5 click raster. The correct turn is AWAY from the click side on this rig: clicks on R
+# are rewarded by the negative rotary crossing, clicks on L by the positive one (REWARDED_EVENT in
+# stage3_tone_side_association.py, rewarded_event in stage4/stage5). Re-check it there if the
+# rig's wiring changes.
+CORRECT_TURN_SIGN = {'R': u'\u2212', 'L': '+'}
+CLICK_RASTER_ROWS = 15
+CLICK_RASTER_MAX_S = 2.0   # x range; Stage 3's tail can run to the response timeout
+_CLICK_RASTER_MARKS = {'correct': u'\u2713', 'incorrect': u'\u2717', 'abort': 'ab',
+                       'no_response': u'\u2013'}
+_CLICK_COLORS = {'L': 'tab:blue', 'R': 'tab:orange'}
 
 # Display-only reference for the Stage 1 gain-progress bar (see _redraw_progress()) -- matches
 # stage1_wheel_shaping.py's own VAR_GAIN_INITIAL_MULT (training_protocol.md's stated "~2x final").
@@ -252,6 +265,8 @@ class WheelShapingPlots(object):
         self._choice_trials = []
         self._click_fit = None
         self._click_z_series = []        # (trial, z) at each refit
+        # click raster: (trial, side, outcome4 key, trial type, left times, right times)
+        self._click_rows = deque(maxlen=CLICK_RASTER_ROWS)
         self._e_series = []              # (trial, e_right, e_left), Hu debiaser (Stage 3-5)
         self._consecutive_aborts = 0
         self._consecutive_no_responses = 0   # aborts in between neither count nor reset
@@ -303,9 +318,9 @@ class WheelShapingPlots(object):
                       ['percent_outcome', 'psychometric'],
                       ['accuracy', 'sidebias'],
                       ['reaction_time', 'reward_licks'],
-                      ['staircase_trajectory', 'staircase_trajectory'],
+                      ['staircase_trajectory', 'click_raster'],
                       ['lick_timeline', 'lick_timeline']]
-            height_ratios = [2.2, 1.5, 1.0, 1.1, 1.1, 0.9, 0.9]
+            height_ratios = [2.2, 1.5, 1.0, 1.1, 1.1, 1.4, 0.9]
         elif stage == 2:
             # Each label's cells must form one contiguous rectangle (subplot_mosaic's own
             # requirement).
@@ -377,6 +392,7 @@ class WheelShapingPlots(object):
             self._setup_percent_outcome_axes()
             self._setup_psychometric_axes()
             self._setup_reaction_time_axes()
+            self._setup_click_raster_axes()
         if stage in (2, 3, 4, 5):
             self._setup_staircase_trajectory_axes()
         self._redraw()
@@ -387,7 +403,8 @@ class WheelShapingPlots(object):
                    direction_ratio=None, lick_times_abs=None, reward_time_abs=None,
                    trial_type=None, in_trial_threshold_deg=None, p_right_target=None,
                    response_time_s=None, click_diff=None, stim_duration_s=None,
-                   quiescence_s=None, day_water_ul=None, e_right=None, e_left=None):
+                   quiescence_s=None, day_water_ul=None, e_right=None, e_left=None,
+                   click_times_l=None, click_times_r=None):
         """ Call once per trial. side='L'/'R' (whichever direction the movement was, even if
         below threshold -- use the larger-magnitude direction for a NoMovement trial); magnitude_deg
         is the signed peak displacement that trial; outcome is 'Rewarded'/'Withheld'/'NoMovement'
@@ -423,7 +440,9 @@ class WheelShapingPlots(object):
         panel from whichever of these four values apply to that stage). quiescence_s is also the
         Stage 2 quiescence scale. day_water_ul (Stage 1/2): water consumed today so far, for the
         progress panel. e_right/e_left (Stage 3-5): the Hu debiaser's error rates, for the
-        side-bias panel. """
+        side-bias panel. click_times_l/click_times_r (Stage 3-5, every trial, aborts included):
+        the trial's click times in seconds from cue onset (CLICK_TIMES_L/R), for the click raster.
+        """
         self._session_trial_count += 1
         self._trial_idx.append(self._session_trial_count)
         signed_mag = magnitude_deg if side == 'R' else -magnitude_deg
@@ -498,6 +517,9 @@ class WheelShapingPlots(object):
                             self._click_z_series.append((row, self._click_fit['z_click']))
             if e_right is not None and e_left is not None:
                 self._e_series.append((row, e_right, e_left))
+            if click_times_l is not None and click_times_r is not None:
+                self._click_rows.append((row, side, outcome4_key, ttype0,
+                                         list(click_times_l), list(click_times_r)))
 
             if p_right_target is not None:
                 self._sidebias_trial_idx.append(row)
@@ -719,10 +741,10 @@ class WheelShapingPlots(object):
         gap = (abs(sum(by_side['L']) / float(len(by_side['L'])) - sum(by_side['R']) / float(len(by_side['R'])))
                if by_side['L'] and by_side['R'] else None)
         if self._warmup_ended_at is None:
-            rows.append(('WARM-UP running: {0} trials (ends {1}-{2})'.format(
+            rows.append(('WARM-UP: {0} trials (ends {1}-{2})'.format(
                 gate.n_drawn, gate.n_min, gate.n_max), 'head'))
         else:
-            rows.append(('WARM-UP ended at trial {0} ({1})'.format(
+            rows.append(('WARM-UP done at #{0} ({1})'.format(
                 self._warmup_ended_at, 'cap' if gate.n_drawn >= gate.n_max else 'criterion'), 'head'))
         check('last {0} correct'.format(gate.accuracy_window), pct(recent_acc),
               '>= {0:.0%}'.format(gate.accuracy),
@@ -810,14 +832,17 @@ class WheelShapingPlots(object):
 
     def _fit_checklist_font(self):
         """ Largest monospace size (<= 8.5pt) at which each column's longest row fits its share of
-        the panel's width, so the two columns never run into each other in a narrow window. """
+        the panel's width, and the rows fit its height, so text never runs into the other column
+        or the next row in a narrow or short window. """
         ax = self._axes['progress']
-        panel_pts = ax.get_position().width * self._fig.get_figwidth() * 72.0
+        pos = ax.get_position()
+        panel_pts = pos.width * self._fig.get_figwidth() * 72.0
+        row_pts = pos.height * self._fig.get_figheight() * 72.0 / self._CHECKLIST_ROWS
         for (x0, x1), texts in zip(((0.0, 0.53), (0.53, 1.0)), self._checklist_texts):
             longest = max([len(t.get_text()) for t in texts] + [1])
             size = 0.97 * (x1 - x0) * panel_pts / (0.6 * longest)   # monospace: ~0.6 em per char
             for t in texts:
-                t.set_fontsize(min(self._CHECKLIST_MAX_FONT, size))
+                t.set_fontsize(min(self._CHECKLIST_MAX_FONT, size, 0.8 * row_pts))
 
     def _redraw_progress(self, ax):
         if self._stage in (3, 4, 5):
@@ -960,7 +985,6 @@ class WheelShapingPlots(object):
                        linewidth=0.8)
             ax.axhline(0, color='#cccccc', linewidth=0.6)
             ax.set_ylabel('z', fontsize=8)
-            ax.legend(fontsize=6, loc='best', framealpha=0.8)
         elif self._stage == 5:
             # Two incompatible units (degrees/seconds) -- a twin y-axis, not two lines sharing
             # one axis the way Stage 3/4's stim-duration/ITI (both seconds) can. Legend combines
@@ -1166,6 +1190,54 @@ class WheelShapingPlots(object):
         if self._trial_idx:
             ax.set_xlim(0, max(10, self._trial_idx[-1] + 1))
 
+    # --- click raster (Stage 3-5): the last CLICK_RASTER_ROWS trials' click trains, newest on top,
+    # each row labelled with the turn that was correct (rotary sign) and the outcome ---------------
+
+    def _setup_click_raster_axes(self):
+        ax = self._axes['click_raster']
+        self._click_coll = {}
+        for s, name in (('L', 'L clicks'), ('R', 'R clicks')):
+            self._click_coll[s] = LineCollection([], colors=_CLICK_COLORS[s], linewidths=1.0,
+                                                 label=name)
+            ax.add_collection(self._click_coll[s])
+        ax.axvspan(0, staircase.CUE_DURATION_S, color='#eeeeee', zorder=0)
+        ax.axvline(staircase.CUE_DURATION_S, color='gray', linestyle='--', linewidth=0.7)
+        ax.set_xlim(0, 1.0)
+        ax.set_ylim(-0.5, CLICK_RASTER_ROWS - 0.5)
+        ax.set_yticks([])
+        ax.set_xlabel('s from cue onset (shaded: {0:g}s cue)'.format(staircase.CUE_DURATION_S),
+                      fontsize=8)
+        ax.set_title(u'Clicks, last {0} trials (label: correct turn +/\u2212)'.format(
+            CLICK_RASTER_ROWS), fontsize=8, pad=12)
+        ax.tick_params(axis='x', labelsize=7)
+        _legend_above(ax, ncol=2)
+        _style_axes(ax)
+
+    def _redraw_click_raster(self, ax):
+        if not self._click_rows:
+            return
+        segs = {'L': [], 'R': []}
+        ticks, labels, colors = [], [], []
+        t_max = 0.0
+        for k, (row, side, out4, ttype, left, right) in enumerate(reversed(self._click_rows)):
+            y = CLICK_RASTER_ROWS - 1 - k
+            for s, times in (('L', left), ('R', right)):
+                segs[s].extend([[(t, y - 0.38), (t, y + 0.38)] for t in times])
+                if times:
+                    t_max = max(t_max, max(times))
+            ticks.append(y)
+            labels.append(u'{0} #{1} {2}{3}'.format(
+                CORRECT_TURN_SIGN.get(side, '?'), row, _CLICK_RASTER_MARKS.get(out4, '?'),
+                ' c' if ttype in ('correction', 'repeat') else ''))
+            colors.append(_OUTCOME4_COLORS.get(out4, 'black'))
+        for s in ('L', 'R'):
+            self._click_coll[s].set_segments(segs[s])
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(labels, fontsize=6)
+        for lbl, c in zip(ax.get_yticklabels(), colors):
+            lbl.set_color(c)
+        ax.set_xlim(0, min(CLICK_RASTER_MAX_S, max(1.0, t_max * 1.05)))
+
     # --- unified redraw ------------------------------------------------------------------------------
 
     def _redraw(self):
@@ -1183,6 +1255,7 @@ class WheelShapingPlots(object):
             self._redraw_percent_outcome(self._axes['percent_outcome'])
             self._redraw_psychometric(self._axes['psychometric'])
             self._redraw_reaction_time(self._axes['reaction_time'])
+            self._redraw_click_raster(self._axes['click_raster'])
         if self._stage in (2, 3, 4, 5):
             self._redraw_staircase_trajectory(self._axes['staircase_trajectory'])
         if self._embed:

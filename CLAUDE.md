@@ -776,6 +776,12 @@ wheel from Stage 1 onward (no wheel-only, dot-less phase anywhere in the curricu
   - **The Stage 3-5 progress panel is a checklist** (2026-11-16): each check the task makes (its
     `WarmupGate`, `session_qualifies`/`stage4_gates_met`/`stage5_gates_met`, the engagement stops),
     its value, target and ok/no. The bars it replaced were each value divided by its target.
+  - **Click raster (2026-11-20):** next to the now half-width click-weight z panel, the last 15
+    trials' `CLICK_TIMES_L/R` (0-2 s from cue onset, cue shaded), newest on top. Each row is
+    labelled with the CORRECT turn's rotary sign (`CORRECT_TURN_SIGN`: R clicks -> −, L -> +,
+    as the stage scripts' rewarded event) and its outcome. The dashboard canvas now keeps the
+    figure's full height and scrolls (`_embed_plots_canvas`); squeezed to the window height, the
+    checklist rows ran into each other.
   - **Stages 3-5 stop after 10 response timeouts with no choice between them** (2026-11-18,
     `VAR_CONSECUTIVE_NO_RESPONSE_LIMIT`, `SESSION_END_REASON=consecutive_no_responses`). Aborts
     in between neither count nor reset: UM001's first Stage 3 session mixed timeouts with
